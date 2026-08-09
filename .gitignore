@@ -1,0 +1,37 @@
+# ---- 密钥：绝不入库，云端一律走 GitHub Secrets ----
+config/notify.json
+config/models.json
+config/allowed_users.json
+config/owner_pass.txt
+
+# ---- 运行时生成的加密产物（由流水线在云端重建，不进 git） ----
+dist/data/
+dist/users.json
+
+# ---- 数据库：76MB，不进 git 历史；靠 Release asset 持久化 ----
+cache/*.db
+cache/*.db-journal
+cache/*.db-wal
+cache/*.db-shm
+cache/market.db.gz
+cache/state.tar.gz
+
+# ---- 每日生成物：由流水线重建 + Release 状态包续存，不需要版本化 ----
+dist/data.js
+dist/data.js.bak
+dist/push_log.jsonl
+dist/last_push_*.md
+archive/
+news.json
+
+# ---- 临时脚本与日志 ----
+_*.py
+*.log
+logs/
+tmp/node_modules/
+
+# ---- 系统 ----
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

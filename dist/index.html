@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="tech">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A股盘后复盘分析系统</title>
+<link rel="stylesheet" href="styles.css?v=20260809b">
+</head>
+<body>
+
+<header class="top">
+  <div class="top-in">
+    <div class="brand">
+      <h1>A股盘后复盘分析系统</h1>
+      <span class="sub">涨停归因 · 断板测算 · 情绪周期 · 妖股甄别</span>
+    </div>
+    <div class="dateline" id="dateline"></div>
+    <button class="theme-btn" id="themeBtn" type="button">◐ 切换主题</button>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button data-v="overview" class="on">市场概览</button>
+    <button data-v="ladder">涨停梯队</button>
+    <button data-v="sectors">板块热力</button>
+    <button data-v="risk">断板风险</button>
+    <button data-v="demon">妖股基因</button>
+    <button data-v="auction">竞价判断</button>
+    <button data-v="rec">当日推荐</button>
+  </nav>
+</header>
+
+<div class="wrap">
+  <div class="disclaim">
+    本页所有结论均由公开行情数据经统计模型自动生成，用于<b>盘后复盘与研究</b>，不构成任何投资建议。
+    概率为历史频率外推，非未来保证；市场有风险，决策请独立判断。
+  </div>
+
+  <section class="view on" id="v-overview"></section>
+  <section class="view" id="v-ladder"></section>
+  <section class="view" id="v-sectors"></section>
+  <section class="view" id="v-risk"></section>
+  <section class="view" id="v-demon"></section>
+  <section class="view" id="v-auction"></section>
+  <section class="view" id="v-rec"></section>
+
+  <footer id="foot"></footer>
+</div>
+
+<!-- 开发模式：本地双击打开时 data.js 为明文，会被加载；部署版无 data.js，则由下方登录解密 -->
+<script>
+  document.write('<scr' + 'ipt src="data.js?t=' + Math.floor(Date.now() / 60000) + '"><\/scr' + 'ipt>');
+</script>
+<!-- 登录门禁：解密后再按需加载 charts.js / app.js（顺序由 auth.js 控制） -->
+<script src="auth.js?v=20260809c"></script>
+</body>
+</html>

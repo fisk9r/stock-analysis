@@ -1,0 +1,13 @@
+{
+  "_说明": "复制本文件为 notify.json，至少填写一种通道即可。未配置任何通道时，推送仅落地为 dist/last_push_*.md 文件痕迹。微信为首选。",
+  "_微信推送（任选一种，免费）": {
+    "企业微信群机器人(wecom)": "在企微群『添加群机器人』拿到 webhook 完整 URL，粘到 wecom.webhook。消息直接出现在微信里，最推荐。",
+    "ServerChan(serverchan)": "https://sct.ftqq.com 用微信扫码登录拿 SendKey，填到 wechat_serverchan.sendkey。",
+    "PushPlus(pushplus)": "https://www.pushplus.plus 注册拿 token，填到 wechat_pushplus.token。"
+  },
+  "wechat_serverchan": {"sendkey": "SCTxxxxxxxxxxxxxxxx"},
+  "wechat_pushplus":   {"token": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"},
+  "wecom":             {"webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"},
+  "telegram":          {"bot_token": "123456789:AAExxxxxxx", "chat_id": "-1001234567890"},
+  "email":             {"smtp_host":"smtp.qq.com","smtp_port":465,"user":"you@qq.com","pass":"邮箱授权码(非密码)","to":"you@qq.com"}
+}

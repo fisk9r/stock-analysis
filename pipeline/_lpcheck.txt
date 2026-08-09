@@ -1,0 +1,15 @@
+﻿TITLE: A股盘后复盘 2026-08-07
+python.exe : Traceback (most recent call last):
+所在位置 行:440 字符: 1
++ & "C:\Users\Basshunter-j\.workbuddy\binaries\python\versions\3.13.12\ ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last) 
+   ::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "<string>", line 7, in <module>
+    print('TEXT_HEAD:', (lp.get('text') or '')[:160])
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'gbk' codec can't encode character '\U0001f4ca' in position
+ 3: illegal multibyte sequence
+TEXT_HEAD: 

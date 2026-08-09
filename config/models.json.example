@@ -1,0 +1,18 @@
+{
+  "_说明": "复制本文件为 models.json。全部字段可选；不填则仅由宿主 Hy3 引擎驱动（基于真实数字撰写复盘）。填入 api_key 后，对应模型会并行参与『次日方向 + 关键标的 + 风险』判断，并与其他模型形成共识。三者均为 OpenAI 兼容接口。",
+  "deepseek": {
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "sk-xxxxxxxxxxxxxxxx",
+    "model": "deepseek-chat"
+  },
+  "kimi": {
+    "base_url": "https://api.moonshot.cn/v1",
+    "api_key": "sk-xxxxxxxxxxxxxxxx",
+    "model": "moonshot-v1-8k"
+  },
+  "qwen": {
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "api_key": "sk-xxxxxxxxxxxxxxxx",
+    "model": "qwen-max"
+  }
+}

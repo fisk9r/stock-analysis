@@ -1,0 +1,1363 @@
+# -*- coding: utf-8 -*-
+"""分析引擎：涨停基因库 / 板块热力 / 断板概率 / 情绪周期 / 妖股形态 / 当日推荐"""
+import math
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import store
+
+# ============================================================== 基础规则
+def limit_pct(code, name):
+    """涨跌停幅度(%)"""
+    n = (name or "").upper().replace(" ", "")
+    is_st = ("ST" in n)
+    if code.startswith("688") or code.startswith("30"):
+        return 20.0
+    if code.startswith(("8", "4")) or code.startswith("920"):
+        return 30.0
+    return 5.0 if is_st else 10.0
+
+
+def is_limit_up(bar, lim):
+    return bar["c"] >= bar["h"] - 1e-6 and bar["pct"] >= lim - 0.6
+
+
+def is_limit_down(bar, lim):
+    return bar["c"] <= bar["l"] + 1e-6 and bar["pct"] <= -(lim - 0.6)
+
+
+def is_yiziban(bar, lim):
+    return (abs(bar["o"] - bar["c"]) < 1e-6 and abs(bar["h"] - bar["l"]) < 1e-6
+            and bar["pct"] >= lim - 0.6)
+
+
+def clamp(v, lo=0.0, hi=1.0):
+    return max(lo, min(hi, v))
+
+
+def parse_hms(s):
+    """把 '093001' / 93006 / '09:30:01' 等解析为『距 09:30 的分钟数』；失败返回 None。
+    用于稳健读取涨停池的 fbt 首封时间（接口偶发返回带冒号字符串）。"""
+    if s is None:
+        return None
+    try:
+        digits = ''.join(ch for ch in str(s) if ch.isdigit())
+    except Exception:
+        return None
+    if len(digits) < 3:
+        return None
+    if len(digits) > 6:
+        digits = digits[-6:]
+    digits = digits.zfill(6)
+    try:
+        hh, mm = int(digits[:2]), int(digits[2:4])
+    except ValueError:
+        return None
+    if hh > 23 or mm > 59:
+        return None
+    return hh * 60 + mm - 570
+
+
+def lerp_score(v, lo, mid, hi):
+    """把 v 线性映射到 0-100，lo->0 mid->50 hi->100"""
+    if v is None:
+        return 50.0
+    if v <= lo:
+        return 0.0
+    if v >= hi:
+        return 100.0
+    if v <= mid:
+        return (v - lo) / max(1e-9, mid - lo) * 50.0
+    return 50.0 + (v - mid) / max(1e-9, hi - mid) * 50.0
+
+
+def mean(xs):
+    xs = [x for x in xs if x is not None]
+    return sum(xs) / len(xs) if xs else 0.0
+
+
+def pearson(a, b):
+    n = min(len(a), len(b))
+    if n < 5:
+        return 0.0
+    a, b = a[-n:], b[-n:]
+    ma, mb = sum(a) / n, sum(b) / n
+    va = sum((x - ma) ** 2 for x in a)
+    vb = sum((x - mb) ** 2 for x in b)
+    if va <= 1e-12 or vb <= 1e-12:
+        return 0.0
+    cov = sum((a[i] - ma) * (b[i] - mb) for i in range(n))
+    return cov / math.sqrt(va * vb)
+
+
+def resample(seq, n):
+    """把任意长度序列线性重采样为 n 点"""
+    if not seq:
+        return [0.0] * n
+    if len(seq) == n:
+        return list(seq)
+    out = []
+    for i in range(n):
+        pos = i * (len(seq) - 1) / max(1, n - 1)
+        lo = int(math.floor(pos))
+        hi = min(len(seq) - 1, lo + 1)
+        w = pos - lo
+        out.append(seq[lo] * (1 - w) + seq[hi] * w)
+    return out
+
+
+# ============================================================== 1. 涨停基因库
+class Universe(object):
+    """从本地日K库重建全市场涨停/连板历史"""
+
+    def __init__(self, con, days=130):
+        self.con = con
+        self.stocks = {}
+        for code, market, name, tmv, fmv in con.execute(
+                "SELECT code,market,name,total_mv,float_mv FROM stocks"):
+            self.stocks[code] = {"code": code, "market": market, "name": name,
+                                 "total_mv": tmv, "float_mv": fmv}
+        self.dates = store.trade_dates(con, days)
+        since = self.dates[0] if self.dates else None
+        self.bars = store.load_bars(con, since=since)
+        # 按日索引：date -> [(code, bar)]，供 market_breadth / 情绪序列 O(当日股票数) 查询
+        self.by_date = {}
+        for code, bs in self.bars.items():
+            for b in bs:
+                self.by_date.setdefault(b["d"], []).append((code, b))
+        self.lim = {c: limit_pct(c, s["name"]) for c, s in self.stocks.items()}
+        self.di = {d: i for i, d in enumerate(self.dates)}
+        self._build()
+
+    def _build(self):
+        self.zt = {d: set() for d in self.dates}      # 当日涨停
+        self.dt = {d: set() for d in self.dates}      # 当日跌停
+        self.streak = {}                              # code -> {date: 连板数}
+        self.flags = {}                               # code -> {date: {'yizi':bool}}
+        for code, bs in self.bars.items():
+            lim = self.lim.get(code)
+            if lim is None:
+                continue
+            st, sd, fl = 0, {}, {}
+            for b in bs:
+                d = b["d"]
+                if d not in self.di:
+                    continue
+                if is_limit_up(b, lim):
+                    st += 1
+                    self.zt[d].add(code)
+                    fl[d] = {"yizi": is_yiziban(b, lim)}
+                else:
+                    st = 0
+                    if is_limit_down(b, lim):
+                        self.dt[d].add(code)
+                sd[d] = st
+            self.streak[code] = sd
+            self.flags[code] = fl
+
+    def bar(self, code, date):
+        for b in self.bars.get(code, []):
+            if b["d"] == date:
+                return b
+        return None
+
+    def bars_upto(self, code, date, n=60):
+        bs = [b for b in self.bars.get(code, []) if b["d"] <= date]
+        return bs[-n:]
+
+    def next_date(self, date):
+        i = self.di.get(date)
+        if i is None or i + 1 >= len(self.dates):
+            return None
+        return self.dates[i + 1]
+
+    def prev_date(self, date, k=1):
+        i = self.di.get(date)
+        if i is None or i - k < 0:
+            return None
+        return self.dates[i - k]
+
+
+# ============================================================== 2. 连板晋级率统计
+def streak_statistics(u, lookback=120):
+    """真实历史统计：n 连板 -> 次日晋级率 / 次日开盘溢价 / 次日收盘涨幅"""
+    dates = u.dates[-lookback:]
+    acc = {}
+    for d in dates[:-1]:
+        nd = u.next_date(d)
+        if nd is None:
+            continue
+        for code in u.zt[d]:
+            n = u.streak[code].get(d, 0)
+            if n < 1 or n > 12:
+                continue
+            nb = u.bar(code, nd)
+            pb = u.bar(code, d)
+            if not nb or not pb or not pb["c"]:
+                continue
+            a = acc.setdefault(n, {"total": 0, "promote": 0, "opens": [], "closes": [],
+                                   "highs": [], "green": 0, "limitdown": 0})
+            a["total"] += 1
+            if code in u.zt[nd]:
+                a["promote"] += 1
+            a["opens"].append((nb["o"] - pb["c"]) / pb["c"] * 100.0)
+            a["closes"].append(nb["pct"])
+            a["highs"].append((nb["h"] - pb["c"]) / pb["c"] * 100.0)
+            if nb["pct"] < 0:
+                a["green"] += 1
+            if code in u.dt[nd]:
+                a["limitdown"] += 1
+    out = {}
+    for n, a in sorted(acc.items()):
+        if a["total"] < 5:
+            continue
+        out[n] = {
+            "samples": a["total"],
+            "promote_rate": round(a["promote"] / a["total"] * 100, 2),
+            "avg_open": round(mean(a["opens"]), 2),
+            "avg_close": round(mean(a["closes"]), 2),
+            "avg_high": round(mean(a["highs"]), 2),
+            "green_rate": round(a["green"] / a["total"] * 100, 2),
+            "limitdown_rate": round(a["limitdown"] / a["total"] * 100, 2),
+        }
+    return out
+
+
+# ============================================================== 3. 当日涨停画像
+def build_limit_ups(u, date, snap, code2boards, snap_is_same_day):
+    """合并 K 线重建结果 + 当日涨停池 API 的封板细节"""
+    ztapi = {}
+    if snap_is_same_day:
+        for r in snap.get("zt") or []:
+            ztapi[str(r.get("c"))] = r
+    rows = []
+    pd = u.prev_date(date)
+    for code in sorted(u.zt.get(date, [])):
+        s = u.stocks.get(code)
+        if not s:
+            continue
+        b = u.bar(code, date)
+        if not b:
+            continue
+        api_r = ztapi.get(code) or {}
+        streak = u.streak[code].get(date, 1)
+        bs = u.bars_upto(code, date, 60)
+        vol20 = mean([x["v"] for x in bs[-21:-1]]) if len(bs) > 5 else b["v"]
+        # 近 60 日涨停次数 / 历史最高连板
+        zt60 = sum(1 for x in bs if code in u.zt.get(x["d"], ()))
+        hist_max = 0
+        for x in bs:
+            hist_max = max(hist_max, u.streak[code].get(x["d"], 0))
+        # 区间涨幅
+        gain20 = ((b["c"] / bs[-21]["c"] - 1) * 100) if len(bs) >= 21 else None
+        gain60 = ((b["c"] / bs[0]["c"] - 1) * 100) if len(bs) >= 40 else None
+        boards = code2boards.get(code) or []
+        ind = next((n for _, n, k in boards if k == "industry"), api_r.get("hybk") or "其他")
+        cons = [n for _, n, k in boards if k == "concept"]
+        seal_time = api_r.get("fbt")
+        pc = (b["c"] - b["chg"]) if (b["c"] - b["chg"]) > 0 else b["c"]
+        rows.append({
+            "code": code, "name": s["name"], "streak": streak,
+            "close": b["c"], "pct": round(b["pct"], 2), "turn": round(b["turn"] or 0, 2),
+            "amount": b["amt"], "vol_ratio": round((b["v"] / vol20) if vol20 else 1, 2),
+            "float_mv": s.get("float_mv"), "total_mv": s.get("total_mv"),
+            "yizi": bool((u.flags.get(code, {}).get(date) or {}).get("yizi")),
+            "seal_time": seal_time, "seal_fund": api_r.get("fund"),
+            "zb_count": api_r.get("zbc"), "industry": ind, "concepts": cons[:6],
+            "zt60": zt60, "hist_max_streak": hist_max,
+            "gain20": round(gain20, 1) if gain20 is not None else None,
+            "gain60": round(gain60, 1) if gain60 is not None else None,
+            "open_pct": (round((b["o"] / pc - 1) * 100, 2) if pc and pc > 0 else None),
+            "amp": round(b["amp"] or 0, 2),
+            "prev_date": pd,
+        })
+    for r in rows:
+        r["quality"] = seal_quality(r)
+    rows.sort(key=lambda x: (-x["streak"], -x["quality"]))
+    return rows
+
+
+def seal_quality(r):
+    """封板质量分 0-100：一字/早封/无炸板/大封单/合理换手 = 强"""
+    parts = []
+    # 首封时间：越早越强（HHMMSS 整数）
+    st = r.get("seal_time")
+    mins = parse_hms(st)
+    if mins is not None:
+        parts.append(("封板时间", lerp_score(-mins, -240, -60, 0), 0.22))
+    else:
+        parts.append(("形态强度", 92.0 if r["yizi"] else 62.0, 0.22))
+    # 炸板次数
+    zb = r.get("zb_count")
+    if zb is not None:
+        parts.append(("封板稳定", 100.0 if zb == 0 else max(0.0, 100 - zb * 32.0), 0.18))
+    else:
+        parts.append(("封板稳定", 88.0 if r["yizi"] else 66.0, 0.18))
+    # 封单强度
+    fund, fmv = r.get("seal_fund"), r.get("float_mv")
+    if fund and fmv:
+        parts.append(("封单强度", lerp_score(fund / fmv * 100, 0.2, 2.0, 8.0), 0.20))
+    else:
+        parts.append(("量能强度", lerp_score(r.get("vol_ratio") or 1, 0.4, 1.6, 4.0), 0.20))
+    # 换手：一字板低换手极强；普通板 5-20% 健康，过高分歧
+    t = r.get("turn") or 0
+    if r["yizi"]:
+        tscore = lerp_score(-t, -12, -3, 0)
+    else:
+        tscore = 100 - abs(t - 13) * 3.6
+    parts.append(("换手健康", clamp(tscore, 0, 100), 0.18))
+    # 市值：小市值更容易走妖
+    fmv_yi = (fmv or 0) / 1e8
+    parts.append(("市值弹性", lerp_score(-fmv_yi, -300, -80, -15), 0.12))
+    # 连板高度本身
+    parts.append(("连板高度", lerp_score(r["streak"], 0, 3, 7), 0.10))
+    r["quality_parts"] = [{"k": k, "v": round(v, 1)} for k, v, _ in parts]
+    return round(sum(v * w for _, v, w in parts), 1)
+
+
+# ============================================================== 4. 板块热力
+def sector_heat(limit_ups, snap, u, date):
+    ind_pct = {b["name"]: b for b in (snap.get("board_industry") or [])}
+    con_pct = {b["name"]: b for b in (snap.get("board_concept") or [])}
+    # --- 行业维度
+    agg = {}
+    for r in limit_ups:
+        a = agg.setdefault(r["industry"], {"name": r["industry"], "kind": "industry",
+                                           "stocks": [], "zt": 0, "lb": 0, "max_lb": 0})
+        a["stocks"].append(r)
+        a["zt"] += 1
+        if r["streak"] >= 2:
+            a["lb"] += 1
+        a["max_lb"] = max(a["max_lb"], r["streak"])
+    # --- 概念维度
+    cagg = {}
+    for r in limit_ups:
+        for c in r["concepts"]:
+            if any(k in c for k in ("昨日", "连板", "涨停", "融资融券", "深股通", "沪股通",
+                                    "标准普尔", "富时", "MSCI", "转融券", "机构重仓",
+                                    "基金重仓", "预盈预增", "创业板综", "深成500", "中证",
+                                    "上证", "破净股", "参股", "股权激励", "高送转")):
+                continue
+            a = cagg.setdefault(c, {"name": c, "kind": "concept", "stocks": [],
+                                    "zt": 0, "lb": 0, "max_lb": 0})
+            a["stocks"].append(r)
+            a["zt"] += 1
+            if r["streak"] >= 2:
+                a["lb"] += 1
+            a["max_lb"] = max(a["max_lb"], r["streak"])
+
+    def finish(a, ref):
+        m = ref.get(a["name"]) or {}
+        a["pct"] = m.get("pct")
+        a["main_net"] = m.get("main_net")
+        a["lead"] = m.get("lead")
+        a["stocks"] = sorted(a["stocks"], key=lambda x: (-x["streak"], -x["quality"]))
+        a["top"] = [{"code": s["code"], "name": s["name"], "streak": s["streak"],
+                     "quality": s["quality"]} for s in a["stocks"][:8]]
+        # 强度分：涨停家数 + 连板家数 + 高度 + 板块涨幅 + 资金
+        s1 = lerp_score(a["zt"], 0, 4, 12)
+        s2 = lerp_score(a["lb"], 0, 2, 6)
+        s3 = lerp_score(a["max_lb"], 1, 3, 6)
+        s4 = lerp_score(a["pct"] if a["pct"] is not None else 0, -1, 2, 6)
+        s5 = lerp_score((a["main_net"] or 0) / 1e8, -8, 2, 20)
+        a["strength"] = round(s1 * .30 + s2 * .22 + s3 * .20 + s4 * .16 + s5 * .12, 1)
+        a["avg_quality"] = round(mean([s["quality"] for s in a["stocks"]]), 1)
+        del a["stocks"]
+        return a
+
+    inds = sorted([finish(a, ind_pct) for a in agg.values()],
+                  key=lambda x: -x["strength"])
+    cons = sorted([finish(a, con_pct) for a in cagg.values() if a["zt"] >= 2],
+                  key=lambda x: -x["strength"])
+    for lst in (inds, cons):
+        for a in lst:
+            if a["zt"] >= 5 and a["max_lb"] >= 2:
+                a["tier"] = "主线"
+            elif a["zt"] >= 3 or (a["zt"] >= 2 and a["max_lb"] >= 3):
+                a["tier"] = "支线"
+            else:
+                a["tier"] = "零星"
+    return inds, cons[:24]
+
+
+# ============================================================== 5. 市场情绪 & 周期
+def market_breadth(u, date):
+    up = dn = flat = 0
+    amt = 0.0
+    for _code, b in u.by_date.get(date, []):
+        amt += b["amt"] or 0
+        if b["pct"] > 0.01:
+            up += 1
+        elif b["pct"] < -0.01:
+            dn += 1
+        else:
+            flat += 1
+    return {"up": up, "down": dn, "flat": flat, "amount": amt}
+
+
+def daily_emotion(u, date):
+    """单日情绪快照（可用于历史序列）"""
+    pd = u.prev_date(date)
+    zt = u.zt.get(date, set())
+    dt = u.dt.get(date, set())
+    prev_zt = u.zt.get(pd, set()) if pd else set()
+    # 昨日涨停今日表现
+    perf, green, again = [], 0, 0
+    for code in prev_zt:
+        b = u.bar(code, date)
+        if not b:
+            continue
+        perf.append(b["pct"])
+        if b["pct"] < 0:
+            green += 1
+        if code in zt:
+            again += 1
+    lb = [c for c in zt if u.streak[c].get(date, 0) >= 2]
+    maxlb = max([u.streak[c].get(date, 0) for c in zt], default=0)
+    br = market_breadth(u, date)
+    return {
+        "date": date, "zt": len(zt), "dt": len(dt), "lb": len(lb), "max_lb": maxlb,
+        "promote_rate": round(again / len(prev_zt) * 100, 1) if prev_zt else None,
+        "yest_perf": round(mean(perf), 2) if perf else None,
+        "yest_green": round(green / len(perf) * 100, 1) if perf else None,
+        "up": br["up"], "down": br["down"], "amount": br["amount"],
+    }
+
+
+def emotion_series(u, n=30):
+    ds = u.dates[-n:]
+    return [daily_emotion(u, d) for d in ds]
+
+
+def sentiment_score(u, date, series, snap, snap_is_same_day):
+    e = next((x for x in series if x["date"] == date), None) or daily_emotion(u, date)
+    zb_cnt = len(snap.get("zb") or []) if snap_is_same_day else None
+    seal_rate = None
+    if zb_cnt is not None and (e["zt"] + zb_cnt) > 0:
+        seal_rate = e["zt"] / (e["zt"] + zb_cnt) * 100
+    # 成交额环比
+    idx = [i for i, x in enumerate(series) if x["date"] == date]
+    amt_chg = None
+    if idx and idx[0] > 0:
+        p = series[idx[0] - 1]["amount"]
+        if p:
+            amt_chg = (e["amount"] - p) / p * 100
+    comp = [
+        {"k": "赚钱效应", "desc": "昨日涨停股今日平均涨幅",
+         "raw": e["yest_perf"], "unit": "%",
+         "score": lerp_score(e["yest_perf"], -6, 0, 6), "w": 0.24},
+        {"k": "连板晋级率", "desc": "昨日涨停今日再涨停占比",
+         "raw": e["promote_rate"], "unit": "%",
+         "score": lerp_score(e["promote_rate"], 4, 14, 30), "w": 0.18},
+        {"k": "涨停总量", "desc": "全市场涨停家数",
+         "raw": e["zt"], "unit": "家",
+         "score": lerp_score(e["zt"], 15, 55, 120), "w": 0.14},
+        {"k": "空间高度", "desc": "最高连板板数",
+         "raw": e["max_lb"], "unit": "板",
+         "score": lerp_score(e["max_lb"], 2, 4, 8), "w": 0.12},
+        {"k": "涨跌家数比", "desc": "上涨家数占比",
+         "raw": round(e["up"] / max(1, e["up"] + e["down"]) * 100, 1), "unit": "%",
+         "score": lerp_score(e["up"] / max(1, e["up"] + e["down"]) * 100, 22, 50, 78), "w": 0.12},
+        {"k": "亏钱效应", "desc": "跌停家数（越少越好）",
+         "raw": e["dt"], "unit": "家",
+         "score": lerp_score(-e["dt"], -30, -8, 0), "w": 0.08},
+        {"k": "量能变化", "desc": "两市成交额环比",
+         "raw": round(amt_chg, 1) if amt_chg is not None else None, "unit": "%",
+         "score": lerp_score(amt_chg, -18, 0, 18), "w": 0.12},
+    ]
+    if seal_rate is not None:
+        comp.append({"k": "封板率", "desc": "涨停/(涨停+炸板)", "raw": round(seal_rate, 1),
+                     "unit": "%", "score": lerp_score(seal_rate, 45, 72, 92), "w": 0.10})
+    tw = sum(c["w"] for c in comp)
+    score = sum(c["score"] * c["w"] for c in comp) / tw
+    for c in comp:
+        c["score"] = round(c["score"], 1)
+        c["w"] = round(c["w"] / tw, 3)
+    if score >= 76:
+        lv, label = "亢奋", "情绪高潮，赚钱效应强但需防高位闪崩"
+    elif score >= 60:
+        lv, label = "偏热", "主线清晰，可积极参与"
+    elif score >= 45:
+        lv, label = "均衡", "结构性行情，精选个股"
+    elif score >= 30:
+        lv, label = "偏冷", "分歧加大，降低仓位与预期"
+    else:
+        lv, label = "冰点", "退潮末期，等待情绪修复信号"
+    return {"score": round(score, 1), "level": lv, "label": label, "components": comp,
+            "seal_rate": round(seal_rate, 1) if seal_rate is not None else None,
+            "amt_chg": round(amt_chg, 1) if amt_chg is not None else None}
+
+
+def cycle_phase(series):
+    """情绪周期定位：冰点 / 启动 / 发酵 / 高潮 / 退潮"""
+    if len(series) < 6:
+        return {"phase": "数据不足", "desc": "", "evidence": []}
+    s = series[-6:]
+    zt = [x["zt"] for x in s]
+    perf = [x["yest_perf"] for x in s if x["yest_perf"] is not None]
+    prom = [x["promote_rate"] for x in s if x["promote_rate"] is not None]
+    hi = [x["max_lb"] for x in s]
+    ev = []
+    zt_tr = zt[-1] - mean(zt[:-1])
+    perf_tr = (perf[-1] - mean(perf[:-1])) if len(perf) >= 3 else 0
+    prom_now = prom[-1] if prom else 0
+    prom_tr = (prom[-1] - mean(prom[:-1])) if len(prom) >= 3 else 0
+    hi_now, hi_prev = hi[-1], max(hi[:-1])
+    ev.append("涨停家数 %d（近5日均值 %.0f，%s%.0f）" % (
+        zt[-1], mean(zt[:-1]), "+" if zt_tr >= 0 else "", zt_tr))
+    if perf:
+        ev.append("昨涨停今日平均 %.2f%%（趋势 %s%.2f）" % (perf[-1], "+" if perf_tr >= 0 else "", perf_tr))
+    if prom:
+        ev.append("晋级率 %.1f%%（趋势 %s%.1f）" % (prom_now, "+" if prom_tr >= 0 else "", prom_tr))
+    ev.append("空间高度 %d 板（前期最高 %d 板）" % (hi_now, hi_prev))
+
+    lastperf = perf[-1] if perf else 0
+    if lastperf < -1.5 and prom_now < 10 and zt[-1] < mean(zt[:-1]):
+        ph, desc = "退潮期", "赚钱效应转负、晋级率坍塌，高位股批量断板，宜空仓或只做低位first board"
+    elif zt[-1] <= 20 and lastperf < 0 and hi_now <= 3:
+        ph, desc = "冰点期", "情绪极度低迷，往往是下一轮反弹的孕育期，关注低位首板与超跌反包"
+    elif hi_now >= 5 and lastperf > 1 and prom_now >= 15:
+        ph, desc = "高潮期", "高度板与赚钱效应共振，可参与但需快进快出，警惕见顶回落"
+    elif zt_tr > 0 and perf_tr > 0 and lastperf > 0:
+        ph, desc = "发酵期", "涨停扩容且赚钱效应改善，主线正在形成，是介入的较优阶段"
+    elif zt_tr > 0 and lastperf >= -1:
+        ph, desc = "启动期", "情绪自低位回暖，可小仓位试错低位板"
+    else:
+        ph, desc = "震荡分歧期", "多空拉锯，缺乏持续主线，控制仓位做短打"
+    return {"phase": ph, "desc": desc, "evidence": ev}
+
+
+# ============================================================== 6. 断板概率模型
+def logit(p):
+    p = clamp(p, 0.02, 0.98)
+    return math.log(p / (1 - p))
+
+
+def sigmoid(x):
+    return 1 / (1 + math.exp(-max(-20, min(20, x))))
+
+
+def break_risk(limit_ups, stats, sent, sectors_by_name, u, date, auction_map=None):
+    out = []
+    base_default = {1: 22, 2: 20, 3: 18, 4: 16, 5: 14, 6: 12, 7: 10}
+    env = (sent["score"] - 50) / 50.0     # -1 ~ 1
+    for r in limit_ups:
+        n = r["streak"]
+        st = stats.get(n)
+        p0 = (st["promote_rate"] if st else base_default.get(n, 12)) / 100.0
+        z, facs = 0.0, []
+
+        def add(name, val, impact, note):
+            nonlocal z
+            z += impact
+            facs.append({"k": name, "v": val, "impact": round(impact, 3), "note": note})
+
+        # 封板时间
+        stime = r.get("seal_time")
+        mins = parse_hms(stime)
+        if mins is not None:
+            hh, mm = (570 + mins) // 60, (570 + mins) % 60
+            imp = 0.55 if mins <= 5 else (0.28 if mins <= 35 else (-0.12 if mins <= 150 else -0.55))
+            add("首封时间", "%02d:%02d" % (hh, mm), imp,
+                "开盘即封，资金一致性极强" if mins <= 5 else ("早盘封板，承接良好" if mins <= 35 else
+                ("午后封板，力度一般" if mins <= 150 else "尾盘偷袭板，次日不确定性大")))
+        elif r["yizi"]:
+            add("封板形态", "一字板", 0.62, "一字无量封板，惜售明显")
+        # 炸板次数
+        zb = r.get("zb_count")
+        if zb is not None:
+            imp = 0.12 if zb == 0 else -0.30 * zb
+            add("炸板次数", "%d 次" % zb, imp, "全天未开板" if zb == 0 else "盘中开板 %d 次，分歧明显" % zb)
+        # 封单强度
+        if r.get("seal_fund") and r.get("float_mv"):
+            ratio = r["seal_fund"] / r["float_mv"] * 100
+            imp = clamp((ratio - 1.2) * 0.22, -0.45, 0.65)
+            add("封单/流通市值", "%.2f%%" % ratio, imp,
+                "封单厚实" if ratio >= 2 else ("封单偏薄，易被砸开" if ratio < 0.8 else "封单一般"))
+        # 换手
+        t = r.get("turn") or 0
+        if r["yizi"]:
+            imp = 0.35 if t < 3 else 0.1
+            add("换手率", "%.1f%%" % t, imp, "一字低换手，锁仓好")
+        elif t > 32:
+            imp = -0.42
+            add("换手率", "%.1f%%" % t, imp, "换手过高，获利盘出逃压力大")
+        elif t < 3 and n >= 2:
+            add("换手率", "%.1f%%" % t, 0.22, "缩量封板，抛压小")
+        else:
+            add("换手率", "%.1f%%" % t, clamp((14 - abs(t - 14)) / 14 * 0.2, -0.2, 0.2), "换手处于健康区间")
+        # 板块温度
+        sec = sectors_by_name.get(r["industry"])
+        if sec:
+            imp = clamp((sec["strength"] - 45) / 100.0 * 0.9, -0.42, 0.55)
+            add("板块强度", "%s %.0f分" % (sec["name"], sec["strength"]), imp,
+                "所属板块是当日主线" if sec["tier"] == "主线" else
+                ("板块有一定合力" if sec["tier"] == "支线" else "板块无合力，孤军奋战"))
+        # 龙头溢价
+        if sec and sec["max_lb"] == n and n >= 2:
+            add("板块地位", "板块最高标", 0.30, "板块内空间最高，接力资金优先")
+        # 涨幅透支
+        g20 = r.get("gain20")
+        if g20 is not None:
+            imp = clamp(-(g20 - 55) / 100.0 * 0.8, -0.6, 0.18)
+            add("20日涨幅", "%.0f%%" % g20, imp,
+                "短期涨幅过大，兑现压力重" if g20 > 70 else "涨幅可控")
+        # 市场环境
+        add("市场情绪", "%s %.0f分" % (sent["level"], sent["score"]), env * 0.65,
+            sent["label"])
+        # 高度衰减（3-5 板后加速衰减）
+        if n >= 3:
+            imp = -0.16 * (n - 2)
+            add("高度衰减", "%d 连板" % n, imp, "连板越高，资金接力难度指数级上升")
+        # 竞价定调（离线重建的集合竞价强弱）
+        aq = (auction_map or {}).get(r["code"])
+        if aq:
+            sc = aq.get("auction_score") or 50
+            imp = clamp((sc - 50) / 50.0 * 0.5, -0.42, 0.5)
+            add("竞价强度", "%.0f 分" % sc, imp,
+                "竞价定调偏强，次日有承接" if sc >= 60 else ("竞价偏弱/分歧，次日易承压" if sc < 45 else "竞价中性"))
+            if aq.get("pattern") == "强转弱":
+                add("竞价形态", "强转弱", -0.30, "大幅高开却炸板/高换手，典型诱多分歧")
+            # 竞价量能异动（离线估算）
+            va = aq.get("vol_anomaly")
+            if va:
+                if va.get("warn"):
+                    add("竞价量能", "放量派发⚠", -0.45, "竞价爆量且高开低走/炸板，疑似对倒派发，次日风险陡增")
+                elif va.get("flag") == "放量异动":
+                    add("竞价量能", "抢筹放量", 0.18, "竞价爆量+高开高走，资金主动进攻")
+                elif va.get("flag") == "一字锁仓":
+                    add("竞价量能", "一字锁仓", 0.30, "一字无量，惜售锁仓，筹码稳定")
+
+        p = sigmoid(logit(p0) + z)
+        pb = 1 - p
+        if pb >= 0.90:
+            lvl, cls = "极高", "danger"
+        elif pb >= 0.80:
+            lvl, cls = "高", "warn"
+        elif pb >= 0.66:
+            lvl, cls = "中等", "mid"
+        else:
+            lvl, cls = "偏低", "ok"
+        out.append({
+            "code": r["code"], "name": r["name"], "streak": n, "industry": r["industry"],
+            "quality": r["quality"], "base_rate": round(p0 * 100, 1),
+            "p_continue": round(p * 100, 1), "p_break": round(pb * 100, 1),
+            "risk": lvl, "cls": cls,
+            "factors": sorted(facs, key=lambda x: -abs(x["impact"]))[:7],
+            "hist": stats.get(n),
+        })
+    out.sort(key=lambda x: (-x["streak"], x["p_break"]))
+    return out
+
+
+# ============================================================== 7. 妖股形态相似度
+DEMON_WIN = 28   # 形态窗口长度
+
+
+def _norm_series(bs, key):
+    v = [b[key] for b in bs]
+    if not v:
+        return []
+    m = mean(v)
+    sd = math.sqrt(mean([(x - m) ** 2 for x in v])) or 1e-9
+    return [(x - m) / sd for x in v]
+
+
+def mine_demon_templates(u, min_streak=5, min_gain=85.0):
+    """从历史 K 线库挖掘妖股样本，取其【启动前 28 日】形态作为模板"""
+    tpls = []
+    ndates = len(u.dates)
+    for code, bs in u.bars.items():
+        if len(bs) < DEMON_WIN + 25:
+            continue
+        s = u.stocks.get(code)
+        if not s:
+            continue
+        sd = u.streak.get(code, {})
+        # 找主升浪：最大连板起点 或 20 日最大涨幅窗口起点
+        best = None
+        for i in range(DEMON_WIN, len(bs) - 8):
+            st = sd.get(bs[i]["d"], 0)
+            if st >= min_streak:
+                start = i - st + 1
+                if best is None or st > best[1]:
+                    best = (start, st, "连板%d" % st)
+        if best is None:
+            for i in range(DEMON_WIN, len(bs) - 20):
+                g = (max(x["c"] for x in bs[i:i + 20]) / bs[i]["c"] - 1) * 100
+                if g >= min_gain and (best is None or g > best[1]):
+                    best = (i, g, "20日+%.0f%%" % g)
+        if best is None:
+            continue
+        s0 = best[0]
+        if s0 < DEMON_WIN or s0 + 5 >= len(bs):
+            continue
+        pre = bs[s0 - DEMON_WIN:s0]
+        post = bs[s0:min(len(bs), s0 + 25)]
+        gain = (max(x["h"] for x in post) / bs[s0 - 1]["c"] - 1) * 100
+        mx_streak = max([sd.get(x["d"], 0) for x in post], default=0)
+        if gain < 55 and mx_streak < min_streak:
+            continue
+        tpls.append({
+            "code": code, "name": s["name"],
+            "start": bs[s0]["d"], "trigger": best[2],
+            "gain": round(gain, 1), "max_streak": mx_streak,
+            "pz": _norm_series(pre, "c"), "vz": _norm_series(pre, "v"),
+            "feat": _struct_feat(u, code, pre),
+            "float_mv": s.get("float_mv"),
+        })
+    tpls.sort(key=lambda x: -(x["gain"] + x["max_streak"] * 12))
+    return tpls[:160]
+
+
+def _struct_feat(u, code, bs):
+    """结构特征向量（已归一到 0~1 附近）"""
+    if len(bs) < 10:
+        return [0.0] * 7
+    c = [b["c"] for b in bs]
+    v = [b["v"] for b in bs]
+    t = [b["turn"] or 0 for b in bs]
+    gain = (c[-1] / c[0] - 1)
+    peak = max(c)
+    dd = (peak - min(c[c.index(peak):])) / peak if peak else 0
+    zt_cnt = sum(1 for b in bs if code in u.zt.get(b["d"], ()))
+    v_ratio = (mean(v[-5:]) / mean(v[:-5])) if mean(v[:-5]) else 1
+    amp = mean([b["amp"] or 0 for b in bs])
+    return [clamp(gain / 0.6, -1, 2), clamp(dd / 0.35), clamp(zt_cnt / 5.0),
+            clamp(v_ratio / 3.0), clamp(mean(t) / 15.0), clamp(amp / 12.0),
+            clamp((c[-1] - min(c)) / (peak - min(c) + 1e-9))]
+
+
+def demon_scan(u, date, limit_ups, tpls, sectors_by_name):
+    out = []
+    for r in limit_ups:
+        code = r["code"]
+        bs = u.bars_upto(code, date, DEMON_WIN)
+        if len(bs) < DEMON_WIN - 4:
+            continue
+        pz = _norm_series(bs, "c")
+        vz = _norm_series(bs, "v")
+        ft = _struct_feat(u, code, bs)
+        sims = []
+        for t in tpls:
+            if t["code"] == code:
+                continue
+            ps = pearson(resample(pz, DEMON_WIN), resample(t["pz"], DEMON_WIN))
+            vs = pearson(resample(vz, DEMON_WIN), resample(t["vz"], DEMON_WIN))
+            fd = math.sqrt(sum((a - b) ** 2 for a, b in zip(ft, t["feat"]))) / math.sqrt(len(ft))
+            fs = 1 - clamp(fd / 1.1)
+            sim = 0.46 * max(0, ps) + 0.22 * max(0, vs) + 0.32 * fs
+            sims.append((sim, t))
+        sims.sort(key=lambda x: -x[0])
+        top = sims[:3]
+        pattern = mean([s for s, _ in top]) * 100 if top else 0
+        # 妖股特质分（不依赖相似度的绝对条件）
+        fmv = (r.get("float_mv") or 0) / 1e8
+        traits = [
+            ("流通盘", lerp_score(-fmv, -200, -60, -12), 0.24),
+            ("换手活跃", lerp_score(r.get("turn") or 0, 2, 12, 30), 0.16),
+            ("连板基因", lerp_score(max(r["hist_max_streak"], r["streak"]), 1, 3, 7), 0.22),
+            ("涨停密度", lerp_score(r["zt60"], 1, 5, 14), 0.16),
+            ("题材热度", lerp_score((sectors_by_name.get(r["industry"]) or {}).get("strength", 30),
+                                  20, 50, 85), 0.12),
+            ("量能扩张", lerp_score(r.get("vol_ratio") or 1, 0.6, 1.8, 5.0), 0.10),
+        ]
+        trait = sum(v * w for _, v, w in traits)
+        score = 0.55 * pattern + 0.45 * trait
+        out.append({
+            "code": code, "name": r["name"], "streak": r["streak"], "industry": r["industry"],
+            "score": round(score, 1), "pattern": round(pattern, 1), "trait": round(trait, 1),
+            "traits": [{"k": k, "v": round(v, 1)} for k, v, _ in traits],
+            "float_mv": r.get("float_mv"), "turn": r.get("turn"),
+            "similar": [{"code": t["code"], "name": t["name"], "sim": round(s * 100, 1),
+                         "start": t["start"], "gain": t["gain"], "max_streak": t["max_streak"],
+                         "trigger": t["trigger"]} for s, t in top],
+        })
+    out.sort(key=lambda x: -x["score"])
+    return out
+
+
+# ============================================================== 8. 竞价定调（离线重建集合竞价强弱）
+def auction_profile(u, date, limit_ups):
+    """用日K的开盘/收盘行为离线重构集合竞价强弱，无需盘中逐笔数据。
+    返回 {summary:{...}, items:{code:{...}}}"""
+    items = {}
+    yizi = tboard = weak = strong = high_open = 0
+    vol_anom = vol_warn = 0
+    opens = []
+    for r in limit_ups:
+        b = u.bar(r["code"], date)
+        if not b:
+            continue
+        pc = (b["c"] - b["chg"]) if (b["c"] - b["chg"]) > 0 else b["c"]
+        o, c = b["o"], b["c"]
+        open_pct = round((o / pc - 1) * 100, 2) if pc > 0 else 0.0
+        intraday = round((c - o) / o * 100, 2) if o > 0 else 0.0
+        yizi_f = bool(r.get("yizi"))
+        zb = r.get("zb_count")
+        # 形态判定
+        if yizi_f:
+            pattern = "一字板"
+        elif zb and zb >= 1:
+            pattern = "T字板"
+        elif open_pct <= 1.0:
+            pattern = "弱转强"
+        elif open_pct >= 7.0 and (zb and zb >= 1 or (r.get("turn") or 0) > 16):
+            pattern = "强转弱"
+        elif open_pct >= 2.0 and intraday >= 0:
+            pattern = "高开高走"
+        else:
+            pattern = "换手板"
+        # 竞价强度分：开盘定调 + 日内强弱 + 封板质量 + 弱转强 + 分歧消化
+        if yizi_f:
+            op = 100.0
+        elif open_pct >= 7:
+            op = 72.0
+        elif open_pct >= 2:
+            op = 92.0
+        elif open_pct >= 0:
+            op = 82.0
+        elif open_pct >= -2:
+            op = 90.0
+        else:
+            op = 70.0
+        if pattern == "强转弱":
+            op = min(op, 46.0)
+        if yizi_f:
+            idv = 95.0
+        elif intraday >= 5:
+            idv = 95.0
+        elif intraday >= 0:
+            idv = 80.0
+        elif intraday >= -3:
+            idv = 60.0
+        else:
+            idv = 35.0
+        q = r.get("quality") or 50
+        aq = clamp(op * 0.35 + idv * 0.25 + q * 0.20 +
+                   (100 if pattern == "弱转强" else 50) * 0.10 +
+                   (80 if pattern == "T字板" else 60) * 0.10, 0, 100)
+        # ===== 竞价量能异动（离线估算，无需逐笔数据）=====
+        # 估算竞价成交额 = 当日成交额 × 开盘参与度系数 k（随高开幅度增大）
+        k = clamp(0.05 + abs(open_pct) / 35.0, 0.04, 0.28)
+        est_today = (b["amt"] or 0) * k
+        # 该股近 20 日基准（自身中位数，避免不同市值不可比）
+        _hist = u.bars_upto(r["code"], date, 60)[-21:-1]
+        _est = []
+        for _hb in _hist:
+            _hpc = (_hb["c"] - _hb["chg"]) if (_hb["c"] - _hb["chg"]) > 0 else _hb["c"]
+            _hop = ((_hb["o"] / _hpc - 1) * 100) if _hpc > 0 else 0.0
+            _hk = clamp(0.05 + abs(_hop) / 35.0, 0.04, 0.28)
+            _est.append((_hb["amt"] or 0) * _hk)
+        _est = [x for x in _est if x > 0]
+        _median = sorted(_est)[len(_est) // 2] if _est else 0
+        _ratio = (est_today / _median) if _median > 0 else 1.0
+        if yizi_f:
+            va = {"flag": "一字锁仓", "ratio": round(_ratio, 2), "severity": "none",
+                  "warn": False, "note": "一字板无集合竞价成交，锁仓惜售"}
+        elif _ratio >= 2.5:
+            _warn = (pattern == "强转弱") or (open_pct >= 7 and intraday < 0)
+            va = {"flag": "放量异动", "ratio": round(_ratio, 2),
+                  "severity": "high" if _warn else "mid", "warn": _warn,
+                  "note": ("竞价爆量且高开低走/炸板，疑似对倒派发，次日风险陡增"
+                           if _warn else "竞价爆量+高开高走，资金主动抢筹进攻")}
+        elif _ratio <= 0.5:
+            va = {"flag": "缩量", "ratio": round(_ratio, 2),
+                  "severity": "none" if yizi_f else "mid", "warn": False,
+                  "note": ("缩量高开非一字，资金观望/承接不足" if open_pct >= 2 else "缩量，分歧较小")}
+        else:
+            va = {"flag": "正常", "ratio": round(_ratio, 2), "severity": "none", "warn": False,
+                  "note": "竞价量能处于自身常态区间"}
+        if va["flag"] == "放量异动":
+            vol_anom += 1
+        if va["warn"]:
+            vol_warn += 1
+        items[r["code"]] = {
+            "code": r["code"], "name": r["name"], "streak": r["streak"],
+            "open_pct": open_pct, "intraday": intraday, "yizi": yizi_f,
+            "gap_type": ("一字" if yizi_f else "大幅高开" if open_pct >= 7 else "高开" if open_pct >= 2
+                         else "平开" if open_pct >= -2 else "低开"),
+            "pattern": pattern, "auction_score": round(aq, 1),
+            "vol_anomaly": va,
+        }
+        opens.append(open_pct)
+        if yizi_f:
+            yizi += 1
+        if pattern == "T字板":
+            tboard += 1
+        if pattern == "弱转强":
+            weak += 1
+        if pattern == "强转弱":
+            strong += 1
+        if not yizi_f and open_pct >= 2 and pattern in ("高开高走", "换手板"):
+            high_open += 1
+    avg = round(mean(opens), 2) if opens else 0.0
+    summary = {
+        "total": len(limit_ups), "yizi": yizi, "t_board": tboard,
+        "weak_strong": weak, "strong_weak": strong, "high_open": high_open,
+        "avg_open_pct": avg, "vol_anomaly": vol_anom, "vol_warn": vol_warn,
+    }
+    return {"summary": summary, "items": items}
+
+
+# ============================================================== 9. 连板梯队持续性（近 N 日）
+def ladder_history(u, date, days=5):
+    """各连板高度在近 N 日的涨停家数矩阵，用于判断情绪结构是否健康/退潮。"""
+    dates = u.dates[-days:]
+    matrix = {str(h): [] for h in range(1, 8)}
+    maxv = 0
+    for d in dates:
+        cnt = {}
+        for code in u.zt.get(d, set()):
+            n = u.streak.get(code, {}).get(d, 0)
+            n = max(1, min(7, n))
+            cnt[n] = cnt.get(n, 0) + 1
+        for h in range(1, 8):
+            v = cnt.get(h, 0)
+            matrix[str(h)].append(v)
+            maxv = max(maxv, v)
+    return {"dates": [d[5:] for d in dates], "matrix": matrix, "max": maxv}
+
+
+def recent_height_series(u, date, n=20):
+    """从 bars 派生近 N 个交易日『空间高度』序列，用于检测峰值后衰减通道。
+    返回 [(date, max_streak, lb_count)]，max_streak = 当日涨停股中最大连板数（>=1），
+    lb_count = 当日连板家数（>=2 板）。即使 rec_history 仅 1 行也能从第一天就给出趋势。"""
+    dates = u.dates[-n:]
+    out = []
+    for d in dates:
+        zt = u.zt.get(d, set())
+        if not zt:
+            out.append((d, 0, 0))
+            continue
+        mx = max((u.streak.get(c, {}).get(d, 1) for c in zt), default=1)
+        lb = sum(1 for c in zt if (u.streak.get(c, {}).get(d, 1) or 0) >= 2)
+        out.append((d, mx, lb))
+    return out
+
+
+# ============================================================== 10. 板块持续性轮动
+def sector_rotation(u, date, code2boards, topn=12, days=5):
+    """对当日最强行业，回溯近 N 日涨停家数，判断主线是持续 / 升温 / 降温 / 一日游。
+    依赖板块成分库（code2boards）；库为空时返回 []（前端优雅降级）。"""
+    if not code2boards:
+        return []
+    dates = u.dates[-days:]
+    ind_codes = {}
+    for code, boards in code2boards.items():
+        for _bk, name, kind in boards:
+            if kind == "industry":
+                ind_codes.setdefault(name, set()).add(code)
+    today = u.zt.get(date, set())
+    today_cnt = {ind: sum(1 for c in codes if c in today) for ind, codes in ind_codes.items()}
+    top = sorted(today_cnt.items(), key=lambda x: -x[1])[:topn]
+    out = []
+    for ind, _ in top:
+        codes = ind_codes.get(ind, set())
+        series = [sum(1 for c in codes if c in u.zt.get(d, ())) for d in dates]
+        first, last = series[0], series[-1]
+        persistent = sum(1 for s in series if s >= 2) >= 3
+        is_new = (sum(series[:-1]) == 0 and last > 0)
+        if last > first:
+            trend = "升温"
+        elif last < first:
+            trend = "降温"
+        else:
+            trend = "持平"
+        out.append({"name": ind, "zt_days": series, "today": last,
+                    "persistent": persistent, "is_new": is_new, "trend": trend})
+    out.sort(key=lambda x: -x["today"])
+    return out
+
+
+# ============================================================== 10.5 外围市场定调（美股 / 日股 / 韩股）
+def global_market(indices):
+    """根据外围主要指数最新收盘，给出对 A 股次日的定调信号。
+    indices: [{"region","name","pct",...}, ...]；缺失时返回中性信号。"""
+    if not indices:
+        return {"available": False, "signal": "中性", "score": 0.0, "a_up_prob": 0.5,
+                "us_pct": None, "jp_pct": None, "kr_pct": None, "detail": "外围数据缺失，按中性处理"}
+    def avg(region):
+        xs = [x["pct"] for x in indices if x.get("region") == region and x.get("pct") is not None]
+        return round(mean(xs), 2) if xs else None
+    us = avg("美股"); jp = avg("日股"); kr = avg("韩股")
+    # 美股对 A 股次日高开/方向主导，日韩为区域情绪辅助
+    us_s = clamp((us or 0) / 1.6, -3.2, 3.2)
+    jp_s = clamp((jp or 0) / 2.2, -1.5, 1.5)
+    kr_s = clamp((kr or 0) / 2.2, -1.5, 1.5)
+    blended = us_s * 0.72 + jp_s * 0.16 + kr_s * 0.12
+    score = round(clamp(blended * 22, -100, 100), 1)
+    # A 股次日上涨概率（logit 合成，正负皆可）
+    a_up = round(sigmoid(blended * 0.55) * 100, 1)
+    if score >= 35:
+        signal = "偏多"
+    elif score <= -35:
+        signal = "偏空"
+    elif score >= 12:
+        signal = "温和偏多"
+    elif score <= -12:
+        signal = "温和偏空"
+    else:
+        signal = "中性"
+    parts = []
+    if us is not None:
+        parts.append("美股 %s%.2f%%" % ("+" if us >= 0 else "", us))
+    if jp is not None:
+        parts.append("日经 %s%.2f%%" % ("+" if jp >= 0 else "", jp))
+    if kr is not None:
+        parts.append("韩国 %s%.2f%%" % ("+" if kr >= 0 else "", kr))
+    detail = "外围（" + "，".join(parts) + "）→ 对 A 股次日%s指引（上涨概率约 %.0f%%）" % (
+        "正面" if score > 0 else ("负面" if score < 0 else "中性"), a_up)
+    return {"available": True, "signal": signal, "score": score, "a_up_prob": a_up,
+            "us_pct": us, "jp_pct": jp, "kr_pct": kr, "detail": detail}
+
+
+# ============================================================== 10.6 历史连板热度校准
+def compute_regime(hist_rows, picks_rows, bars_series=None):
+    """结合历史连板库 + bars 派生序列，研判当前『高度周期』位置与断板校准系数。
+    hist_rows:   [(date,max_streak,lb_count,zt_count,sent_score,cycle_phase,env_k,n_rec)]
+    picks_rows:  [(date,code,name,streak,p_break,tag,next_continue,next_pct)]
+    bars_series: [(date,max_streak,lb_count)] 由 recent_height_series 提供，可作 fallback/主信号
+    """
+    has_hist = bool(hist_rows) and len(hist_rows) >= 3
+    if (not has_hist) and (not bars_series):
+        return {"level": "样本不足", "factor": 0.0, "note": "历史连板库尚未积累，暂不校准",
+                "max_series": [], "lb_series": [], "hit_rate": None,
+                "hit_by_tag": {}, "peak_max": None}
+    # 数据源：rec_history 充足用 rec_history，否则用 bars 派生序列（从第一天即可检测趋势）
+    if has_hist:
+        hs = [r[1] for r in hist_rows]; lbs = [r[2] for r in hist_rows]; src = "rec_history"
+    else:
+        hs = [s[1] for s in (bars_series or [])]; lbs = [s[2] for s in (bars_series or [])]; src = "bars派生"
+    hs = [h for h in hs if h >= 1]  # 仅保留有连板的交易日
+    if not hs:
+        return {"level": "样本不足", "factor": 0.0, "note": "近 N 日无连板数据，暂不校准",
+                "max_series": [], "lb_series": [], "hit_rate": None,
+                "hit_by_tag": {}, "peak_max": None}
+    cur_h = hs[-1]; cur_lb = lbs[-1] if lbs else 0
+    peak = max(hs)
+    ratio = (cur_h / peak) if peak else 1.0
+    # 衰减通道检测：找最近峰值，统计其后连续回落天数（华电辽能 8→5→4→3 类规律）
+    peak_idx = hs.index(peak)
+    declines = 0
+    for i in range(peak_idx + 1, len(hs)):
+        if hs[i] < hs[i - 1]:
+            declines += 1
+        else:
+            break
+    # 近 5 日高度动量
+    h5 = hs[-6] if len(hs) >= 6 else hs[0]
+    momentum = cur_h - h5
+    lb5 = mean(lbs[-6:-1]) if len(lbs) >= 6 else (mean(lbs[:-1]) if lbs[:-1] else 0)
+    lb_trend = (cur_lb - lb5) if lb5 else 0
+    factor = 0.0
+    reasons = []
+    # ① 峰值后衰减通道（核心：高位接力风险随衰减显著抬升）
+    if declines >= 2 and cur_h <= peak - 2 and peak >= 4:
+        factor += 0.28
+        reasons.append("检测到『峰值后衰减通道』：空间高度自 %d 板峰值连续回落至 %d 板（连降 %d 日），"
+                       "参照华电辽能 8→5→4→3 历史规律，高位接力风险显著抬升" % (peak, cur_h, declines))
+    # ② 逼近历史峰值
+    if ratio >= 0.85 and cur_h >= 5 and declines == 0:
+        factor += (ratio - 0.7) * 0.6
+        reasons.append("空间高度 %d 板已逼近历史峰值 %d 板（%.0f%%），高位见顶/断板概率上升" % (cur_h, peak, ratio * 100))
+    # ③ 高度走平/回落动量
+    if momentum <= 0 and cur_h >= 4:
+        factor += 0.15
+        reasons.append("高度已连续走平/回落（5 日前 %d 板），接力意愿边际转弱" % h5)
+    # ④ 连板家数塌缩
+    if lb_trend <= -2:
+        factor += 0.18
+        reasons.append("连板家数较前 5 日均值减少 %d 只，梯队在塌缩" % abs(int(lb_trend)))
+    # 命中率（仅统计有次日结局的样本）
+    valid = [p for p in (picks_rows or []) if p[6] in (0, 1)]
+    hit = sum(1 for p in valid if p[6] == 1)
+    hit_rate = round(hit / len(valid) * 100, 1) if valid else None
+    by_tag = {}
+    for tag in ("核心龙头", "主线接力", "低位潜伏", "高位风险"):
+        sub = [p for p in valid if p[5] == tag]
+        if sub:
+            by_tag[tag] = round(sum(1 for p in sub if p[6] == 1) / len(sub) * 100, 1)
+    if not reasons:
+        level = "中位/低位"
+        reasons.append("空间高度 %d 板、连板家数 %d 只，处于历史区间中位，暂未见顶信号（数据源：%s）" % (cur_h, cur_lb, src))
+    elif factor >= 0.35:
+        level = "高位见顶风险"
+    else:
+        level = "分歧加大"
+    note = "；".join(reasons)
+    return {"level": level, "factor": round(clamp(factor, 0, 0.7), 3), "note": note,
+            "max_series": hs[::-1][:20], "lb_series": lbs[::-1][:20],
+            "hit_rate": hit_rate, "hit_by_tag": by_tag, "peak_max": peak,
+            "cur_h": cur_h, "cur_lb": cur_lb, "momentum": momentum, "lb_trend": round(lb_trend, 1),
+            "src": src, "declines": declines}
+
+
+def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=None, hist=None):
+    rmap = {r["code"]: r for r in risks}
+    dmap = {d["code"]: d for d in demons}
+    smap = {s["name"]: s for s in sectors}
+    env_k = clamp((sent["score"] - 25) / 55.0, 0.25, 1.15)
+    items = []
+    for r in limit_ups:
+        rk = rmap.get(r["code"]) or {}
+        dm = dmap.get(r["code"]) or {}
+        sec = smap.get(r["industry"]) or {}
+        aq = (auction_map or {}).get(r["code"]) or {}
+        # 历史连板热度校准：高位见顶/梯队塌缩时，抬升断板概率、压低续板概率
+        hf = (hist or {}).get("factor", 0.0) or 0.0
+        pc0 = rk.get("p_continue") or 20
+        pb0 = rk.get("p_break") or 80
+        pc_adj = clamp(pc0 - hf * 100 * 0.45, 1, 99)
+        pb_adj = clamp(pb0 + hf * 100 * 0.45, 1, 99)
+        score = (0.26 * r["quality"] + 0.24 * pc_adj * 1.6
+                 + 0.18 * sec.get("strength", 30) + 0.14 * dm.get("score", 30)
+                 + 0.09 * lerp_score(r["streak"], 0, 3, 7)
+                 + 0.09 * (aq.get("auction_score") or 50))
+        score = clamp(score * (0.75 + 0.25 * env_k) - hf * 35, 0, 100)
+        # 是否值得购入分值（0-100，越高越值得）：综合续板概率/质量/板块/妖股，扣减历史风险
+        worth = clamp(0.46 * pc_adj + 0.20 * r["quality"] + 0.16 * sec.get("strength", 30)
+                      + 0.18 * (dm.get("score") or 30) - hf * 55, 0, 100)
+        items.append({
+            "code": r["code"], "name": r["name"], "streak": r["streak"],
+            "industry": r["industry"], "concepts": r["concepts"][:3],
+            "close": r["close"], "turn": r["turn"], "float_mv": r["float_mv"],
+            "quality": r["quality"], "p_continue": round(pc_adj, 1),
+            "p_break": round(pb_adj, 1), "risk": rk.get("risk"),
+            "demon": dm.get("score"), "sector_strength": sec.get("strength"),
+            "sector_tier": sec.get("tier"), "score": round(score, 1),
+            "worth_score": round(worth, 1), "hist_factor": round(hf, 3),
+            "similar": dm.get("similar", [])[:1],
+            "yizi": r["yizi"], "seal_time": r.get("seal_time"), "zb_count": r.get("zb_count"),
+            "gain20": r.get("gain20"),
+        })
+        items[-1]["auction_pattern"] = aq.get("pattern")
+        items[-1]["vol_anomaly"] = aq.get("vol_anomaly")
+        items[-1]["hist_calib"] = {
+            "level": (hist or {}).get("level", "—"),
+            "note": (hist or {}).get("note", ""), "factor": round(hf, 3),
+        }
+    items.sort(key=lambda x: -x["score"])
+
+    def reason(it):
+        rs = []
+        if it["streak"] >= 2:
+            rs.append("已走出 %d 连板，具备接力资金关注度" % it["streak"])
+        if it["sector_tier"] == "主线":
+            rs.append("所属【%s】为当日主线板块（强度 %.0f）" % (it["industry"], it["sector_strength"] or 0))
+        elif it["sector_tier"] == "支线":
+            rs.append("【%s】板块有合力（强度 %.0f）" % (it["industry"], it["sector_strength"] or 0))
+        if it["quality"] >= 70:
+            rs.append("封板质量 %.0f 分，封板结构扎实" % it["quality"])
+        if it["yizi"]:
+            rs.append("一字板封死，惜售情绪浓")
+        if it.get("auction_pattern") == "弱转强":
+            rs.append("竞价弱转强——开盘被低估后强势封板，资金分歧转一致")
+        va = it.get("vol_anomaly") or {}
+        if va.get("flag") == "放量异动" and not va.get("warn"):
+            rs.append("竞价抢筹放量（约为常态 %.1f 倍），开盘资金主动进攻" % va.get("ratio", 1))
+        if (it["p_continue"] or 0) >= 30:
+            rs.append("模型测算次日续板概率 %.0f%%，高于同高度基准" % it["p_continue"])
+        if (it["demon"] or 0) >= 60:
+            s = (it["similar"] or [{}])[0]
+            if s:
+                rs.append("妖股基因 %.0f 分，形态最接近 %s（当时后续最高 +%.0f%%）"
+                          % (it["demon"], s.get("name", ""), s.get("gain", 0)))
+            else:
+                rs.append("妖股基因 %.0f 分" % it["demon"])
+        if it["float_mv"] and it["float_mv"] < 60e8:
+            rs.append("流通盘 %.0f 亿，盘子轻易拉升" % (it["float_mv"] / 1e8))
+        return rs[:5]
+
+    def risknote(it):
+        rs = []
+        if (it["p_break"] or 0) >= 78:
+            rs.append("同高度历史断板率偏高，次日冲高回落概率大")
+        if it["streak"] >= 4:
+            rs.append("高位连板，一旦断板容易连续调整")
+        if (it["gain20"] or 0) > 70:
+            rs.append("20 日累计 +%.0f%%，获利盘沉重" % it["gain20"])
+        if (it["zb_count"] or 0) >= 1:
+            rs.append("盘中曾开板 %d 次，分歧已现" % it["zb_count"])
+        if it.get("auction_pattern") == "强转弱":
+            rs.append("竞价强转弱——大幅高开却炸板/高换手，诱多分歧明显")
+        if (it.get("vol_anomaly") or {}).get("warn"):
+            rs.append("竞价爆量异动+高开低走特征，疑似派发，次日回落风险高")
+        if (it["turn"] or 0) > 30:
+            rs.append("换手 %.0f%%，短线抛压重" % it["turn"])
+        if it["sector_tier"] == "零星":
+            rs.append("板块无合力，容易独木难支")
+        return rs[:3] or ["注意大盘系统性风险"]
+
+    core, relay, ambush, avoid = [], [], [], []
+
+    def tier_ok(it):
+        # 板块接口常因限流缺失 sector_tier；此时用板块强度兜底。
+        return it.get("sector_tier") in ("主线", "支线") or (it.get("sector_strength") or 0) >= 42
+
+    for it in items:
+        it["reasons"] = reason(it)
+        it["risks"] = risknote(it)
+        st = it.get("streak", 0) or 0
+        sc = it.get("score", 0) or 0
+        pb = it.get("p_break") or 100
+        # 连板高度是推荐分层的稳健主信号（不受保守评分绝对值影响），保证板块不为空。
+        if st >= 3 and pb >= 78:
+            it["tag"] = "高位风险"
+            avoid.append(it)
+        elif st >= 4:
+            it["tag"] = "核心龙头"
+            core.append(it)
+        elif st == 3:
+            it["tag"] = "核心龙头" if sc >= 46 else "主线接力"
+            (core if sc >= 46 else relay).append(it)
+        elif st == 2:
+            it["tag"] = "主线接力"
+            relay.append(it)
+        elif st == 1 and tier_ok(it):
+            it["tag"] = "低位潜伏"
+            ambush.append(it)
+        elif sc >= 40:
+            # 首板但无明确板块合力：仍纳入接力候选，避免推荐板块整体为空
+            it["tag"] = "主线接力"
+            relay.append(it)
+    # 避险兜底：若仍为空（当日高位断板概率均低），用断板概率最高者补全
+    if not avoid:
+        for it in sorted(items, key=lambda x: -(x.get("p_break") or 0))[:3]:
+            it["tag"] = "高位风险"
+            avoid.append(it)
+    # 推荐兜底：极端情况下 core/relay 仍为空时，用评分前若干补全，保证板块非空
+    if not core and not relay:
+        for it in items[:8]:
+            it.setdefault("tag", "主线接力")
+            relay.append(it)
+    # 仓位与策略
+    sc = sent["score"]
+    if sc >= 72:
+        pos, ps = "6-8 成", "情绪高位，重点做主线龙头的加速段，但严守当日不及预期即走的纪律"
+    elif sc >= 58:
+        pos, ps = "5-7 成", "主线明确，优先低吸主线内的二板/三板，回避无合力的孤票"
+    elif sc >= 45:
+        pos, ps = "3-5 成", "结构性行情，以低位首板和主线补涨为主，不追高位连板"
+    elif sc >= 30:
+        pos, ps = "2-3 成", "情绪走弱，只做低位、低吸，控制单票仓位"
+    else:
+        pos, ps = "0-2 成", "退潮期空仓等待，等首阴反包或新题材出现再进场"
+    strategies = [ps]
+    if cyc["phase"] in ("退潮期", "冰点期"):
+        strategies.append("重点观察【低位首板】与【超跌反包】，放弃高位接力")
+    if cyc["phase"] in ("发酵期", "启动期"):
+        strategies.append("主线板块的【二板梯队】性价比最高，是本阶段核心打法")
+    if cyc["phase"] == "高潮期":
+        strategies.append("高潮期做龙头需当日验证，隔日不及预期立即减仓")
+    top_secs = [s for s in sectors if s["tier"] in ("主线", "支线")][:4]
+    if top_secs:
+        strategies.append("重点跟踪板块：" + "、".join("%s(%d涨停)" % (s["name"], s["zt"]) for s in top_secs))
+    hi = [r for r in risks if r["streak"] >= 4]
+    if hi:
+        strategies.append("空间板 %s 是市场高度标杆，其走势决定次日整体接力意愿"
+                          % "、".join("%s(%d板)" % (r["name"], r["streak"]) for r in hi[:3]))
+    return {
+        "core": core[:6], "relay": relay[:10], "ambush": ambush[:10], "avoid": avoid[:8],
+        "position": pos, "strategies": strategies,
+        "env_k": round(env_k, 2),
+        "all": items[:60],
+    }
+
+
+def screen_uptrend(u, date, code2boards=None, topn=12):
+    """趋势向上选股：在全市场 K 线中筛选『均线多头排列 + 价格站上短均 + MA20 上行
+    + 量能配合』且非当日涨停的趋势票，作为主升段低吸候选。
+    返回结构与 recommend() 兼容（含 trend_meta 供前端渲染），可直接并入 data['recommend']['trend']。"""
+    if not u or not u.dates:
+        return []
+    zt_today = u.zt.get(date, set())
+
+    def industry_of(code):
+        boards = (code2boards or {}).get(code) or []
+        return next((n for _, n, k in boards if k == "industry"), "—")
+
+    cands = []
+    for code, bs in u.bars.items():
+        hist = [b for b in bs if b["d"] <= date]
+        if len(hist) < 25:
+            continue
+        name = u.stocks.get(code, {}).get("name", code)
+        if not name or "ST" in name or "*" in name or "退" in name:
+            continue
+        closes = [b["c"] for b in hist]
+        last = hist[-1]
+        lim = u.lim.get(code, 10.0)
+        # 排除当日涨停（涨停已在连板板块呈现，避免重复）
+        if code in zt_today or (last.get("pct") or 0) >= lim - 0.5:
+            continue
+        # 流动性过滤：成交额过低（< 1.2 亿）不选
+        if (last.get("amt") or 0) < 1.2e8:
+            continue
+        ma5 = mean(closes[-5:]); ma10 = mean(closes[-10:]); ma20 = mean(closes[-20:])
+        if ma20 <= 0:
+            continue
+        # MA20 五日前的斜率基准
+        ma20_prev = mean(closes[-25:-5]) if len(closes) >= 25 else ma20
+        price = closes[-1]
+        align = (ma5 > ma10 > ma20) and (price > ma5)
+        slope20 = ((ma20 - ma20_prev) / ma20_prev * 100) if ma20_prev else 0
+        up_days = sum(1 for b in hist[-5:] if (b.get("pct") or 0) > 0)
+        momentum = (price / ma20 - 1) * 100          # 距 MA20 偏离%
+        vol20 = mean([b["v"] for b in hist[-21:-1]]) if len(hist) > 5 else (last["v"] or 1)
+        vol_ratio = (last["v"] / vol20) if vol20 else 1
+        # ---- 评分 ----
+        sc = 0.0
+        sc += 42 if align else 0
+        sc += 10 if price > ma5 else 0
+        sc += clamp(slope20 / 2.0, 0, 16)             # MA20 上行加分
+        sc += up_days / 5.0 * 16                      # 近 5 日上涨天数
+        if 5 <= momentum <= 35:
+            sc += 20                                  # 主升段未透支
+        elif momentum > 0:
+            sc += max(0.0, 20 - (momentum - 35) * 0.6)
+        else:
+            sc -= 6
+        if 1.0 <= vol_ratio <= 3.0:
+            sc += 10                                  # 温和放量
+        elif vol_ratio > 5:
+            sc -= 6                                   # 过旺
+        sc = clamp(sc, 0, 100)
+        if not align:                                # 仅保留多头排列，确保“趋势向上”名副其实
+            continue
+        worth = clamp(0.5 * sc + 0.5 * (40 if momentum <= 35 else 10), 0, 100)
+        reasons = ["均线多头排列（MA5>MA10>MA20），短中期趋势向上"]
+        if slope20 > 0.5:
+            reasons.append("MA20 上行斜率 %.1f%%，趋势加速" % slope20)
+        if up_days >= 3:
+            reasons.append("近 5 日 %d 天收涨，上攻连续性好" % up_days)
+        if 5 <= momentum <= 35:
+            reasons.append("距 MA20 偏离 +%.1f%%，主升段尚未透支" % momentum)
+        if 1.0 <= vol_ratio <= 3.0:
+            reasons.append("量能温和放大（约 %.1f 倍），资金持续介入" % vol_ratio)
+        risks = []
+        if momentum > 35:
+            risks.append("阶段涨幅偏大（偏离 MA20 +%.0f%%），注意回踩" % momentum)
+        if vol_ratio > 4:
+            risks.append("放量过猛（%.1f 倍），警惕短线分歧" % vol_ratio)
+        if (last.get("turn") or 0) > 12:
+            risks.append("换手 %.0f%%，短线筹码松动" % last["turn"])
+        risks.append("非涨停趋势票，需结合量价与大盘节奏设止损")
+        cands.append({
+            "code": code, "name": name, "streak": 0, "industry": industry_of(code),
+            "close": round(price, 2),
+            "float_mv": u.stocks.get(code, {}).get("float_mv"),
+            "turn": round(last.get("turn") or 0, 2),
+            "quality": 0, "p_continue": 0, "demon": 0,
+            "score": round(sc, 1), "worth_score": round(worth, 1),
+            "trend_meta": {
+                "ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2),
+                "align": True, "up_days": up_days,
+                "momentum_pct": round(momentum, 1), "vol_ratio": round(vol_ratio, 2),
+                "slope20": round(slope20, 2),
+            },
+            "reasons": reasons[:5], "risks": risks[:3],
+        })
+    cands.sort(key=lambda x: -x["score"])
+    return cands[:topn]

@@ -1,0 +1,1 @@
+DIRECT OK=True MSG=ServerChan 推送成功

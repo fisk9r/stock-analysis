@@ -1,0 +1,43 @@
+name: 连通性探针（先跑这个）
+
+# 目的：在把整套流水线搬上云之前，先用真实 runner 实测能否访问东方财富接口。
+# 东财对云服务器/境外 IP 存在频控与连接重置，这一步是 GO / NO-GO 判据，别跳过。
+#
+# 用法：Actions 页面 → 选择本 workflow → Run workflow（手动触发）
+# 建议在 A 股交易时段（北京时间 9:30-15:00）和非交易时段各跑一次，对比结果。
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 交易时段中段抽样：北京 11:00 = UTC 03:00（避开整点拥堵，用 :07）
+    - cron: '7 3 * * 1-5'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 显示 runner 出口 IP 与地理位置
+        continue-on-error: true
+        run: |
+          echo "----- runner 网络身份 -----"
+          curl -s --max-time 10 https://api.ipify.org || echo "(ipify 不可达)"
+          echo
+          curl -s --max-time 10 "http://ip-api.com/json/?fields=country,regionName,city,isp,query" || true
+          echo
+
+      - name: 运行连通性探针
+        id: probe
+        run: python tools/probe_net.py
+
+      - name: 探针失败时给出结论
+        if: failure()
+        run: |
+          echo "::error::关键行情接口在 GitHub runner 上不可达。"
+          echo "这意味着 GitHub Actions 方案不可行，应改用国内节点（腾讯云 SCF / 轻量服务器）。"

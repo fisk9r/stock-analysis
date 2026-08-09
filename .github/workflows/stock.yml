@@ -1,0 +1,261 @@
+name: A股盘后分析流水线
+
+# ============================================================================
+# 时间换算：中国不使用夏令时，北京时间 = UTC + 8，恒定。
+#   北京 09:02 → UTC 01:02      北京 16:10 → UTC 08:10
+#   北京 09:25 → UTC 01:25      北京 20:00 → UTC 12:00
+# 分钟刻意避开 :00，GitHub 整点排队最严重（可能延迟 5~30 分钟）。
+#
+# ⚠ 定时精度：GitHub 的 schedule 是"尽力而为"，高负载会延迟甚至丢弃。
+#   收盘分析(16:10)、复盘(20:00) 延迟十几分钟无所谓，数据已定格；
+#   集合竞价(09:25) 必须赶在 09:30 开盘前送达，对延迟零容忍——
+#   建议改用外部调度器精确触发，见 DEPLOY-GITHUB.md「精确定时」。
+#
+# ⚠ 行情源：push2.eastmoney.com 对境外/云出口 IP 直接 RST 断连，GitHub runner
+#   在境外必然命中。em_api 已内置自动降级到 push2delay.eastmoney.com
+#   （盘中延迟约 15 分钟，盘后收盘数据完全一致）。国内节点部署可设
+#   EM_PUSH2_HOST=push2.eastmoney.com 强制走实时。
+#
+# ⚠ 状态持久化：runner 每次都是全新机器，什么都不留。本项目有三份状态必须跨次续存：
+#     cache/market.db        130 天 K 线，76MB
+#     dist/data.js           最近一次分析结果，盘前/竞价/异动推送都靠它
+#     dist/push_log.jsonl    推送去重依据，丢了会重复发、白烧 ServerChan 额度
+#   统一存放在 tag = data-snapshot 的 Release 里，两个附件：
+#     market.db.gz（约 22MB）  state.tar.gz（几百 KB）
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: '手动执行的任务'
+        required: true
+        default: 'build'
+        type: choice
+        options: [build, preauction, auction, anomaly, close_again, weekend]
+
+  schedule:
+    - cron: '2 1 * * 1-5'    # 北京 09:02 周一至周五 —— 盘前预判
+    - cron: '25 1 * * 1-5'   # 北京 09:25 周一至周五 —— 集合竞价
+    - cron: '7 2 * * 1-5'    # 北京 10:07 —— 盘中异动
+    - cron: '7 3 * * 1-5'    # 北京 11:07 —— 盘中异动
+    - cron: '7 5 * * 1-5'    # 北京 13:07 —— 盘中异动
+    - cron: '7 6 * * 1-5'    # 北京 14:07 —— 盘中异动
+    - cron: '7 7 * * 1-5'    # 北京 15:07 —— 盘中异动
+    - cron: '10 8 * * 1-5'   # 北京 16:10 周一至周五 —— 收盘完整分析（重）
+    - cron: '0 12 * * 1-5'   # 北京 20:00 周一至周五 —— 复盘补发
+    - cron: '0 12 * * 0'     # 北京 20:00 周日 —— 周末发酵（有则发，无则跳过）
+    - cron: '0 0 * * 1'      # 北京 08:00 周一 —— 周末发酵（有则发，无则跳过）
+
+# 同一时刻只允许一个流水线在跑。否则两个任务同时改数据库/状态，
+# 后回存的会覆盖先回存的，去重记录直接丢失。
+concurrency:
+  group: stock-pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # 读写 Release asset（数据库与状态快照）
+  pages: write      # 部署站点
+  id-token: write
+
+env:
+  DB_TAG: data-snapshot
+  DB_FILE: market.db.gz
+  STATE_FILE: state.tar.gz
+  TZ: Asia/Shanghai
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      task: ${{ steps.task.outputs.task }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # 本项目零第三方依赖（纯标准库），无需 pip install，省掉整个装包环节
+
+      # ---------- 1. 决定本次跑什么 ----------
+      - name: 解析任务类型
+        id: task
+        run: |
+          S="${{ github.event.schedule }}"
+          T="${{ github.event.inputs.task }}"
+          if [ -n "$T" ]; then
+            TASK="$T"
+          else
+            case "$S" in
+              '2 1 * * 1-5')   TASK=preauction  ;;
+              '25 1 * * 1-5')  TASK=auction     ;;
+              '10 8 * * 1-5')  TASK=build       ;;
+              '0 12 * * 1-5')  TASK=close_again ;;
+              '0 12 * * 0')    TASK=weekend     ;;
+              '0 0 * * 1')     TASK=weekend     ;;
+              *)               TASK=anomaly     ;;
+            esac
+          fi
+          echo "task=$TASK" >> "$GITHUB_OUTPUT"
+          # build / close_again 要重跑完整引擎，必须先抓当日最新行情
+          case "$TASK" in
+            build|close_again) echo "need_fetch=true"  >> "$GITHUB_OUTPUT" ;;
+            *)                 echo "need_fetch=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+          # 要闻：build/close_again 把新闻写进 data.js 供网站展示，weekend 靠它判断发不发
+          case "$TASK" in
+            build|close_again|weekend) echo "need_news=true"  >> "$GITHUB_OUTPUT" ;;
+            *)                         echo "need_news=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+          echo "### 任务 \`$TASK\` · 北京时间 $(date '+%F %H:%M')" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------- 2. 取回上次的状态 ----------
+      - name: 恢复数据库与状态
+        id: restore
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p cache dist
+          if gh release download "$DB_TAG" -p "$DB_FILE" -D cache/ 2>/dev/null; then
+            gunzip -f "cache/$DB_FILE"
+            echo "✅ 数据库已恢复：$(du -h cache/market.db | cut -f1)"
+          else
+            echo "::error::找不到数据库快照。请按 DEPLOY-GITHUB.md 第 5 步，把本机 market.db.gz 上传到 tag 为 ${DB_TAG} 的 Release。"
+            exit 1
+          fi
+          # 状态包首次运行可以不存在（build 会自己生成），故不致命
+          if gh release download "$DB_TAG" -p "$STATE_FILE" -D /tmp/ 2>/dev/null; then
+            tar xzf "/tmp/$STATE_FILE" -C .
+            echo "✅ 状态已恢复：data.js $( [ -f dist/data.js ] && echo 有 || echo 无 ) · 推送日志 $( [ -f dist/push_log.jsonl ] && wc -l < dist/push_log.jsonl || echo 0 ) 条"
+          else
+            echo "⚠ 无历史状态包（首次运行正常）。推送去重从本次开始累积。"
+          fi
+
+      - name: 缺少 data.js 时中止纯推送任务
+        # 盘前/竞价/周末推送都要读最近一次分析结果，没有就只能空转
+        if: steps.task.outputs.need_fetch == 'false'
+        run: |
+          if [ ! -f dist/data.js ]; then
+            echo "::error::dist/data.js 不存在。请先手动运行一次 task=build 生成分析结果。"
+            exit 1
+          fi
+
+      # ---------- 3. 连通性自检（早失败，别留半截数据） ----------
+      - name: 行情源自检
+        run: python tools/probe_net.py --quick
+
+      # ---------- 4. 抓取最新行情 ----------
+      # 本地是 update.bat 里 fetch.py → build.py 两步走，云端必须照搬，
+      # 否则 build 永远在啃旧数据。fetch 内部会按 7 天有效期自动刷新板块成分。
+      - name: 抓取当日行情
+        if: steps.task.outputs.need_fetch == 'true'
+        run: python pipeline/fetch.py
+
+      # 周末发酵推送靠 news.json 判断"有没有料"。若这份文件是静态占位，
+      # 云端周末推送会永久静默——看着一切正常，功能其实已经死了。
+      # 所以每次用之前现抓，抓不到就跳过（不阻塞主流程）。
+      - name: 抓取财经要闻
+        if: steps.task.outputs.need_news == 'true'
+        continue-on-error: true
+        run: python pipeline/news_fetch.py --days 3
+
+      # ---------- 5. 执行分析 / 推送 ----------
+      - name: 写出访问人员配置（口令门禁，仅 build）
+        if: steps.task.outputs.task == 'build'
+        env:
+          AU: ${{ secrets.ALLOWED_USERS_JSON }}
+        run: |
+          if [ -n "$AU" ]; then printf '%s' "$AU" > config/allowed_users.json; echo "✅ 已写出访问人员配置"; else echo "⚠ 未配置 ALLOWED_USERS_JSON，站点将无加密数据（登录后提示无数据）"; fi
+
+      - name: 执行流水线
+        env:
+          NOTIFY_JSON: ${{ secrets.NOTIFY_JSON }}   # 凭据只走 Secrets，仓库无明文
+        run: |
+          set -o pipefail
+          case "${{ steps.task.outputs.task }}" in
+            build)       python pipeline/build.py ;;
+            preauction)  python pipeline/build.py --preauction ;;
+            auction)     python pipeline/build.py --auction-push ;;
+            anomaly)     python pipeline/build.py --anomaly-push ;;
+            close_again) python pipeline/build.py --push-close ;;
+            weekend)     python pipeline/build.py --weekend-push ;;
+          esac
+
+      # ---------- 5.5 加密数据（口令门禁） ----------
+      - name: 加密数据（口令门禁）
+        if: steps.task.outputs.task == 'build'
+        run: |
+          python pipeline/encrypt_data.py
+          rm -f config/allowed_users.json   # 凭据仅运行时使用，不留痕
+
+      # ---------- 6. 回存 ----------
+      - name: 回存数据库
+        if: steps.task.outputs.need_fetch == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gzip -6 -c cache/market.db > "cache/$DB_FILE"
+          gh release upload "$DB_TAG" "cache/$DB_FILE" --clobber
+          echo "✅ 数据库已回存（$(du -h cache/$DB_FILE | cut -f1)）"
+
+      - name: 回存状态
+        # 任何任务都可能往 push_log.jsonl 追加记录，所以一律回存。
+        # 用 always() 是因为：推送成功但后续步骤失败时，去重记录也不能丢。
+        if: always() && steps.restore.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tar czf "/tmp/$STATE_FILE" \
+            $( [ -f dist/data.js ] && echo dist/data.js ) \
+            $( [ -f dist/push_log.jsonl ] && echo dist/push_log.jsonl ) \
+            $( ls dist/last_push_*.md 2>/dev/null ) \
+            2>/dev/null || true
+          if [ -f "/tmp/$STATE_FILE" ]; then
+            gh release upload "$DB_TAG" "/tmp/$STATE_FILE" --clobber
+            echo "✅ 状态已回存（$(du -h /tmp/$STATE_FILE | cut -f1)）"
+          fi
+
+      # ---------- 7. 打包站点（剔除明文 data.js，仅发布加密 blob + 用户列表） ----------
+      - name: 打包站点
+        if: steps.task.outputs.task == 'build'
+        run: |
+          rm -rf site && mkdir -p site/data
+          cp dist/index.html dist/styles.css dist/charts.js dist/app.js dist/auth.js dist/users.json site/ 2>/dev/null
+          cp -r dist/data site/ 2>/dev/null || true
+          rm -f site/data.js site/data.js.bak
+          echo "✅ 站点文件：$(ls site | tr '\n' ' ')"
+
+      - name: 上传站点
+        if: steps.task.outputs.task == 'build'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      # ---------- 8. 失败可诊断 ----------
+      - name: 失败时保留现场
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ steps.task.outputs.task }}-${{ github.run_id }}
+          path: |
+            dist/push_log.jsonl
+            dist/last_push_*.md
+            dist/data.js
+            *.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # deploy-pages 必须跑在 github-pages 这个 environment 里，
+  # 而 environment 是 job 级属性，所以部署只能拆成独立 job。
+  deploy:
+    needs: run
+    if: needs.run.outputs.task == 'build'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    steps:
+      - name: 部署到 GitHub Pages
+        id: pages
+        uses: actions/deploy-pages@v4
