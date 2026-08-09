@@ -108,7 +108,8 @@ def set_secret(token, owner, name, value):
 def push_code(token, owner):
     url = "https://%s@github.com/%s/%s.git" % (token, owner, REPO)
     bare = "https://github.com/%s/%s.git" % (owner, REPO)
-    run = lambda cmd: subprocess.run(cmd, cwd=ROOT, shell=True, capture_output=True, text=True)
+    run = lambda cmd: subprocess.run(cmd, cwd=ROOT, shell=True, capture_output=True,
+                                      encoding="utf-8", errors="replace")
     if not os.path.exists(os.path.join(ROOT, ".git")):
         run("git init -b main")
     run('git config user.email "setup@stock.local"')
@@ -118,7 +119,7 @@ def push_code(token, owner):
     r = run("git add -A && git commit -q -m \"init: A股盘后分析（多源校验 + 加密访问）\" || true")
     log("commit 输出：%s" % (r.stderr.strip() or r.stdout.strip() or "(无变更)"))
     r = run("git push -u origin main")
-    log("push 输出：%s" % (r.stdout.strip() or r.stderr.strip()))
+    log("push 输出：%s" % ((r.stdout or "") .strip() or (r.stderr or "").strip() or "(无输出)"))
     if r.returncode != 0:
         raise SystemExit("代码推送失败，请检查上方输出。")
     # 立即剥离令牌，避免遗留在本地 remote URL
