@@ -140,9 +140,9 @@ section.view.on{display:block}
 .card .body{padding:16px}
 .card .body.tight{padding:10px 12px}
 .grid{display:grid;gap:16px}
-.g2{grid-template-columns:repeat(auto-fit,minmax(330px,1fr))}
-.g3{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
-.g4{grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+.g2{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+.g3{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+.g4{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
 
 /* ---------------- KPI ---------------- */
 .kpi{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px;
@@ -221,10 +221,11 @@ td.code{color:var(--faint);font-size:11.5px}
 /* ---------------- 推荐卡 ---------------- */
 .rec{border:1px solid var(--border);border-radius:var(--r);overflow:hidden;background:var(--card);
   box-shadow:var(--shadow);display:flex;flex-direction:column}
-.rec .rh{padding:11px 14px;display:flex;align-items:center;gap:9px;border-bottom:1px solid var(--border-2);
-  background:var(--card-2)}
-.rec .rh .nm{font-size:15px;font-weight:700;color:var(--text)}
-.rec .rh .sc{margin-left:auto;font-size:19px;font-weight:750;font-variant-numeric:tabular-nums}
+.rec .rh{padding:11px 14px;display:flex;align-items:center;gap:5px;border-bottom:1px solid var(--border-2);
+  background:var(--card-2);flex-wrap:wrap;line-height:1.4}
+.rec .rh .nm{font-size:15px;font-weight:700;color:var(--text);white-space:nowrap}
+.rec .rh .sc{margin-left:auto;font-size:19px;font-weight:750;font-variant-numeric:tabular-nums;
+  flex-shrink:0}
 .rec .rb{padding:11px 14px;font-size:12.5px;flex:1}
 .rec .rb .kv{display:flex;flex-wrap:wrap;gap:9px;margin-bottom:9px;font-size:11.5px;color:var(--muted)}
 .rec .rb .kv span b{color:var(--text);font-weight:650}
@@ -243,6 +244,24 @@ td.code{color:var(--faint);font-size:11.5px}
 .rec.avoid .rh{background:var(--rec-avoid-head)}
 .rec.trend{border-color:var(--ok-br)}
 .rec.trend .rh{background:var(--rec-trend-head)}
+
+/* 推荐卡：移动端竖向布局（名称/价格独占一行，徽标换行） */
+@media (max-width:768px){
+  .rec .rh{flex-direction:column;align-items:flex-start;gap:6px;padding:10px 12px}
+  .rec .rh .sc{margin-left:0;align-self:flex-end;font-size:22px}
+  .rec .rh .nm{font-size:16px}
+  .rec .rb .kv{gap:6px}
+  .rec .rb{padding:10px 12px;font-size:12px}
+}
+
+/* 消息推送板块：分节展示，避免整块文字墙 */
+.push-section{margin-bottom:14px}
+.push-section > b:first-child{
+  display:inline-block;font-size:13px;font-weight:700;color:var(--accent);
+  border-left:3px solid var(--accent);padding-left:8px;margin-bottom:6px}
+.push-section > div{padding-left:11px;font-size:12.5px;line-height:1.7;color:var(--text-2)}
+.push-rec-item{display:inline-flex;align-items:center;gap:4px;margin:2px 6px 2px 0;
+  font-size:12px;background:var(--card-2);border:1px solid var(--border);border-radius:6px;padding:3px 8px}
 
 /* ---------------- 杂项 ---------------- */
 .note{font-size:12px;color:var(--muted);line-height:1.7}
@@ -389,6 +408,8 @@ html[data-theme="light"] #bgfx{display:none}
   .card>h3{font-size:13px;padding:11px 12px}
   .card .body{padding:12px}
   .grid.g2,.grid.g3,.grid.g4{grid-template-columns:1fr;gap:12px}
+  /* 推荐卡网格在手机上单列 */
+  .rec .rh .nm{font-size:14px}
   .split{grid-template-columns:1fr;gap:12px}
   .kpi{padding:12px}
   .kpi .v{font-size:21px}

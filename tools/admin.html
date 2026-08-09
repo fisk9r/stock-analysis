@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>人员管理 · A股盘后分析</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  background:#f0f2f5;color:#1a1a2e;line-height:1.6;min-height:100vh}
+.wrap{max-width:720px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:20px;font-weight:700;margin-bottom:4px;color:#111827}
+.sub{font-size:13px;color:#6b7280;margin-bottom:24px}
+.card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.06);
+  margin-bottom:16px;overflow:hidden}
+.card>h3{font-size:14px;font-weight:600;padding:14px 16px;border-bottom:1px solid #f3f4f6;
+  color:#374151;display:flex;align-items:center;gap:8px}
+.card>h3 .dot{width:8px;height:8px;border-radius:50%;background:#3b82f6}
+.card>.body{padding:16px}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 18px;border:0;border-radius:8px;
+  font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;transition:.15s}
+.btn-primary{background:#2563eb;color:#fff}
+.btn-primary:hover{background:#1d4ed8}
+.btn-danger{background:#dc2626;color:#fff}
+.btn-danger:hover{background:#b91c1c}
+.btn-ghost{background:#f3f4f6;color:#374151;border:1px solid #e5e7eb}
+.btn-ghost:hover{background:#e5e7eb}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+input,select{width:100%;padding:10px 12px;border:1px solid #d1d5db;border-radius:8px;font-size:14px;
+  font-family:inherit;background:#fff;color:#111827;outline:none;transition:border-color .15s}
+input:focus,select:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)}
+label{display:block;font-size:12px;font-weight:600;color:#6b7280;margin:8px 0 6px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:#f9fafb;color:#6b7280;font-weight:600;font-size:11.5px;text-align:left;
+  padding:9px 10px;border-bottom:1px solid #e5e7eb}
+td{padding:9px 10px;border-bottom:1px solid #f3f4f6;vertical-align:middle}
+tr:hover{background:#f9fafb}
+.name-col{font-weight:600;color:#111827}
+.id-col{color:#9ca3af;font-size:11.5px;font-family:"SF Mono",Menlo,monospace}
+.pass-col{color:#059669;font-size:12px;font-family:"SF Mono",Menlo,monospace;
+  user-select:all;-webkit-user-select:all}
+.empty{padding:32px;text-align:center;color:#9ca3af;font-size:13px}
+.toast{position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:10px;font-size:13px;
+  font-weight:500;z-index:999;animation:slideIn .3s ease;max-width:380px}
+.toast.ok{background:#d1fae5;color:#065f46;border:1px solid #34d399}
+.toast.err{background:#fee2e2;color:#991b1b;border:1px solid #f87171}
+.toast.info{background:#dbeafe;color:#1e40af;border:1px solid #60a5fa}
+@keyframes slideIn{from{transform:translateX(40px);opacity:0}to{transform:translateX(0);opacity:1}}
+.form-row{display:flex;gap:10px;align-items:end}
+.form-row input,.form-row select{flex:1}
+.form-row .btn{flex:0 0 auto;white-space:nowrap}
+.pass-show{display:flex;align-items:center;gap:6px;background:#ecfdf5;border:1px solid #a7f3d0;
+  border-radius:6px;padding:8px 12px;margin-top:8px;font-size:12px;color:#047857}
+.pass-show code{flex:1;font-family:"SF Mono",Menlo,monospace;font-size:14px;
+  color:#047857;user-select:all;-webkit-user-select:all;word-break:break-all}
+.hint{font-size:12px;color:#9ca3af;margin-top:12px;line-height:1.7}
+.hint code{background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:11.5px;
+  font-family:"SF Mono",Menlo,monospace;color:#dc2626}
+.status-bar{display:flex;align-items:center;gap:12px;padding:12px 16px;background:#f9fafb;
+  border-bottom:1px solid #f3f4f6;font-size:12px;color:#6b7280}
+.status-bar .dot{width:8px;height:8px;border-radius:50%;background:#9ca3af}
+.status-bar .dot.on{background:#22c55e}
+.modal-overlay{position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.4);
+  display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)}
+.modal{background:#fff;border-radius:14px;padding:24px;width:420px;max-width:90vw;box-shadow:0 20px 60px rgba(0,0,0,.15)}
+.modal h3{font-size:16px;font-weight:700;margin-bottom:16px;color:#111827}
+.modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:20px}
+@media(max-width:600px){
+  .wrap{padding:16px 12px 48px}
+  .form-row{flex-direction:column;align-items:stretch}
+  .modal{width:95vw;padding:18px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>访问人员管理</h1>
+  <p class="sub">管理谁可以查看你的 A 股盘后分析看板。修改后需要重新部署才能生效。</p>
+
+  <div class="card">
+    <div class="status-bar">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusText">正在加载配置…</span>
+    </div>
+    <div class="body">
+      <!-- 添加用户表单 -->
+      <div class="form-row" style="margin-bottom:14px">
+        <div style="flex:1;min-width:0">
+          <label>新用户名称</label>
+          <input id="newName" placeholder="如：张三、李四" maxlength="20">
+        </div>
+        <button class="btn btn-primary" onclick="addUser()" style="margin-top:20px">+ 添加用户</button>
+      </div>
+
+      <!-- 用户列表 -->
+      <table id="userTable">
+        <thead><tr><th>账户 ID</th><th>名称</th><th>口令</th><th>操作</th></tr></thead>
+        <tbody id="userBody"></tbody>
+      </table>
+      <div id="emptyHint" class="empty" style="display:none">暂无用户。点击上方按钮添加。</div>
+
+      <div class="hint">
+        <b>使用说明：</b><br>
+        • 添加用户后会自动生成随机 16 位口令，请把「账户名 + 口令」发给对方。<br>
+        • 删除用户后该账户的加密数据将在下次部署时移除，对方立即无法解密。<br>
+        • 修改完成后，运行 <code>python tools/manage_users.py deploy</code> 或点击下方「一键部署」同步到云端。
+      </div>
+    </div>
+  </div>
+
+  <!-- 部署操作 -->
+  <div class="card">
+    <h3><span class="dot" style="background:#f59e0b"></span> 同步到云端</h3>
+    <div class="body">
+      <p style="font-size:13px;color:#4b5563;margin-bottom:12px">
+        修改人员配置后，必须重新部署才能生效（云端会为每个用户重新生成加密数据）。
+      </p>
+      <button class="btn btn-primary" onclick="doDeploy()">一键部署（git push + 触发构建）</button>
+      <p id="deployResult" style="margin-top:10px;font-size:12px;color:#6b7280"></p>
+    </div>
+  </div>
+</div>
+
+<script>
+var CONFIG_PATH = '../config/allowed_users.json';
+var users = [];
+
+function toast(msg, type) {
+  type = type || 'info';
+  var el = document.createElement('div');
+  el.className = 'toast ' + type;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(function() { if(el.parentNode) el.parentNode.removeChild(el); }, 3500);
+}
+
+function setStatus(ok, text) {
+  var dot = document.getElementById('statusDot');
+  var txt = document.getElementById('statusText');
+  dot.className = 'dot' + (ok ? ' on' : '');
+  txt.textContent = text;
+}
+
+function renderTable() {
+  var tbody = document.getElementById('userBody');
+  var empty = document.getElementById('emptyHint');
+  if (!users.length) {
+    tbody.innerHTML = '';
+    empty.style.display = '';
+    return;
+  }
+  empty.style.display = 'none';
+  tbody.innerHTML = users.map(function(u, i) {
+    return '<tr>' +
+      '<td class="id-col">' + esc(u.id) + '</td>' +
+      '<td class="name-col">' + esc(u.name) + (u.id === 'owner' ? ' <span style="font-size:11px;color:#3b82f6;font-weight:600">管理员</span>' : '') + '</td>' +
+      '<td class="pass-col">' + (u.id === 'owner' ? '—（不显示）' : '<code>' + esc(u.pass) + '</code>') + '</td>' +
+      '<td>' +
+        (u.id === 'owner'
+          ? '<span style="font-size:12px;color:#9ca3af">不可删除</span>'
+          : '<button class="btn btn-danger" style="padding:5px 12px;font-size:12px" onclick="removeUser(' + i + ')">删除</button>') +
+      '</td></tr>';
+  }).join('');
+}
+
+function esc(s) { var d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+
+function generatePass() {
+  var a = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  var arr = new Uint8Array(16);
+  crypto.getRandomValues(arr);
+  return Array.from(arr, function(v) { return a[v % a.length]; }).join('');
+}
+
+function saveConfig(cb) {
+  var data = JSON.stringify({ users: users }, null, 2);
+  // 使用 fetch 写入需要后端支持；这里用 download 兜底 + 显示命令
+  var blob = new Blob([data], { type: 'application/json' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'allowed_users.json';
+  a.click();
+  URL.revokeObjectURL(url);
+
+  // 同时尝试通过 API 写入（如果本地有服务的话）
+  fetch('../api/save-users', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: data
+  }).then(function(r) {
+    if (r.ok) { toast('配置已保存', 'ok'); if (cb) cb(); }
+    else { toast('已下载配置文件，请手动放到 config/allowed_users.json', 'info'); }
+  }).catch(function() {
+    toast('已下载配置文件，请放到 config/allowed_users.json 后点「一键部署」', 'info');
+  });
+}
+
+function addUser() {
+  var name = document.getElementById('newName').value.trim();
+  if (!name) { toast('请输入用户名称', 'err'); return; }
+  var id = name.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g, '').slice(0, 12) || ('user' + Date.now().toString(36));
+  // 确保 id 唯一
+  var base = id;
+  var c = 1;
+  while (users.some(function(u) { return u.id === id; })) { id = base + (++c); }
+  var pass = generatePass();
+  users.push({ id: id, name: name, pass: pass });
+  document.getElementById('newName').value = '';
+  renderTable();
+  saveConfig();
+
+  // 显示口令（方便复制）
+  var passDiv = document.createElement('div');
+  passDiv.className = 'pass-show';
+  passDiv.innerHTML = '<span>口令（已自动复制到剪贴板，请发送给 <b>' + esc(name) + '</b>）：</span><code>' + esc(pass) + '</code>';
+  document.querySelector('.card .body').insertBefore(passDiv, document.getElementById('userTable').parentNode.nextSibling);
+  // 尝试复制到剪贴板
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText('账户：' + name + '\n口令：' + pass).catch(function(){});
+  }
+  setTimeout(function() { if(passDiv.parentNode) passDiv.parentNode.removeChild(passDiv); }, 20000);
+}
+
+function removeUser(idx) {
+  var u = users[idx];
+  if (!u) return;
+  var confirmed = confirm('确定删除「' + u.name + '」（' + u.id + '）？\n\n删除后该用户将无法解密数据。');
+  if (!confirmed) return;
+  users.splice(idx, 1);
+  renderTable();
+  saveConfig();
+  toast('已删除 ' + u.name, 'info');
+}
+
+function doDeploy() {
+  var resultEl = document.getElementById('deployResult');
+  resultEl.innerHTML = '<span style="color:#f59e0b">正在部署…（请确保本机已配置 git 并能 push 到 GitHub）</span>';
+
+  fetch('../api/deploy', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) {
+        resultEl.innerHTML = '<span style="color:#16a34a">部署成功！约 2 分钟后生效。</span>' + (d.url ? ' 站点：<a href="' + d.url + '" target="_blank">' + d.url + '</a>' : '');
+        toast('部署成功！', 'ok');
+      } else {
+        resultEl.innerHTML = '<span style="color:#dc2626">部署失败：' + (d.error || '未知错误') + '</span><br><span style="font-size:11px;color:#9ca3af">请在命令行运行：<code>cd .. && python tools/manage_users.py deploy</code></span>';
+      }
+    })
+    .catch(function() {
+      resultEl.innerHTML = '<span style="color:#f59e0b">本地 API 不可用。请在命令行执行：</span><br>' +
+        '<code style="display:block;margin-top:6px;padding:8px;background:#f3f4f6;border-radius:6px;font-size:12px;white-space:pre-wrap;color:#374151">' +
+        'cd stock-analysis\npython tools/manage_users.py deploy</code>';
+    });
+}
+
+// 加载配置
+function loadConfig() {
+  fetch(CONFIG_PATH)
+    .then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function(data) {
+      users = (data && data.users) || [];
+      setStatus(true, '已加载 ' + users.length + ' 个账户 · 配置路径：' + CONFIG_PATH);
+      renderTable();
+    })
+    .catch(function(e) {
+      // 尝试从 ../config/allowed_users.json 加载（不同工作目录）
+      fetch('config/allowed_users.json')
+        .then(function(r2) {
+          if (!r2.ok) throw new Error('fallback failed');
+          return r2.json();
+        })
+        .then(function(data) {
+          users = (data && data.users) || [];
+          setStatus(true, '已加载 ' + users.length + ' 个账户（备用路径）');
+          renderTable();
+        })
+        .catch(function() {
+          setStatus(false, '找不到配置文件。将使用空列表开始。');
+          users = [];
+          renderTable();
+        });
+    });
+}
+
+loadConfig();
+</script>
+</body>
+</html>

@@ -6,6 +6,7 @@
     python tools/manage_users.py remove --id friend1
     python tools/manage_users.py passwd --id owner            # 换口令
     python tools/manage_users.py sync                         # 只同步不改人
+    python tools/manage_users.py serve                        # 打开浏览器管理界面（推荐）
 
 改完会自动触发一次重建（约 2 分钟），期间旧口令仍可用；重建完成后：
   · 新增的人 → 用新口令即可进
@@ -20,6 +21,9 @@ import json
 import string
 import secrets
 import argparse
+import webbrowser
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from urllib.parse import parse_qs
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from setup_github import (  # noqa: E402
@@ -70,15 +74,109 @@ def show(cfg):
     print("-" * 52)
 
 
+class _APIHandler(SimpleHTTPRequestHandler):
+    """为 admin.html 提供读写配置的本地 API。仅监听 127.0.0.1，不暴露到网络。"""
+
+    def do_GET(self):
+        if self.path == "/api/users":
+            self._json(load())
+        elif self.path == "/":
+            self.path = "/tools/admin.html"
+            return SimpleHTTPRequestHandler.do_GET(self)
+        else:
+            SimpleHTTPRequestHandler.do_GET(self)
+
+    def do_POST(self):
+        if self.path == "/api/save-users":
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length)
+            try:
+                data = json.loads(raw)
+                if "users" not in data:
+                    raise ValueError("缺少 users 字段")
+                save(data)
+                self._json({"ok": True, "msg": "已保存 %d 个用户" % len(data["users"])})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)}, status=400)
+        elif self.path == "/api/deploy":
+            # 同步到 GitHub 并触发构建
+            try:
+                cfg = load()
+                ensure_pynacl()
+                tok_path = os.path.normpath(os.path.join(ROOT, "..", ".ghtoken"))
+                if not os.path.exists(tok_path):
+                    # 尝试默认路径
+                    tok_path = TOKEN_FILE_DEFAULT
+                if not os.path.exists(tok_path):
+                    self._json({"ok": False, "error": "找不到 GitHub 令牌文件（%s）" % tok_path}, status=400)
+                    return
+                tok = open(tok_path, encoding="utf-8").read().strip()
+                owner = get_user(tok)
+                set_secret(tok, owner, "ALLOWED_USERS_JSON", json.dumps(cfg, ensure_ascii=False))
+                dispatch_build(tok, owner)
+                url = "https://%s.github.io/%s/" % (owner, REPO)
+                self._json({"ok": True, "url": url, "msg": "部署已触发，约 2 分钟后生效"})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)}, status=500)
+        else:
+            self.send_error(404)
+
+    def _json(self, data, status=200):
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):  # 静默访问日志
+        pass
+
+
+def serve(port=18789):
+    """启动本地 HTTP 服务并打开浏览器管理界面。"""
+    os.chdir(ROOT)  # 以项目根目录为 web root
+    # 找一个可用端口
+    for p in [port] + list(range(port + 1, port + 10)):
+        try:
+            httpd = HTTPServer(("127.0.0.1", p), _APIHandler)
+            break
+        except OSError:
+            continue
+    else:
+        raise SystemExit("端口 %d-%d 均被占用" % (port, port + 9))
+
+    url = "http://127.0.0.1:%d/" % p
+    print("=" * 52)
+    print("  人员管理界面已启动：%s" % url)
+    print("  按 Ctrl+C 停止服务。")
+    print("=" * 52)
+    webbrowser.open(url)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n已停止。")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("action", choices=["list", "add", "remove", "passwd", "sync"])
+    ap.add_argument("action", nargs="?", default=None,
+                    choices=["list", "add", "remove", "passwd", "sync", "serve"])
     ap.add_argument("--name", default="")
     ap.add_argument("--id", default="")
     ap.add_argument("--pass", dest="pw", default="")
     ap.add_argument("--token-file", default=TOKEN_FILE_DEFAULT)
     ap.add_argument("--no-rebuild", action="store_true", help="只改密钥，不触发重建")
+    ap.add_argument("--port", type=int, default=18789, help="serve 模式的端口号（默认 18789）")
     a = ap.parse_args()
+
+    # 无参数默认 serve
+    if a.action is None:
+        a.action = "serve"
+
+    if a.action == "serve":
+        return serve(port=a.port)
 
     cfg = load()
     changed = False

@@ -323,22 +323,44 @@
   }
 
   function md2html(md) {
-    var lines = (md || '').split('\n'), out = [];
+    var lines = (md || '').split('\n'), out = [], sec = [];
+    // 收集当前分节的内容，遇到 ### / ## 时 flush 上一节
+    function flush() {
+      if (!sec.length) return;
+      out.push('<div class="push-section">' + sec.join('') + '</div>');
+      sec = [];
+    }
     for (var i = 0; i < lines.length; i++) {
       var t = lines[i], raw = t.replace(/^\s+/, '');
-      if (/^### /.test(t)) out.push('<div style="margin:7px 0 2px;font-weight:700;color:var(--accent)">' + E(t.slice(4)) + '</div>');
-      else if (/^## /.test(t)) out.push('<div style="margin:9px 0 3px;font-weight:800;font-size:15px">' + E(t.slice(3)) + '</div>');
-      else if (/^---+$/.test(t)) out.push('<hr style="border:none;border-top:1px solid var(--border);margin:7px 0">');
-      else if (/^>\s?/.test(t)) out.push('<div style="margin:2px 0;padding-left:8px;border-left:3px solid var(--accent);color:var(--muted);white-space:pre-wrap">' + E(t.replace(/^>\s?/, '')) + '</div>');
-      else if (/^[-*]\s/.test(raw)) out.push('<div style="margin:1px 0 1px 16px;white-space:pre-wrap">• ' + E(t.trim().slice(2)) + '</div>');
-      else if (/^\d+\.\s/.test(raw)) out.push('<div style="margin:1px 0 1px 16px;white-space:pre-wrap">' + E(t.trim()) + '</div>');
-      else if (t.trim() === '') out.push('<div style="height:3px"></div>');
-      else out.push('<div style="margin:1px 0;white-space:pre-wrap">' + E(t) + '</div>');
+      if (/^### /.test(t)) { flush(); out.push('<div class="push-section"><b>' + E(t.slice(4)) + '</b><div>'); sec = []; }
+      else if (/^## /.test(t)) { flush(); out.push('<div class="push-section"><b style="font-size:15px">' + E(t.slice(3)) + '</b><div>'); sec = []; }
+      else if (/^---+$/.test(t)) { flush(); out.push('<hr style="border:none;border-top:1px solid var(--border);margin:7px 0">'); }
+      else if (/^>\s?/.test(t)) { sec.push('<div style="margin:2px 0;padding-left:8px;border-left:3px solid var(--accent);color:var(--muted);white-space:pre-wrap;font-size:12px">' + E(t.replace(/^>\s?/, '')) + '</div>'); }
+      else if (/^[-*]\s/.test(raw)) {
+        // 推荐标的行 → 渲染为标签
+        var m = raw.match(/^\d+\.\s+(.+)$/);
+        if (m) { sec.push('<div class="push-rec-item">' + parseRecLine(m[1]) + '</div>'); }
+        else { sec.push('<div style="margin:1px 0 1px 16px;white-space:pre-wrap;font-size:12.5px;color:var(--text-2)">• ' + E(t.trim().slice(2)) + '</div>'); }
+      }
+      else if (/^\d+\.\s/.test(raw)) { sec.push('<div style="margin:1px 0 1px 16px;white-space:pre-wrap">' + E(t.trim()) + '</div>'); }
+      else if (t.trim() === '') { sec.push('<div style="height:3px"></div>'); }
+      else { sec.push('<div style="margin:1px 0;white-space:pre-wrap;font-size:12.5px;color:var(--text-2)">' + E(t) + '</div>'); }
     }
+    flush();
     return out.map(function (h) {
       return h.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
               .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener" style="color:var(--accent)">$1</a>');
     }).join('');
+  }
+
+  // 解析推荐行 "名称(板) · 分数 · 晋级% | 简因" 为内联标签
+  function parseRecLine(line) {
+    var html = line
+      .replace(/\*\*(.+?)\*\*/g, '<b style="color:var(--text)">$1</b>')
+      .replace(/·/g, '<span style="color:var(--muted);margin:0 3px">·</span>')
+      .replace(/(买入价值\*\*\d+分\*\*)/g, '<span style="color:' + C.up + '">$1</span>')
+      .replace(/(晋级\*\*[\d.]+%\*\*)/g, '<span style="color:' + C.gold + '">$1</span>');
+    return html;
   }
 
   function pushCard() {

@@ -383,7 +383,7 @@ def push(summary, dry_run=False, mode="close"):
     if mode == "anomaly":
         _prefer = ["wechat_pushplus", "wecom", "telegram", "email"]
     else:
-        _prefer = ["wechat_serverchan", "wecom", "telegram", "email"]
+        _prefer = ["wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"]
     dispatchers = [(n, fn, c) for (n, fn, c) in _all if n in _prefer and c]
     for name, fn, c in dispatchers:
         if not c:
@@ -738,9 +738,11 @@ def format_weekend_summary(data, url="", news_items=None):
 
 
 if __name__ == "__main__":
-    # 测试：python notifier.py --dry-run [--preauction|--auction|--anomaly]
+    # 测试：python notifier.py [--send] [--preauction|--auction|--anomaly]
+    #   不加 --send 只打印不发送（安全默认）；加了 --send 才真正推送
     mode = "close"
     for kw in ("preauction", "auction", "anomaly"):
         if ("--" + kw) in sys.argv:
             mode = kw
-    push({"title": "测试", "text": "这是一条测试推送"}, dry_run=("--dry-run" in sys.argv), mode=mode)
+    dry_run = ("--send" not in sys.argv)
+    push({"title": "测试", "text": "这是一条测试推送"}, dry_run=dry_run, mode=mode)
