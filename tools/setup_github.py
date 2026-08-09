@@ -32,6 +32,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOKEN_FILE_DEFAULT = os.path.join(ROOT, "..", ".ghtoken")  # 仓库外的保管位置
 REPO = "stock-analysis"
 API = "https://api.github.com"
+# 上传 Release 附件必须走这个域名，api.github.com 不接受附件体
+UPLOADS = "https://uploads.github.com"
 
 
 def log(m):
@@ -47,8 +49,9 @@ def ensure_pynacl():
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "pynacl"])
 
 
-def api(method, path, token, data=None, is_json=True, binary=None):
-    url = API + path
+def api(method, path, token, data=None, is_json=True, binary=None,
+        timeout=60, base=None):
+    url = (base or API) + path
     req = urllib.request.Request(url, method=method)
     req.add_header("Authorization", "Bearer " + token)
     req.add_header("Accept", "application/vnd.github+json")
@@ -59,11 +62,12 @@ def api(method, path, token, data=None, is_json=True, binary=None):
         body = json.dumps(data).encode("utf-8")
         req.data = body
     elif binary is not None:
-        req.add_header("Content-Type", "application/gzip")
+        req.add_header("Content-Type", "application/octet-stream")
+        req.add_header("Content-Length", str(len(binary)))
         req.data = binary
     try:
-        r = urllib.request.urlopen(req, timeout=60)
-        return r.status, (r.read().decode("utf-8", "replace") if not binary else b"")
+        r = urllib.request.urlopen(req, timeout=timeout)
+        return r.status, r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "replace")
 
@@ -154,34 +158,64 @@ def create_release_and_upload(token, owner):
         if not os.path.exists(fpath):
             log("⚠ 找不到 %s，跳过上传（请先在本机运行 update.bat 生成）。" % fname)
             continue
-        # 若已存在同名资产先删后传
-        lst, _ = api("GET", "/repos/%s/%s/releases/%s/assets" % (owner, REPO, rid), token)
+        size = os.path.getsize(fpath)
+
+        # 已存在同名附件：大小一致就跳过（脚本可重复运行不重传），否则先删
+        st, lst = api("GET", "/repos/%s/%s/releases/%s/assets" % (owner, REPO, rid), token)
+        existing = None
         try:
             for a in json.loads(lst):
                 if a["name"] == fname:
-                    api("DELETE", "/repos/%s/%s/releases/assets/%s" % (owner, REPO, a["id"]), token)
+                    existing = a
         except Exception:
             pass
+        if existing is not None:
+            if existing.get("size") == size and existing.get("state") == "uploaded":
+                log("↩ %s 已在 Release 上且大小一致（%.1f MB），跳过。" % (fname, size / 1e6))
+                continue
+            api("DELETE", "/repos/%s/%s/releases/assets/%s" % (owner, REPO, existing["id"]), token)
+            log("已清除残留的 %s（上次传了一半）。" % fname)
+
         with open(fpath, "rb") as f:
             data = f.read()
-        st, body = api("POST",
-                       "/repos/%s/%s/releases/%s/assets?name=%s" % (owner, REPO, rid, fname),
-                       token, binary=data)
-        if st in (201, 200):
-            log("✅ 已上传 %s（%.1f MB）" % (fname, len(data) / 1e6))
-        else:
-            log("⚠ 上传 %s 失败（HTTP %d）：%s" % (fname, st, body[:160]))
+
+        ok = False
+        for attempt in (1, 2, 3):
+            log("上传 %s（%.1f MB）第 %d 次尝试，大文件请耐心等待…" % (fname, size / 1e6, attempt))
+            try:
+                st, body = api("POST",
+                               "/repos/%s/%s/releases/%s/assets?name=%s" % (owner, REPO, rid, fname),
+                               token, binary=data, timeout=900, base=UPLOADS)
+            except Exception as e:
+                st, body = 0, "%s: %s" % (type(e).__name__, e)
+            if st in (201, 200):
+                log("✅ 已上传 %s（%.1f MB）" % (fname, size / 1e6))
+                ok = True
+                break
+            log("⚠ 第 %d 次失败（HTTP %s）：%s" % (attempt, st, str(body)[:160]))
+            # 失败可能留下半截附件，重试前必须清掉，否则 GitHub 报 name 已占用
+            st2, lst2 = api("GET", "/repos/%s/%s/releases/%s/assets" % (owner, REPO, rid), token)
+            try:
+                for a in json.loads(lst2):
+                    if a["name"] == fname:
+                        api("DELETE", "/repos/%s/%s/releases/assets/%s" % (owner, REPO, a["id"]), token)
+            except Exception:
+                pass
+        if not ok:
+            raise SystemExit(
+                "上传 %s 连续 3 次失败。可能是网络到 GitHub 不稳定。\n"
+                "请稍后重跑：python tools/setup_github.py（脚本可重复运行，会跳过已完成的步骤）" % fname)
 
 
 def enable_pages(token, owner):
-    for method, payload in (("POST", {"build_type": "workflow"}),
-                            ("PATCH", {"build_type": "workflow"})):
-        st, body = api("POST" if method == "POST" else "PATCH",
-                       "/repos/%s/%s/pages" % (owner, REPO), token,
+    # 先 POST 创建；若已存在（409）再 PUT 改成 workflow 源
+    for method in ("POST", "PUT"):
+        st, body = api(method, "/repos/%s/%s/pages" % (owner, REPO), token,
                        {"build_type": "workflow"})
         if st in (201, 204, 200):
             log("✅ GitHub Pages 已开启（源：GitHub Actions）。")
             return
+        log("Pages %s → HTTP %d %s" % (method, st, str(body)[:120]))
     # API 失败时给出人工兜底（Settings 里点一下即可）
     log("⚠ 自动开启 Pages 失败，请手动操作一次：")
     log("   Settings → Pages → Build and deployment → Source 选 “GitHub Actions”。")
@@ -198,9 +232,17 @@ def dispatch_build(token, owner):
 
 
 def gen_owner_user():
-    """生成 owner 账户（随机强口令），写入本地 config（gitignore 已排除）并作为 Secret。"""
-    alphabet = string.ascii_letters + string.digits
-    pw = "".join(secrets.choice(alphabet) for _ in range(16))
+    """生成 owner 账户（随机强口令），写入本地 config（gitignore 已排除）并作为 Secret。
+
+    重复运行时复用已有口令——否则每跑一次脚本口令就变，你刚记下的就失效了。
+    """
+    pw_file = os.path.join(ROOT, "config", "owner_pass.txt")
+    if os.path.exists(pw_file):
+        pw = open(pw_file, encoding="utf-8").read().strip()
+        log("复用已生成的管理员口令（config/owner_pass.txt）。")
+    else:
+        alphabet = string.ascii_letters + string.digits
+        pw = "".join(secrets.choice(alphabet) for _ in range(16))
     cfg = {"users": [{"id": "owner", "name": "我（管理员）", "pass": pw}]}
     p = os.path.join(ROOT, "config", "allowed_users.json")
     with open(p, "w", encoding="utf-8") as f:
