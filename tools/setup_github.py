@@ -118,6 +118,7 @@ def push_code(token, owner):
     run("git remote add origin %s" % url)
     r = run("git add -A && git commit -q -m \"init: A股盘后分析（多源校验 + 加密访问）\" || true")
     log("commit 输出：%s" % (r.stderr.strip() or r.stdout.strip() or "(无变更)"))
+    r = run("git config http.schannelCheckRevoke false")
     r = run("git push -u origin main")
     log("push 输出：%s" % ((r.stdout or "") .strip() or (r.stderr or "").strip() or "(无输出)"))
     if r.returncode != 0:
