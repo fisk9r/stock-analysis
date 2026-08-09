@@ -117,13 +117,25 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p cache dist
+          # 优先取整包；取不到再找分片（首次播种时本机网络差会走分片上传）
           if gh release download "$DB_TAG" -p "$DB_FILE" -D cache/ 2>/dev/null; then
-            gunzip -f "cache/$DB_FILE"
-            echo "✅ 数据库已恢复：$(du -h cache/market.db | cut -f1)"
+            echo "整包快照已下载"
+          elif gh release download "$DB_TAG" -p "$DB_FILE.part*" -D cache/parts/ 2>/dev/null; then
+            N=$(ls cache/parts/ | wc -l)
+            echo "检测到 $N 个分片，正在拼接…"
+            cat $(ls cache/parts/$DB_FILE.part* | sort) > "cache/$DB_FILE"
+            rm -rf cache/parts
+            echo "拼接完成：$(du -h cache/$DB_FILE | cut -f1)"
           else
-            echo "::error::找不到数据库快照。请按 DEPLOY-GITHUB.md 第 5 步，把本机 market.db.gz 上传到 tag 为 ${DB_TAG} 的 Release。"
+            echo "::error::找不到数据库快照。请在本机运行 tools/setup_github.py 把 market.db.gz 传到 tag 为 ${DB_TAG} 的 Release。"
             exit 1
           fi
+          if ! gunzip -t "cache/$DB_FILE" 2>/dev/null; then
+            echo "::error::快照文件损坏（gzip 校验失败），可能是上传中断。请重新上传。"
+            exit 1
+          fi
+          gunzip -f "cache/$DB_FILE"
+          echo "✅ 数据库已恢复：$(du -h cache/market.db | cut -f1)"
           # 状态包首次运行可以不存在（build 会自己生成），故不致命
           if gh release download "$DB_TAG" -p "$STATE_FILE" -D /tmp/ 2>/dev/null; then
             tar xzf "/tmp/$STATE_FILE" -C .
@@ -198,6 +210,10 @@ jobs:
           gzip -6 -c cache/market.db > "cache/$DB_FILE"
           gh release upload "$DB_TAG" "cache/$DB_FILE" --clobber
           echo "✅ 数据库已回存（$(du -h cache/$DB_FILE | cut -f1)）"
+          # 整包已回存，首次播种用的分片就没用了，清掉免得下次误拼旧数据
+          for a in $(gh release view "$DB_TAG" --json assets -q '.assets[].name' | grep -E "^$DB_FILE\.(part|manifest)" || true); do
+            gh release delete-asset "$DB_TAG" "$a" -y && echo "已清理分片 $a"
+          done
 
       - name: 回存状态
         # 任何任务都可能往 push_log.jsonl 追加记录，所以一律回存。
@@ -220,11 +236,22 @@ jobs:
       - name: 打包站点
         if: steps.task.outputs.task == 'build'
         run: |
-          rm -rf site && mkdir -p site/data
-          cp dist/index.html dist/styles.css dist/charts.js dist/app.js dist/auth.js dist/users.json site/ 2>/dev/null
-          cp -r dist/data site/ 2>/dev/null || true
+          rm -rf site && mkdir -p site
+          # 逐个拷贝：默认 shell 是 bash -e，一次 cp 多文件只要缺一个整步就挂
+          for f in index.html styles.css charts.js app.js auth.js users.json; do
+            if [ -f "dist/$f" ]; then cp "dist/$f" site/; else echo "::warning::缺少 dist/$f"; fi
+          done
+          # 目标必须写全 site/data；写成 site/ 会因目录已存在而变成 site/data/data
+          if [ -d dist/data ]; then cp -r dist/data site/data; fi
+          touch site/.nojekyll
+          # 明文数据绝不能上公网——整套口令门禁就靠它不存在
           rm -f site/data.js site/data.js.bak
-          echo "✅ 站点文件：$(ls site | tr '\n' ' ')"
+          if [ ! -f site/users.json ] || [ -z "$(ls -A site/data 2>/dev/null)" ]; then
+            echo "::error::加密数据缺失（users.json 或 data/*.bin）。检查 ALLOWED_USERS_JSON 密钥。"
+            exit 1
+          fi
+          echo "✅ 站点文件：$(ls -A site | tr '\n' ' ')"
+          echo "✅ 加密数据：$(ls site/data | tr '\n' ' ')"
 
       - name: 上传站点
         if: steps.task.outputs.task == 'build'

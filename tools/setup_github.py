@@ -139,7 +139,89 @@ def get_release_id(token, owner):
     return None
 
 
-def create_release_and_upload(token, owner):
+def list_assets(token, owner, rid):
+    st, body = api("GET", "/repos/%s/%s/releases/%s/assets?per_page=100" % (owner, REPO, rid), token)
+    try:
+        return json.loads(body)
+    except Exception:
+        return []
+
+
+def del_asset(token, owner, aid):
+    api("DELETE", "/repos/%s/%s/releases/assets/%s" % (owner, REPO, aid), token)
+
+
+def put_asset(token, owner, rid, name, blob, tries=3):
+    """上传单个附件，失败自动清残留再重试。返回 True/False。"""
+    for attempt in range(1, tries + 1):
+        log("  上传 %s（%.1f MB）尝试 %d/%d…" % (name, len(blob) / 1e6, attempt, tries))
+        try:
+            st, body = api("POST",
+                           "/repos/%s/%s/releases/%s/assets?name=%s" % (owner, REPO, rid, name),
+                           token, binary=blob, timeout=900, base=UPLOADS)
+        except Exception as e:
+            st, body = 0, "%s: %s" % (type(e).__name__, e)
+        if st in (200, 201):
+            log("  ✅ %s 完成" % name)
+            return True
+        log("  ⚠ 失败（HTTP %s）：%s" % (st, str(body)[:140]))
+        for a in list_assets(token, owner, rid):
+            if a["name"] == name:
+                del_asset(token, owner, a["id"])
+    return False
+
+
+def upload_chunked(token, owner, rid, fpath, base_name, chunk_mb=6):
+    """把大文件切片上传（每片单独重试）。云端 restore 时会自动拼回。
+
+    单文件直传在国内网络下经常半路断，切片后每片只有几 MB，
+    断了也只重传那一片，不用从头再来。
+    """
+    size = os.path.getsize(fpath)
+    step = chunk_mb * 1024 * 1024
+    total = (size + step - 1) // step
+    log("改用分片上传：%s → %d 片（每片约 %d MB）" % (base_name, total, chunk_mb))
+
+    have = {a["name"]: a for a in list_assets(token, owner, rid)}
+    # 清掉单文件残留，避免云端 restore 时误取到半截文件
+    if base_name in have:
+        del_asset(token, owner, have[base_name]["id"])
+
+    with open(fpath, "rb") as f:
+        for i in range(total):
+            blob = f.read(step)
+            name = "%s.part%02d" % (base_name, i)
+            old = have.get(name)
+            if old is not None and old.get("size") == len(blob) and old.get("state") == "uploaded":
+                log("  ↩ %s 已存在且大小一致，跳过" % name)
+                continue
+            if old is not None:
+                del_asset(token, owner, old["id"])
+            if not put_asset(token, owner, rid, name, blob):
+                raise SystemExit("分片 %s 上传失败，请稍后重跑脚本（已传的片会跳过）。" % name)
+
+    # 清理多余的旧分片（上次文件更大时留下的）
+    for a in list_assets(token, owner, rid):
+        n = a["name"]
+        if n.startswith(base_name + ".part"):
+            try:
+                idx = int(n.rsplit("part", 1)[1])
+            except Exception:
+                continue
+            if idx >= total:
+                del_asset(token, owner, a["id"])
+                log("  清理多余分片 %s" % n)
+
+    # 记录清单，云端据此校验拼接结果
+    manifest = json.dumps({"file": base_name, "parts": total, "size": size}).encode("utf-8")
+    for a in list_assets(token, owner, rid):
+        if a["name"] == base_name + ".manifest.json":
+            del_asset(token, owner, a["id"])
+    put_asset(token, owner, rid, base_name + ".manifest.json", manifest)
+    log("✅ %s 分片上传完成（%d 片 / %.1f MB）" % (base_name, total, size / 1e6))
+
+
+def create_release_and_upload(token, owner, chunk_mb=0):
     rid = get_release_id(token, owner)
     if rid is None:
         st, body = api("POST", "/repos/%s/%s/releases" % (owner, REPO), token, {
@@ -159,52 +241,35 @@ def create_release_and_upload(token, owner):
             log("⚠ 找不到 %s，跳过上传（请先在本机运行 update.bat 生成）。" % fname)
             continue
         size = os.path.getsize(fpath)
+        have = {a["name"]: a for a in list_assets(token, owner, rid)}
 
-        # 已存在同名附件：大小一致就跳过（脚本可重复运行不重传），否则先删
-        st, lst = api("GET", "/repos/%s/%s/releases/%s/assets" % (owner, REPO, rid), token)
-        existing = None
-        try:
-            for a in json.loads(lst):
-                if a["name"] == fname:
-                    existing = a
-        except Exception:
-            pass
-        if existing is not None:
-            if existing.get("size") == size and existing.get("state") == "uploaded":
-                log("↩ %s 已在 Release 上且大小一致（%.1f MB），跳过。" % (fname, size / 1e6))
-                continue
-            api("DELETE", "/repos/%s/%s/releases/assets/%s" % (owner, REPO, existing["id"]), token)
+        # 已完整存在就跳过——脚本可反复运行，不重传
+        cur = have.get(fname)
+        if cur is not None and cur.get("size") == size and cur.get("state") == "uploaded":
+            log("↩ %s 已在 Release 上且大小一致（%.1f MB），跳过。" % (fname, size / 1e6))
+            continue
+        # 分片版是否已完整？（上次走了分片路径）
+        man = have.get(fname + ".manifest.json")
+        if man is not None and chunk_mb <= 0:
+            log("↩ %s 已有分片版本，跳过（云端会自动拼接）。" % fname)
+            continue
+
+        # 小文件（state.tar.gz 几十 KB）永远直传；大文件按开关决定
+        if chunk_mb > 0 and size > chunk_mb * 1024 * 1024:
+            upload_chunked(token, owner, rid, fpath, fname, chunk_mb)
+            continue
+
+        if cur is not None:
+            del_asset(token, owner, cur["id"])
             log("已清除残留的 %s（上次传了一半）。" % fname)
-
         with open(fpath, "rb") as f:
             data = f.read()
-
-        ok = False
-        for attempt in (1, 2, 3):
-            log("上传 %s（%.1f MB）第 %d 次尝试，大文件请耐心等待…" % (fname, size / 1e6, attempt))
-            try:
-                st, body = api("POST",
-                               "/repos/%s/%s/releases/%s/assets?name=%s" % (owner, REPO, rid, fname),
-                               token, binary=data, timeout=900, base=UPLOADS)
-            except Exception as e:
-                st, body = 0, "%s: %s" % (type(e).__name__, e)
-            if st in (201, 200):
-                log("✅ 已上传 %s（%.1f MB）" % (fname, size / 1e6))
-                ok = True
-                break
-            log("⚠ 第 %d 次失败（HTTP %s）：%s" % (attempt, st, str(body)[:160]))
-            # 失败可能留下半截附件，重试前必须清掉，否则 GitHub 报 name 已占用
-            st2, lst2 = api("GET", "/repos/%s/%s/releases/%s/assets" % (owner, REPO, rid), token)
-            try:
-                for a in json.loads(lst2):
-                    if a["name"] == fname:
-                        api("DELETE", "/repos/%s/%s/releases/assets/%s" % (owner, REPO, a["id"]), token)
-            except Exception:
-                pass
-        if not ok:
+        log("上传 %s（%.1f MB），大文件请耐心等待…" % (fname, size / 1e6))
+        if not put_asset(token, owner, rid, fname, data):
             raise SystemExit(
-                "上传 %s 连续 3 次失败。可能是网络到 GitHub 不稳定。\n"
-                "请稍后重跑：python tools/setup_github.py（脚本可重复运行，会跳过已完成的步骤）" % fname)
+                "上传 %s 连续失败，多半是本机到 GitHub 的网络不稳。\n"
+                "改用分片重传：python tools/setup_github.py --chunk-mb 6\n"
+                "（脚本可重复运行，已完成的步骤会自动跳过）" % fname)
 
 
 def enable_pages(token, owner):
@@ -258,6 +323,10 @@ def main():
     ap.add_argument("--token-file", default=TOKEN_FILE_DEFAULT)
     ap.add_argument("--token", default="")
     ap.add_argument("--owner", default="")
+    ap.add_argument("--chunk-mb", type=int, default=0,
+                    help="大文件切片上传的每片 MB 数（网络不稳时用，建议 6）")
+    ap.add_argument("--only", default="",
+                    help="只跑某一步：upload / pages / build")
     args = ap.parse_args()
 
     ensure_pynacl()
@@ -273,6 +342,17 @@ def main():
     if not args.owner:
         log("已校验令牌，登录账户：%s" % owner)
 
+    # --only 用于中途某步失败后单独重跑，不必从头再来
+    if args.only == "upload":
+        create_release_and_upload(tok, owner, args.chunk_mb)
+        return
+    if args.only == "pages":
+        enable_pages(tok, owner)
+        return
+    if args.only == "build":
+        dispatch_build(tok, owner)
+        return
+
     create_repo(tok, owner)
 
     # 生成 owner 账户 + 读取本地推送配置
@@ -285,7 +365,7 @@ def main():
     push_code(tok, owner)
     set_secret(tok, owner, "NOTIFY_JSON", notify_json)
     set_secret(tok, owner, "ALLOWED_USERS_JSON", au_json)
-    create_release_and_upload(tok, owner)
+    create_release_and_upload(tok, owner, args.chunk_mb)
     enable_pages(tok, owner)
     dispatch_build(tok, owner)
 

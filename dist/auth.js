@@ -4,6 +4,22 @@
 (function () {
   'use strict';
   var SALT_LEN = 16, ITER = 200000, LABEL = 'stock-analysis-v1';
+  var STORE_KEY = 'sa_auth_v1';
+
+  // 口令记忆：这是给自己和朋友用的看板，威胁模型是"链接被转发"，不是"设备被攻破"。
+  // 存本机可免去每天重输；换设备/改口令自动失效。
+  function remember(id, pass) {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify({ id: id, pass: pass })); } catch (e) {}
+  }
+  function recall() {
+    try {
+      var v = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
+      return (v && v.id && v.pass) ? v : null;
+    } catch (e) { return null; }
+  }
+  function forget() {
+    try { localStorage.removeItem(STORE_KEY); } catch (e) {}
+  }
 
   function el(tag, cls, html) {
     var e = document.createElement(tag);
@@ -28,7 +44,13 @@
       'background:linear-gradient(135deg,#2563eb,#06b6d4);color:#fff;font-size:15px;font-weight:600;}',
       '.sa-card button:disabled{opacity:.6;cursor:default;}',
       '.sa-err{margin-top:12px;font-size:12px;color:#f87171;min-height:16px;}',
-      '.sa-loading{margin-top:14px;font-size:12px;color:#8aa0c8;}'
+      '.sa-loading{margin-top:14px;font-size:12px;color:#8aa0c8;}',
+      '.sa-remember{display:flex;align-items:center;gap:7px;margin-top:14px;font-size:12px;color:#9fb3d8;cursor:pointer;}',
+      '.sa-remember input{width:auto;margin:0;}',
+      '.sa-switch{position:fixed;right:14px;bottom:14px;z-index:9998;padding:7px 12px;border:1px solid #243453;',
+      'border-radius:8px;background:rgba(15,22,38,.86);color:#8aa0c8;font-size:12px;cursor:pointer;',
+      'backdrop-filter:blur(4px);font-family:inherit;}',
+      '.sa-switch:hover{color:#e8eefc;border-color:#3b82f6;}'
     ].join('');
     var s = document.createElement('style');
     s.textContent = css;
@@ -48,6 +70,17 @@
   function renderApp() {
     // charts.js 定义全局 CH，app.js 渲染；顺序加载
     return loadScript('charts.js').then(function () { return loadScript('app.js'); });
+  }
+
+  function addSwitchButton() {
+    if (document.querySelector('.sa-switch')) return;
+    var b = el('button', 'sa-switch', '切换账户');
+    b.type = 'button';
+    b.addEventListener('click', function () {
+      forget();
+      location.reload();
+    });
+    document.body.appendChild(b);
   }
 
   function showError(box, msg) { box.textContent = msg || ''; }
@@ -72,6 +105,13 @@
     pwd.type = 'password'; pwd.placeholder = '请输入口令'; pwd.autocomplete = 'off';
     card.appendChild(pwd);
 
+    var remLabel = el('label', 'sa-remember');
+    var remBox = document.createElement('input');
+    remBox.type = 'checkbox'; remBox.checked = true;
+    remLabel.appendChild(remBox);
+    remLabel.appendChild(document.createTextNode('在本机记住口令（下次免输）'));
+    card.appendChild(remLabel);
+
     var btn = el('button', null, '解密并进入');
     card.appendChild(btn);
     var err = el('div', 'sa-err');
@@ -87,9 +127,11 @@
       var id = sel.value;
       var pass = pwd.value;
       if (!pass) { showError(err, '请输入口令'); return; }
-      btn.disabled = true; loading.textContent = '正在解密…';
+      btn.disabled = true; loading.textContent = '正在解密…（首次约 1 秒）';
       fetchBlob(id, pass).then(function () {
+        if (remBox.checked) remember(id, pass); else forget();
         overlay.parentNode.removeChild(overlay);
+        addSwitchButton();
         return renderApp();
       }).catch(function (e) {
         btn.disabled = false; loading.textContent = '';
@@ -149,6 +191,17 @@
       });
   }
 
+  function splash(text) {
+    injectStyle();
+    var o = el('div', 'sa-lock');
+    var c = el('div', 'sa-card');
+    c.appendChild(el('h2', null, 'A股盘后分析'));
+    c.appendChild(el('p', 'sub', text));
+    o.appendChild(c);
+    document.body.appendChild(o);
+    return o;
+  }
+
   function boot() {
     // 开发模式：明文 data.js 已被 index.html 加载
     if (window.__STOCK_DATA__) { return renderApp(); }
@@ -157,6 +210,22 @@
       return r.json();
     }).then(function (meta) {
       if (!meta || !meta.length) throw new Error('nousers');
+
+      // 本机记住过口令就直接进；口令被管理员改过则自动清掉并回到登录框
+      var saved = recall();
+      var known = saved && meta.some(function (m) { return m.id === saved.id; });
+      if (known) {
+        var sp = splash('正在解密数据…');
+        return fetchBlob(saved.id, saved.pass).then(function () {
+          sp.parentNode.removeChild(sp);
+          addSwitchButton();
+          return renderApp();
+        }).catch(function () {
+          forget();
+          sp.parentNode.removeChild(sp);
+          buildLogin(meta);
+        });
+      }
       buildLogin(meta);
     }).catch(function () {
       injectStyle();

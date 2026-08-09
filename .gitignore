@@ -7,6 +7,8 @@ config/owner_pass.txt
 # ---- 运行时生成的加密产物（由流水线在云端重建，不进 git） ----
 dist/data/
 dist/users.json
+# 打包给 Pages 的暂存目录，每次重建（gitignore 不支持行尾注释，注释必须单独一行）
+site/
 
 # ---- 数据库：76MB，不进 git 历史；靠 Release asset 持久化 ----
 cache/*.db
