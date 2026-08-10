@@ -1009,8 +1009,57 @@
     setInterval(check, 180000);  // 每 3 分钟探测一次
   }
 
-  /* ---------------- 用户管理（owner 专属入口，对接本机 serve 服务） ---------------- */
-  var MU = { users: [], connected: false, overlay: null, noteEl: null };
+  /* ---------------- 用户管理（owner 专属）----------------
+   * 两种模式，自动择优：
+   *   local  —— 本机在跑 manage_users.py serve：走本机 API（它持令牌，最省事）
+   *   remote —— 不在本机（手机 / 别人的电脑）：浏览器直接对 GitHub API 操作
+   *             · 现有名单从 data/_admin.bin 解出（GitHub 密钥只能写不能读，
+   *               所以云端额外存了一份用 owner 口令加密的名单快照）
+   *             · 改完用 NaCl 密封加密写回 ALLOWED_USERS_JSON 密钥，再触发构建
+   *             · 令牌只留在本次会话，明文口令从不上传
+   */
+  var MU = {
+    users: [], connected: false, overlay: null, noteEl: null,
+    mode: null,          // 'local' | 'remote'
+    ownerPass: '',       // 解开名单快照用，仅存内存
+    token: '',           // GitHub 令牌，仅存内存 / sessionStorage
+    repoOwner: '', repoName: 'stock-analysis'
+  };
+  var MU_TOKEN_KEY = 'sa_gh_token';
+
+  // 站点部署在 <owner>.github.io/<repo>/，据此推断仓库；本地预览时回退
+  function muRepo() {
+    if (!MU.repoOwner) {
+      var m = /^([^.]+)\.github\.io$/i.exec(location.hostname || '');
+      MU.repoOwner = m ? m[1] : 'fisk9r';
+      var seg = (location.pathname || '').split('/').filter(Boolean);
+      if (seg.length) MU.repoName = seg[0];
+    }
+    return MU.repoOwner + '/' + MU.repoName;
+  }
+  function muRecallToken() {
+    if (MU.token) return MU.token;
+    try { MU.token = sessionStorage.getItem(MU_TOKEN_KEY) || localStorage.getItem(MU_TOKEN_KEY) || ''; } catch (e) {}
+    return MU.token;
+  }
+  // 登录时若勾了「记住口令」，这里就能直接拿到 owner 口令，免得再输一次
+  function muRecallPass() {
+    try {
+      var v = JSON.parse(localStorage.getItem('sa_auth_v1') || 'null');
+      if (v && v.id === 'owner' && v.pass) return v.pass;
+    } catch (e) {}
+    return '';
+  }
+  function muLoadNacl() {
+    if (window.SA_SEAL) return Promise.resolve();
+    return new Promise(function (res, rej) {
+      var s = document.createElement('script');
+      s.src = 'nacl.js?t=' + Math.floor(Date.now() / 3600000);
+      s.onload = function () { window.SA_SEAL ? res() : rej(new Error('加密库加载异常')); };
+      s.onerror = function () { rej(new Error('加密库 nacl.js 加载失败')); };
+      document.head.appendChild(s);
+    });
+  }
   function saEsc(s) { var d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
   function muGenPass() {
     var a = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -1055,7 +1104,18 @@
       '.sa-mgmt-hint{margin-top:10px;font-size:11.5px;color:#6b7a99;line-height:1.6;}',
       '.sa-mgmt-off .cmd{display:block;margin:10px 0;padding:10px 12px;background:#0a1120;border:1px solid #243453;',
       'border-radius:8px;color:#7dd3fc;font-family:"SF Mono",Menlo,monospace;font-size:13px;user-select:all;}',
-      '.sa-mgmt .muted{color:#6b7a99;font-size:12px;}'
+      '.sa-mgmt .muted{color:#6b7a99;font-size:12px;}',
+      // 远程模式的口令 / 令牌输入
+      '.mu-lb{display:block;margin:14px 0 6px;font-size:12.5px;color:#9fb3d8;}',
+      '.mu-lb .muted{margin-left:6px;}',
+      '.mu-in{width:100%;box-sizing:border-box;padding:9px 11px;border-radius:8px;border:1px solid #243453;',
+      'background:#0a1120;color:#e8eefc;font-size:14px;outline:none;font-family:inherit;}',
+      '.mu-in:focus{border-color:#3b82f6;}',
+      '.mu-ck{display:flex;align-items:center;gap:7px;margin-top:12px;font-size:12.5px;color:#9fb3d8;cursor:pointer;}',
+      '.mu-ck input{margin:0;}',
+      '.mu-badge{display:inline-flex;align-items:center;padding:7px 12px;border-radius:8px;font-size:11.5px;',
+      'background:#0a1120;border:1px solid #243453;color:#7dd3fc;white-space:nowrap;}',
+      '.sa-mgmt-hint code{color:#7dd3fc;font-family:"SF Mono",Menlo,monospace;}'
     ].join('');
     var s = document.createElement('style'); s.id = 'sa-mgmt-css'; s.textContent = css;
     document.head.appendChild(s);
@@ -1067,14 +1127,184 @@
   }
   function muConnect() {
     var ac = new AbortController();
-    var t = setTimeout(function () { ac.abort(); }, 3000);
+    var t = setTimeout(function () { ac.abort(); }, 2500);
     fetch('http://127.0.0.1:18789/api/users', { cache: 'no-store', signal: ac.signal })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(function (d) { clearTimeout(t); MU.users = (d && d.users) || []; MU.connected = true; muRender(); })
-      .catch(function (e) { clearTimeout(t); MU.connected = false; muRenderOffline(e); });
+      .then(function (d) {
+        clearTimeout(t);
+        MU.users = (d && d.users) || []; MU.connected = true; MU.mode = 'local';
+        muRender();
+      })
+      .catch(function () {
+        // 本机没开服务 —— 不是死路，转为浏览器直连 GitHub 的远程模式
+        clearTimeout(t); MU.connected = false; MU.mode = 'remote';
+        muStartRemote();
+      });
+  }
+
+  /* —— 远程模式：先把「owner 口令 + GitHub 令牌」凑齐，再拉名单 —— */
+  function muStartRemote() {
+    MU.ownerPass = MU.ownerPass || muRecallPass();
+    muRecallToken();
+    if (MU.ownerPass && MU.token) { muLoadRemote(); return; }
+    muRenderRemoteGate();
+  }
+
+  function muRenderRemoteGate(errMsg) {
+    var b = document.getElementById('saMgmtBody'); if (!b) return;
+    var needPass = !MU.ownerPass;
+    b.innerHTML = '<div class="sa-mgmt-off">' +
+      '<p>本机管理服务未运行，已切换到<b style="color:#7dd3fc">远程模式</b>——直接在这台设备上改，' +
+      '不需要你家里的电脑开机。</p>' +
+      (needPass
+        ? '<label class="mu-lb">管理员口令<span class="muted">（你登录本站用的那个，用于解开云端名单）</span></label>' +
+          '<input class="mu-in" id="muPassIn" type="password" placeholder="请输入管理员口令" autocomplete="off">'
+        : '') +
+      '<label class="mu-lb">GitHub 令牌<span class="muted">（需要 repo 权限，仅本次会话保存，不上传任何地方）</span></label>' +
+      '<input class="mu-in" id="muTokIn" type="password" placeholder="ghp_… 或 github_pat_…" autocomplete="off">' +
+      '<label class="mu-ck"><input type="checkbox" id="muTokKeep">在这台设备上记住令牌（下次免输）</label>' +
+      '<div class="sa-mgmt-actions">' +
+      '<button class="mbtn mbtn-p" id="muGoBtn">进入管理</button>' +
+      '<a class="mbtn mbtn-ghost" href="https://github.com/settings/tokens/new?scopes=repo&description=stock-analysis%20admin" target="_blank" rel="noopener">去创建令牌</a>' +
+      '</div>' +
+      '<div class="sa-mgmt-note' + (errMsg ? ' err' : '') + '" id="muNote">' + (errMsg ? saEsc(errMsg) : '') + '</div>' +
+      '<div class="sa-mgmt-hint">创建令牌时勾选 <code>repo</code> 即可（fine-grained 令牌需要 Secrets 写 + Actions 写 + Contents 读）。' +
+      '令牌等于仓库钥匙，别发给别人；不想留痕就别勾「记住」。</div>' +
+      '</div>';
+    MU.noteEl = document.getElementById('muNote');
+    var go = document.getElementById('muGoBtn');
+    function submit() {
+      var tok = (document.getElementById('muTokIn').value || '').trim();
+      if (needPass) {
+        var p = (document.getElementById('muPassIn').value || '').trim();
+        if (!p) { muNote('请输入管理员口令', 'err'); return; }
+        MU.ownerPass = p;
+      }
+      if (!tok) { muNote('请粘贴 GitHub 令牌', 'err'); return; }
+      MU.token = tok;
+      try {
+        if (document.getElementById('muTokKeep').checked) localStorage.setItem(MU_TOKEN_KEY, tok);
+        else sessionStorage.setItem(MU_TOKEN_KEY, tok);
+      } catch (e) {}
+      muLoadRemote();
+    }
+    go.addEventListener('click', submit);
+    b.querySelectorAll('.mu-in').forEach(function (inp) {
+      inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+    });
+  }
+
+  /* 从云端取回名单：data/_admin.bin 是用 owner 口令加密的完整名单快照 */
+  function muLoadRemote() {
+    var b = document.getElementById('saMgmtBody');
+    if (b) b.innerHTML = '<div class="sa-mgmt-loading">正在解密云端名单…（约 1 秒）</div>';
+    MU.noteEl = null;
+    fetch('data/_admin.bin?t=' + Date.now(), { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('云端还没有名单快照（需要先部署一次新版流水线）');
+        return r.arrayBuffer();
+      })
+      .then(function (buf) { return muDecrypt(new Uint8Array(buf), MU.ownerPass); })
+      .then(function (txt) {
+        var d;
+        try { d = JSON.parse(txt); } catch (e) { throw new Error('管理员口令不正确'); }
+        MU.users = (d && d.users) || [];
+        MU.connected = true;
+        muRender();
+        muNote('已连接 GitHub（' + muRepo() + '），当前为远程模式', 'info');
+      })
+      .catch(function (e) {
+        MU.ownerPass = '';   // 口令可能错了，回到入口重来
+        muRenderRemoteGate((e && e.message) || String(e));
+      });
+  }
+
+  /* 与 auth.js / encrypt_data.py 同款：PBKDF2-HMAC-SHA256 + HMAC 密钥流 XOR */
+  function muDecrypt(bytes, pass) {
+    var SALT_LEN = 16, ITER = 200000;
+    var salt = bytes.slice(0, SALT_LEN), ct = bytes.slice(SALT_LEN);
+    return crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveKey'])
+      .then(function (mat) {
+        return crypto.subtle.deriveKey(
+          { name: 'PBKDF2', salt: salt, iterations: ITER, hash: 'SHA-256' },
+          mat, { name: 'HMAC', hash: 'SHA-256', length: 256 }, false, ['sign']);
+      })
+      .then(function (key) {
+        var out = new Uint8Array(ct.length), p = 0, i = 0;
+        function block() {
+          if (p >= ct.length) return Promise.resolve();
+          var ctr = new Uint8Array(4);
+          new DataView(ctr.buffer).setUint32(0, i, false);
+          return crypto.subtle.sign('HMAC', key, ctr).then(function (mac) {
+            mac = new Uint8Array(mac);
+            for (var k = 0; k < mac.length && p < ct.length; k++) { out[p] = ct[p] ^ mac[k]; p++; }
+            i++;
+          }).then(block);
+        }
+        return block().then(function () { return new TextDecoder().decode(out); });
+      });
+  }
+
+  function muGh(method, path, body) {
+    return fetch('https://api.github.com' + path, {
+      method: method,
+      headers: {
+        'Authorization': 'Bearer ' + MU.token,
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28'
+      },
+      body: body ? JSON.stringify(body) : undefined
+    }).then(function (r) {
+      if (r.status === 204) return {};
+      return r.text().then(function (t) {
+        var j = null;
+        try { j = t ? JSON.parse(t) : {}; } catch (e) {}
+        if (!r.ok) {
+          var msg = (j && j.message) || ('HTTP ' + r.status);
+          if (r.status === 401) msg = '令牌无效或已过期';
+          else if (r.status === 403) msg = '令牌权限不足（需要 repo / Secrets 写权限）';
+          else if (r.status === 404) msg = '找不到仓库 ' + muRepo() + '（或令牌无权访问）';
+          throw new Error(msg);
+        }
+        return j || {};
+      });
+    });
+  }
+
+  /* 远程保存：密封加密写回 Secret → 触发构建。明文口令只在浏览器里，不经第三方 */
+  function muSaveDeployRemote() {
+    if (!MU.users.length) { muNote('至少要保留一个用户', 'err'); return; }
+    var btn = document.getElementById('muDeployBtn');
+    if (btn) btn.disabled = true;
+    muNote('正在加载加密库…', 'info');
+    muLoadNacl()
+      .then(function () {
+        muNote('正在写入 GitHub 密钥…', 'info');
+        return muGh('GET', '/repos/' + muRepo() + '/actions/secrets/public-key');
+      })
+      .then(function (pk) {
+        if (!pk || !pk.key || !pk.key_id) throw new Error('没能取到仓库公钥');
+        var sealed = window.SA_SEAL(JSON.stringify({ users: MU.users }), pk.key);
+        return muGh('PUT', '/repos/' + muRepo() + '/actions/secrets/ALLOWED_USERS_JSON',
+          { encrypted_value: sealed, key_id: pk.key_id });
+      })
+      .then(function () {
+        muNote('密钥已更新，正在触发重建…', 'info');
+        return muGh('POST', '/repos/' + muRepo() + '/actions/workflows/stock.yml/dispatches',
+          { ref: 'main', inputs: { task: 'build' } });
+      })
+      .then(function () {
+        if (btn) btn.disabled = false;
+        muNote('已提交 ✅ 云端正在重建，约 2 分钟后生效（期间旧口令仍可用）', 'ok');
+      })
+      .catch(function (e) {
+        if (btn) btn.disabled = false;
+        muNote('失败：' + ((e && e.message) || e), 'err');
+      });
   }
   function muRender() {
     var b = document.getElementById('saMgmtBody'); if (!b) return;
+    var isRemote = MU.mode === 'remote';
     var rows = MU.users.map(function (u, i) {
       var isOwner = u.id === 'owner';
       return '<tr>' +
@@ -1097,10 +1327,15 @@
         : '<div class="sa-mgmt-empty">暂无其他用户。添加一个，把「账户名 + 口令」发给对方即可。</div>') +
       '<div class="sa-mgmt-actions">' +
       '<button class="mbtn mbtn-p" id="muDeployBtn">保存并部署</button>' +
-      '<a class="mbtn mbtn-ghost" href="http://127.0.0.1:18789/" target="_blank" rel="noopener">在本地页面打开</a>' +
+      (isRemote
+        ? '<span class="mu-badge">远程模式 · ' + saEsc(muRepo()) + '</span>' +
+          '<button class="mbtn mbtn-ghost" id="muForgetBtn">清除令牌</button>'
+        : '<a class="mbtn mbtn-ghost" href="http://127.0.0.1:18789/" target="_blank" rel="noopener">在本地页面打开</a>' +
+          '<span class="mu-badge">本机模式</span>') +
       '</div>' +
       '<div class="sa-mgmt-note" id="muNote"></div>' +
-      '<div class="sa-mgmt-hint">修改后必须「保存并部署」才会生效（云端为每个用户重新生成加密数据）。</div>';
+      '<div class="sa-mgmt-hint">修改后必须「保存并部署」才会生效（云端为每个用户重新生成加密数据，约 2 分钟）。' +
+      (isRemote ? '口令明文只在你这台设备上，写到 GitHub 前会先加密。' : '') + '</div>';
     MU.noteEl = document.getElementById('muNote');
     document.getElementById('muAddBtn').addEventListener('click', function () {
       var uid = document.getElementById('muNewId').value.trim();
@@ -1108,33 +1343,20 @@
       if (!uid) { muNote('请输入用户名', 'err'); return; }
       muAdd(uid, unm);
     });
-    document.getElementById('muDeployBtn').addEventListener('click', muSaveDeploy);
+    document.getElementById('muDeployBtn').addEventListener('click',
+      isRemote ? muSaveDeployRemote : muSaveDeploy);
+    if (isRemote) {
+      document.getElementById('muForgetBtn').addEventListener('click', function () {
+        MU.token = '';
+        try { sessionStorage.removeItem(MU_TOKEN_KEY); localStorage.removeItem(MU_TOKEN_KEY); } catch (e) {}
+        muRenderRemoteGate('令牌已清除，需要重新输入。');
+      });
+    }
     b.querySelectorAll('button[data-act]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var i = parseInt(btn.dataset.i, 10), act = btn.dataset.act;
         if (act === 'rm') muRemove(i); else if (act === 'cp') muChgPass(i);
       });
-    });
-  }
-  function muRenderOffline(e) {
-    var b = document.getElementById('saMgmtBody'); if (!b) return;
-    b.innerHTML = '<div class="sa-mgmt-off">' +
-      '<p>未检测到本机管理服务。管理用户需在本机运行管理服务（它持有 GitHub 令牌，负责真正写入并部署）。</p>' +
-      '<code class="cmd">python tools/manage_users.py serve</code>' +
-      '<div class="sa-mgmt-actions">' +
-      '<button class="mbtn mbtn-p" id="muCopy">复制命令</button>' +
-      '<a class="mbtn mbtn-ghost" href="http://127.0.0.1:18789/" target="_blank" rel="noopener">打开本地管理页面</a>' +
-      '</div>' +
-      '<div class="sa-mgmt-note" id="muNote"></div>' +
-      '<div class="sa-mgmt-hint">在项目目录运行上面命令后，刷新本页即可在此直接增删用户并一键部署。</div>' +
-      '</div>';
-    MU.noteEl = document.getElementById('muNote');
-    document.getElementById('muCopy').addEventListener('click', function () {
-      var cmd = 'python tools/manage_users.py serve';
-      if (navigator.clipboard) navigator.clipboard.writeText(cmd).then(
-        function () { muNote('已复制：' + cmd, 'ok'); },
-        function () { muNote('复制失败，请手动复制：' + cmd, 'err'); });
-      else muNote('请手动复制：' + cmd, 'info');
     });
   }
   function muAdd(uname, dname) {

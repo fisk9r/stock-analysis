@@ -32,7 +32,14 @@ news.json
 _*.py
 *.log
 logs/
+tmp/
 tmp/node_modules/
+
+# ---- nacl.js 的上游源码与自检临时产物（bundle_nacl.js 会自动重新下载） ----
+tools/naclbuild/tweetnacl.min.js
+tools/naclbuild/b2b.js
+tools/naclbuild/testkey.json
+tools/naclbuild/sealed.json
 
 # ---- 系统 ----
 __pycache__/
