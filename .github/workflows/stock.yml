@@ -283,6 +283,11 @@ jobs:
       name: github-pages
       url: ${{ steps.pages.outputs.page_url }}
     steps:
+      # 部署后体检脚本 tools/verify_site.py 需要仓库代码，deploy 是独立 job
+      # （必须跑在 github-pages environment 里），默认不检出，故此处显式 checkout。
+      - name: 检出仓库（供部署后体检脚本使用）
+        uses: actions/checkout@v4
+
       - name: 部署到 GitHub Pages
         id: pages
         uses: actions/deploy-pages@v4
