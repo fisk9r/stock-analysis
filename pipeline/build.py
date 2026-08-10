@@ -57,11 +57,6 @@ def load_news():
     return {"items": [], "summary": "", "updated": ""}
 
 
-def index_from_bars(u, date):
-    """从缓存的指数快照 + 计算宽度"""
-    return None
-
-
 def load_global_market(con, date):
     """抓取外围主要指数（美股/日股/韩股）；优先实时，失败回退本地缓存。"""
     fresh = []

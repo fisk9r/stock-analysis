@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+import time
 import datetime
 import urllib.request
 import urllib.parse
@@ -176,18 +177,29 @@ def _curl_post_json(url, payload, token=None, timeout=15):
             pass
 
 
-def http_post_form(url, data, timeout=15):
+def _with_retry(fn, fallback, timeout):
+    """先直连重试（应对境外 runner 出口抖动），全部失败再退回 curl 兜底。"""
+    last = None
+    for _ in range(3):
+        try:
+            return fn()
+        except Exception as e:
+            last = e
+            time.sleep(1.2)
     try:
-        return _post_form(url, data, timeout)
+        return fallback()
     except Exception:
-        return _curl_post_form(url, data, timeout)
+        raise last
+
+
+def http_post_form(url, data, timeout=15):
+    return _with_retry(lambda: _post_form(url, data, timeout),
+                       lambda: _curl_post_form(url, data, timeout), timeout)
 
 
 def http_post_json(url, payload, token=None, timeout=15):
-    try:
-        return _post_json(url, payload, token, timeout)
-    except Exception:
-        return _curl_post_json(url, payload, token, timeout)
+    return _with_retry(lambda: _post_json(url, payload, token, timeout),
+                       lambda: _curl_post_json(url, payload, token, timeout), timeout)
 
 
 def _iter_sendkeys(cfg):

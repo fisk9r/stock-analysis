@@ -1,0 +1,82 @@
+name: 定时看门狗（兜底触发）
+
+# 作用：GitHub 的 schedule 是「尽力而为」，高负载时可能延迟甚至丢弃某次触发。
+#   本看门狗在收盘(16:17)与复盘(20:35)两个关键窗口各探一次：
+#   若 stock.yml 当日尚未成功运行，则代为触发对应任务，确保每天至少一次完整分析与推送。
+# 安全：仅用默认 GITHUB_TOKEN（无需额外 PAT）；只在「当日还没成功跑过」时才补触发，
+#   因此不会与正常调度重复推送。
+
+on:
+  schedule:
+    - cron: '17 8 * * 1-5'    # 北京 16:17 兜底「收盘完整分析」
+    - cron: '35 12 * * 1-5'   # 北京 20:35 兜底「复盘补发」
+  workflow_dispatch:
+    inputs:
+      task:
+        description: '手动兜底的任务'
+        required: false
+        default: ''
+        type: choice
+        options: ['', build, close_again]
+
+permissions:
+  actions: write   # 用于代为触发 stock.yml 的 workflow_dispatch
+  contents: read
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 判定并兜底触发
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const now = new Date();
+            const bj = new Date(now.getTime() + 8 * 3600 * 1000); // 北京时间为 UTC+8
+            const day = bj.getUTCDay(); // 0=周日 6=周六
+            if (day === 0 || day === 6) {
+              core.info('周末，看门狗休眠');
+              return;
+            }
+
+            // 手动触发时以入参为准
+            const manual = '${{ github.event.inputs.task }}';
+            let task = null, thresholdHour = null;
+            if (manual) {
+              task = manual;
+              thresholdHour = (task === 'close_again') ? 20 : 16;
+            } else {
+              const bh = bj.getUTCHours();
+              if (bh === 16) { task = 'build'; thresholdHour = 16; }
+              else if (bh === 20) { task = 'close_again'; thresholdHour = 20; }
+              else { core.info('不在兜底窗口（北京小时=' + bh + '）'); return; }
+            }
+
+            // 取 stock.yml 最近一次成功运行，换算成北京时间
+            const wf = 'stock.yml';
+            const res = await github.rest.actions.listWorkflowRuns({
+              owner, repo, workflow_id: wf, status: 'success', per_page: 5
+            });
+            const runs = res.data.workflow_runs || [];
+            let lastBJ = null;
+            if (runs.length) {
+              const created = new Date(runs[0].created_at); // API 默认按时间倒序
+              lastBJ = new Date(created.getTime() + 8 * 3600 * 1000);
+            }
+            // 阈值：今天 thresholdHour:00（北京）
+            const thr = new Date(Date.UTC(
+              bj.getUTCFullYear(), bj.getUTCMonth(), bj.getUTCDate(), thresholdHour, 0, 0));
+
+            if (lastBJ && lastBJ >= thr) {
+              core.info('最近成功运行 ' + lastBJ.toISOString() + ' 已在阈值(' +
+                        thr.toISOString() + ')之后，无需兜底');
+              return;
+            }
+            core.info('触发兜底任务 ' + task + '（最近成功运行=' +
+                      (lastBJ ? lastBJ.toISOString() : '无') + '）');
+            await github.rest.actions.createWorkflowDispatch({
+              owner, repo, workflow_id: wf, ref: 'main',
+              inputs: { task: task }
+            });
