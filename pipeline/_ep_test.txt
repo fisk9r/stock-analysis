@@ -1,3 +1,0 @@
-﻿https://api.deepseek.com/v1/chat/completions -> Authentication Fails (governor)
-https://api.moonshot.cn/v1/chat/completions -> {"error":{"message":"Incorrect API key provided","type":"incorrect_api_key_error"}}
-https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions -> {"error":{"message":"Required body invalid, please check the request body format.","type":"invalid_request_error","param":null,"code":null},"request_id":"a00c67f0-1ee1-9bb1-9658-fdcf5c233cd9"}

@@ -1,6 +1,0 @@
-﻿keys: ['meta', 'market', 'sectors', 'limit_ups', 'ladder', 'streak_stats', 'break_risk', 'auction', 'ladder_history', 'rotation', 'demons', 'demon_templates', 'recommend', 'global_market', 'regime', 'news', 'narrative', 'ai_consensus', 'last_push']
-date: 2026-08-07
-recommend all n= 60
-last_push modes: ['close', 'preauction']
-   close -> A股盘后复盘 2026-08-07
-   preauction -> A股竞价前观察 2026-08-07

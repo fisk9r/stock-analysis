@@ -1,5 +1,0 @@
-﻿prev_date recs found: 0
-[notifier] wechat_serverchan:ServerChan 鎺ㄩ€佹垚鍔?
-CLOSE PUSH: ['file:dist\\last_push_close.md', 'wechat_serverchan:ServerChan 鎺ㄩ€佹垚鍔?]
-[notifier] wechat_serverchan:ServerChan 鎺ㄩ€佹垚鍔?
-AUCTION PUSH: ['file:dist\\last_push_auction.md', 'wechat_serverchan:ServerChan 鎺ㄩ€佹垚鍔?]

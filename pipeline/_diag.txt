@@ -1,7 +1,0 @@
-ROOT=C:\Users\Basshunter-j\WorkBuddy\2026-08-04-11-06-17\stock-analysis
-CFG_PATH=C:\Users\Basshunter-j\WorkBuddy\2026-08-04-11-06-17\stock-analysis\config\notify.json
-exists=True
-DIST=C:\Users\Basshunter-j\WorkBuddy\2026-08-04-11-06-17\stock-analysis\dist
-dist_exists=True
-cfg_keys=['wechat_serverchan', 'wechat_pushplus', 'wecom', 'telegram', 'email']
-wx={'sendkey': 'SCT12204T4DOUz2sJS5quERzYkqkZxpfC'}
