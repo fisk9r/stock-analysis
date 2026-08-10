@@ -469,7 +469,7 @@
         return '<span class="lchip" title="' + E(x.industry || '') + ' · 质量分 ' + f(x.quality, 0) +
           ' · 换手 ' + f(x.turn, 1) + '% · 流通 ' + yi(x.float_mv) + '">' +
           (x.yizi ? '<span style="color:' + C.up + ';font-size:10px">一</span>' : '') +
-          '<b>' + E(x.name) + '</b><span class="q">' + f(x.quality, 0) + '</span>' +
+          stk(x.code, x.name) + '<span class="q">' + f(x.quality, 0) + '</span>' +
           '<span style="color:' + col + ';font-size:10.5px;font-weight:700">' +
           (pc === null || pc === undefined ? '' : f(pc, 0) + '%') + '</span></span>';
       }).join('');
@@ -492,7 +492,7 @@
       return (b.streak - a.streak) || (b.quality - a.quality);
     }).map(function (x) {
       var pc = (D.break_risk || []).filter(function (r) { return r.code === x.code; })[0];
-      return '<tr><td class="code">' + E(x.code) + '</td><td class="name">' + E(x.name) +
+      return '<tr><td class="code">' + E(x.code) + '</td><td class="name">' + stk(x.code, x.name) +
         (x.yizi ? ' <span class="bd lb3">一字</span>' : '') + '</td>' +
         '<td class="c">' + lbBadge(x.streak) + '</td>' +
         '<td class="muted">' + E(x.industry || '—') + '</td>' +
@@ -558,7 +558,7 @@
           (s.pct === null || s.pct === undefined ? '' : '<span>板块 ' + sign(s.pct) + '%</span>') +
           (s.main_net ? '<span>主力 ' + sign(s.main_net / 1e8, 1) + '亿</span>' : '') + '</div>' +
           '<div class="chips">' + (s.top || []).map(function (t) {
-            return '<span class="chip">' + E(t.name) + ' <b>' + t.streak + '板</b></span>';
+            return '<span class="chip">' + stk(t.code || '', t.name) + ' <b>' + t.streak + '板</b></span>';
           }).join('') + '</div></div>';
       }).join('') + '</div>';
       return card(title, body, hint);
@@ -641,7 +641,7 @@
           '<span class="fbar"><i style="' + (pos ? 'left:50%' : 'right:50%') + ';width:' + w.toFixed(0) + '%;background:' +
           (pos ? C.up : C.down) + '"></i></span><span class="fn">' + E(x.note) + '</span></div>';
       }).join('');
-      return '<tr><td class="code">' + E(r.code) + '</td><td class="name">' + E(r.name) + '</td>' +
+      return '<tr><td class="code">' + E(r.code) + '</td><td class="name">' + stk(r.code, r.name) + '</td>' +
         '<td class="c">' + lbBadge(r.streak) + '</td>' +
         '<td class="muted">' + E(r.industry || '—') + '</td>' +
         '<td class="r num">' + f(r.quality, 0) + '</td>' +
@@ -672,7 +672,7 @@
     var top3 = dem.slice(0, 3);
     h += '<div class="grid g3">' + top3.map(function (d) {
       var sim = (d.similar || [])[0] || {};
-      return '<div class="card"><h3>' + E(d.name) + ' <span class="bd lb' + Math.min(6, d.streak) + '">' + d.streak +
+      return '<div class="card"><h3>' + stk(d.code, d.name) + ' <span class="bd lb' + Math.min(6, d.streak) + '">' + d.streak +
         '板</span><span class="hint">妖股基因 ' + f(d.score, 1) + '</span></h3><div class="body">' +
         CH.svgRadar((d.traits || []).map(function (t) { return { l: t.k, v: t.v }; }),
           { w: 290, h: 262, color: d.score >= 65 ? C.up : C.blue }) +
@@ -691,7 +691,7 @@
         return '<span class="chip">' + E(x.name) + ' <b>' + f(x.sim, 0) + '%</b> <span class="faint">+' +
           f(x.gain, 0) + '%</span></span>';
       }).join(' ');
-      return '<tr><td class="code">' + E(d.code) + '</td><td class="name">' + E(d.name) + '</td>' +
+      return '<tr><td class="code">' + E(d.code) + '</td><td class="name">' + stk(d.code, d.name) + '</td>' +
         '<td class="c">' + lbBadge(d.streak) + '</td><td class="muted">' + E(d.industry || '—') + '</td>' +
         '<td class="r num">' + qBar(d.score, d.score >= 65 ? C.purple : C.gray) + ' <b>' + f(d.score, 1) + '</b></td>' +
         '<td class="r num faint">' + f(d.pattern, 1) + '</td><td class="r num faint">' + f(d.trait, 1) + '</td>' +
@@ -774,7 +774,7 @@
             + '<span>妖股基因 <b>' + f(it.demon, 0) + '</b></span>'
             + '</div>';
         return '<div class="rec ' + cls + '"><div class="rh">' +
-          '<span class="nm">' + E(it.name) + '</span><span class="code faint">' + E(it.code) + '</span>' +
+          '<span class="nm">' + stk(it.code, it.name) + '</span><span class="code faint">' + E(it.code) + '</span>' +
           lbBadge(it.streak) + tierBadge(it.sector_tier) + vaBadge + hcBadge +
           '<span class="sc" style="color:' + scol + '">' + f(it.score, 1) + '</span></div>' +
           '<div class="rb">' + kvHtml +
@@ -807,7 +807,7 @@
     var rows = (R.all || []).map(function (it, i) {
       var wcol = it.worth_score >= 60 ? C.up : it.worth_score >= 45 ? C.gold : C.gray;
       return '<tr><td class="faint">' + (i + 1) + '</td><td class="code">' + E(it.code) + '</td>' +
-        '<td class="name">' + E(it.name) + qBadge(it) + '</td><td class="c">' + lbBadge(it.streak) + '</td>' +
+        '<td class="name">' + stk(it.code, it.name) + qBadge(it) + '</td><td class="c">' + lbBadge(it.streak) + '</td>' +
         '<td class="muted">' + E(it.industry || '—') + '</td><td class="c">' + tierBadge(it.sector_tier) + '</td>' +
         '<td class="r num">' + f(it.quality, 0) + '</td><td class="r num">' + f(it.p_continue, 0) + '%</td>' +
         '<td class="r num">' + f(it.demon, 0) + '</td>' +
@@ -840,6 +840,13 @@
       return '<span class="bd ' + (m[p] || 'gray') + '">' + E(p) + '</span>';
     }
     var h = '';
+    var pcount = {};
+    arr.forEach(function (a) { if (a.pattern) pcount[a.pattern] = (pcount[a.pattern] || 0) + 1; });
+    var patOrder = ['弱转强', '强转弱', 'T字板', '一字板', '换手板', '高开高走'];
+    h += '<div class="toolbar" style="margin-bottom:14px"><span class="muted" style="font-weight:600">竞价形态筛选：</span>' +
+      patOrder.filter(function (p) { return pcount[p]; }).map(function (p) {
+        return '<button class="pat-chip" data-p="' + E(p) + '">' + E(p) + ' <b>' + pcount[p] + '</b></button>';
+      }).join('') + '</div>';
     h += '<div class="grid g4" style="margin-bottom:14px">' +
       kpi('一字板', n2(sum.yizi), '开盘即封死，最强一致', sum.yizi > 0 ? 'up' : '') +
       kpi('弱转强', n2(sum.weak_strong), '低开/平开却涨停，次日乐观', sum.weak_strong > 0 ? 'gold' : '') +
@@ -866,7 +873,7 @@
     var top = arr.slice().sort(function (a, b) { return (b.auction_score || 0) - (a.auction_score || 0); }).slice(0, 14);
     var rows = top.map(function (a) {
       var pc = rmap[a.code];
-      return '<tr><td class="code">' + E(a.code) + '</td><td class="name">' + E(a.name) + '</td>' +
+      return '<tr><td class="code">' + E(a.code) + '</td><td class="name">' + stk(a.code, a.name) + '</td>' +
         '<td class="c">' + lbBadge(a.streak) + '</td>' +
         '<td class="r num ' + (a.open_pct >= 0 ? 'up' : 'down') + '">' + (a.open_pct >= 0 ? '+' : '') + f(a.open_pct, 2) + '%</td>' +
         '<td class="r num ' + (a.intraday >= 0 ? 'up' : 'down') + '">' + (a.intraday >= 0 ? '+' : '') + f(a.intraday, 1) + '%</td>' +
@@ -885,7 +892,7 @@
       if (!list.length) return card(title, '<div class="empty">当日无此类标的</div>', hint);
       var body = '<div class="grid g2">' + list.map(function (a) {
         var pc = rmap[a.code];
-        return '<div class="rec ' + cls + '"><div class="rh"><span class="nm">' + E(a.name) + '</span>' +
+        return '<div class="rec ' + cls + '"><div class="rh"><span class="nm">' + stk(a.code, a.name) + '</span>' +
           '<span class="code faint">' + E(a.code) + '</span>' + lbBadge(a.streak) + patChip(a.pattern) +
           '<span class="sc" style="color:' + (a.auction_score >= 75 ? C.up : C.gold) + '">' + f(a.auction_score, 0) + '</span></div>' +
           '<div class="note">高开 ' + (a.open_pct >= 0 ? '+' : '') + f(a.open_pct, 2) + '% · 日内 ' +
@@ -904,7 +911,7 @@
     if (yz.length) {
       h += card('⚡ 一字板（' + yz.length + '）', '<div class="chips" style="display:flex;flex-wrap:wrap;gap:6px">' +
         yz.map(function (a) {
-          return '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + '">' + E(a.name) + ' <b>' + a.streak + '板</b></span>';
+          return '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + '">' + stk(a.code, a.name) + ' <b>' + a.streak + '板</b></span>';
         }).join('') + '</div>', '一字无量封板 = 最强一致预期，但次日易一字加速或爆量开板');
     }
 
@@ -917,7 +924,7 @@
       }).map(function (a) {
         var va = a.vol_anomaly;
         var cls = va.warn ? 'danger' : va.flag === '放量异动' ? 'warn' : 'gray';
-        return '<tr><td class="name">' + E(a.name) + '</td><td class="code">' + E(a.code) + '</td>' +
+        return '<tr><td class="name">' + stk(a.code, a.name) + '</td><td class="code">' + E(a.code) + '</td>' +
           '<td class="c">' + lbBadge(a.streak) + '</td>' +
           '<td class="c"><span class="bd ' + cls + '">' + E(va.flag) + '</span></td>' +
           '<td class="r num">' + (va.ratio ? '×' + f(va.ratio, 1) : '—') + '</td>' +
@@ -1186,6 +1193,209 @@
     muConnect();
   }
 
+  /* ---------------- K线（运行时从本机 serve 代理抓取，不打包） ---------------- */
+  var KL = { overlay: null };
+  function ensureKlineStyle() {
+    if (document.getElementById('kl-css')) return;
+    var css = [
+      '.kl-ov{position:fixed;inset:0;z-index:9998;display:flex;align-items:center;justify-content:center;',
+      'background:rgba(6,10,18,.82);backdrop-filter:blur(6px);',
+      'font-family:-apple-system,Segoe UI,Roboto,"Microsoft YaHei",sans-serif;}',
+      '.kl{width:780px;max-width:94vw;max-height:92vh;display:flex;flex-direction:column;',
+      'background:var(--card);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow-lg);overflow:hidden;}',
+      '.kl-h{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-bottom:1px solid var(--border);}',
+      '.kl-t{font-size:15px;font-weight:700;color:var(--text);display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;}',
+      '.kl-t .kl-code{font-size:12px;color:var(--muted);font-family:"SF Mono",Menlo,monospace;}',
+      '.kl-t .kl-last{font-size:12.5px;font-family:"SF Mono",Menlo,monospace;}',
+      '.kl-x{cursor:pointer;color:var(--muted);font-size:16px;line-height:1;padding:2px 7px;border-radius:6px;}',
+      '.kl-x:hover{background:var(--card-2);color:var(--text);}',
+      '.kl-b{padding:14px 16px;overflow:auto;}',
+      '.kl-cv{width:100%;height:380px;display:block;}',
+      '.kl-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--muted);margin:8px 0 2px;}',
+      '.kl-msg{font-size:13px;color:var(--muted);line-height:1.7;}',
+      '.kl-off{color:var(--warn);background:var(--warn-bg);border:1px solid var(--warn-br);border-radius:8px;padding:12px 14px;}',
+      '.kl-off code{user-select:all;}',
+      '.kl-hint{margin-top:10px;font-size:11.5px;color:var(--faint);line-height:1.6;}',
+      '.kl-loading,.kl-empty{padding:26px;text-align:center;color:var(--muted);font-size:13px;}',
+      '.plist{display:flex;flex-direction:column;gap:6px;max-height:62vh;overflow:auto;}',
+      '.pitem{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);',
+      'border-radius:8px;background:var(--card-2);font-size:13px;}',
+      '.pitem .code{color:var(--faint);font-size:11.5px;}',
+      '.pitem .muted{color:var(--muted);font-size:11.5px;}'
+    ].join('');
+    var s = document.createElement('style'); s.id = 'kl-css'; s.textContent = css;
+    document.head.appendChild(s);
+  }
+  function klTheme() {
+    var tech = (document.documentElement && document.documentElement.getAttribute('data-theme')) === 'tech';
+    return tech ? {
+      up: '#ff6b6b', down: '#3ddc84', grid: 'rgba(34,211,238,.12)', axis: 'rgba(147,165,196,.5)',
+      text: '#93a5c4', ma5: '#fbbf24', ma10: '#22d3ee', ma20: '#a78bfa', cross: 'rgba(34,211,238,.55)', bg: '#0b1424'
+    } : {
+      up: '#d12626', down: '#217a33', grid: '#eceff3', axis: 'rgba(91,103,121,.5)',
+      text: '#5b6779', ma5: '#d97706', ma10: '#1971c2', ma20: '#7c3aed', cross: 'rgba(24,100,171,.5)', bg: '#ffffff'
+    };
+  }
+  /* 可点击的个股名（点击弹出日K线） */
+  function stk(code, name) {
+    return '<span class="stk" data-code="' + E(code || '') + '" data-name="' + E(name || code || '') + '">' + E(name || code || '') + '</span>';
+  }
+  function fetchKline(code) {
+    return fetch('http://127.0.0.1:18789/api/kline?code=' + encodeURIComponent(code), { cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+  }
+  /* canvas 蜡烛图：阳线红/阴线绿（A股习惯），叠加 MA5/10/20 + 量能 + 十字光标 */
+  function drawKline(canvas, kl, theme) {
+    var dpr = window.devicePixelRatio || 1;
+    var W = canvas.clientWidth || 740, H = canvas.clientHeight || 380;
+    canvas.width = Math.max(1, W * dpr); canvas.height = Math.max(1, H * dpr);
+    var ctx = canvas.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    var n = kl.length; if (!n) return;
+    var padL = 10, padR = 60, padT = 14, padB = 22;
+    var priceH = Math.round(H * 0.72), volH = Math.round(H * 0.20);
+    var gap = H - padT - priceH - volH - padB; if (gap < 2) gap = 2;
+    var volTop = padT + priceH + gap;
+    var lo = Infinity, hi = -Infinity, vmax = 0;
+    for (var i = 0; i < n; i++) { var k = kl[i]; if (k.low < lo) lo = k.low; if (k.high > hi) hi = k.high; if (k.vol > vmax) vmax = k.vol; }
+    var padY = (hi - lo) * 0.08 || 1; hi += padY; lo -= padY;
+    var plotW = W - padL - padR;
+    var cw = plotW / n;
+    function x(i) { return padL + cw * (i + 0.5); }
+    function y(p) { return padT + (hi - p) / (hi - lo) * priceH; }
+    function ma(len) { var out = [], s = 0; for (var i = 0; i < n; i++) { if (i < len - 1) { out.push(null); continue; } s += kl[i].close; if (i >= len) s -= kl[i - len].close; out.push(s / len); } return out; }
+    var ma5 = ma(5), ma10 = ma(10), ma20 = ma(20);
+    function render(hv) {
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = theme.bg; ctx.fillRect(0, 0, W, H);
+      ctx.font = '10px SF Mono,Menlo,Consolas,monospace'; ctx.textBaseline = 'middle';
+      ctx.strokeStyle = theme.grid; ctx.lineWidth = 1;
+      for (var g = 0; g <= 4; g++) {
+        var py = padT + priceH * g / 4;
+        ctx.beginPath(); ctx.moveTo(padL, py); ctx.lineTo(padL + plotW, py); ctx.stroke();
+        ctx.fillStyle = theme.text; ctx.textAlign = 'left';
+        ctx.fillText((hi - (hi - lo) * g / 4).toFixed(2), padL + plotW + 5, py);
+      }
+      function drawMA(arr, color) {
+        ctx.strokeStyle = color; ctx.lineWidth = 1.3; ctx.beginPath(); var started = false;
+        for (var i = 0; i < n; i++) { if (arr[i] == null) continue; var xx = x(i), yy = y(arr[i]); if (!started) { ctx.moveTo(xx, yy); started = true; } else ctx.lineTo(xx, yy); }
+        ctx.stroke();
+      }
+      drawMA(ma5, theme.ma5); drawMA(ma10, theme.ma10); drawMA(ma20, theme.ma20);
+      var bw = Math.max(1.6, cw * 0.62);
+      for (var i = 0; i < n; i++) {
+        var k = kl[i], up = k.close >= k.open, col = up ? theme.up : theme.down;
+        ctx.strokeStyle = col; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x(i), y(k.high)); ctx.lineTo(x(i), y(k.low)); ctx.stroke();
+        var ytop = y(Math.max(k.open, k.close)), ybot = y(Math.min(k.open, k.close));
+        ctx.fillStyle = col; ctx.fillRect(x(i) - bw / 2, ytop, bw, Math.max(1, ybot - ytop));
+      }
+      for (var i = 0; i < n; i++) {
+        var k = kl[i], up = k.close >= k.open;
+        ctx.fillStyle = up ? theme.up : theme.down; ctx.globalAlpha = 0.5;
+        var vh = (k.vol / (vmax || 1)) * volH;
+        ctx.fillRect(x(i) - bw / 2, volTop + volH - vh, bw, vh);
+      }
+      ctx.globalAlpha = 1;
+      var yl = y(kl[n - 1].close);
+      ctx.strokeStyle = theme.axis; ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(padL, yl); ctx.lineTo(padL + plotW, yl); ctx.stroke(); ctx.setLineDash([]);
+      if (hv >= 0 && hv < n) {
+        var cx = x(hv); ctx.strokeStyle = theme.cross; ctx.setLineDash([2, 2]);
+        ctx.beginPath(); ctx.moveTo(cx, padT); ctx.lineTo(cx, volTop + volH); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(padL, y(kl[hv].close)); ctx.lineTo(padL + plotW, y(kl[hv].close)); ctx.stroke(); ctx.setLineDash([]);
+        var k = kl[hv], chg = hv > 0 ? (k.close - kl[hv - 1].close) / kl[hv - 1].close * 100 : 0;
+        var tx = padL + 6, tw = 196, th = 64, ty = padT + 4;
+        ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(tx, ty, tw, th);
+        ctx.fillStyle = theme.text; ctx.textAlign = 'left';
+        ctx.fillText('日期 ' + k.date, tx + 8, ty + 11);
+        ctx.fillText('开 ' + k.open.toFixed(2) + '  收 ' + k.close.toFixed(2), tx + 8, ty + 25);
+        ctx.fillText('高 ' + k.high.toFixed(2) + '  低 ' + k.low.toFixed(2), tx + 8, ty + 39);
+        ctx.fillStyle = chg >= 0 ? theme.up : theme.down;
+        ctx.fillText('涨跌幅 ' + (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%', tx + 8, ty + 53);
+      }
+    }
+    render(-1);
+    canvas.onmousemove = function (e) {
+      var r = canvas.getBoundingClientRect(), mx = e.clientX - r.left;
+      var idx = Math.floor((mx - padL) / cw); if (idx < 0 || idx >= n) { render(-1); return; } render(idx);
+    };
+    canvas.onmouseleave = function () { render(-1); };
+  }
+  function openKline(code, name) {
+    ensureKlineStyle();
+    if (KL.overlay && KL.overlay.parentNode) KL.overlay.parentNode.removeChild(KL.overlay);
+    var ov = document.createElement('div'); ov.className = 'kl-ov';
+    var md = document.createElement('div'); md.className = 'kl';
+    ov.appendChild(md);
+    ov.addEventListener('click', function (e) { if (e.target === ov) ov.parentNode.removeChild(ov); });
+    document.body.appendChild(ov); KL.overlay = ov;
+    md.innerHTML =
+      '<div class="kl-h"><div class="kl-t"><b class="kl-name"></b> <span class="kl-code"></span> <span class="kl-last"></span></div>' +
+      '<span class="kl-x" onclick="var o=this.closest(\'.kl-ov\');if(o)o.remove()">✕</span></div>' +
+      '<div class="kl-b">' +
+      '<div class="kl-loading">正在从本机行情代理抓取日K线…</div>' +
+      '<canvas class="kl-cv" style="display:none"></canvas>' +
+      '<div class="kl-legend" style="display:none">' +
+      '<span style="color:var(--up)">● 阳线(涨)</span> <span style="color:var(--down)">● 阴线(跌)</span> ' +
+      '<span style="color:#fbbf24">— MA5</span> <span style="color:#22d3ee">— MA10</span> <span style="color:#a78bfa">— MA20</span></div>' +
+      '<div class="kl-msg"></div>' +
+      '<div class="kl-hint">数据经本机交易代理实时获取（东财 / 腾讯）。鼠标移到 K 线上可看每日开 / 收 / 高 / 低。A股惯例：红涨 / 绿跌。</div>' +
+      '</div>';
+    md.querySelector('.kl-name').textContent = name || code;
+    md.querySelector('.kl-code').textContent = code;
+    var cv = md.querySelector('.kl-cv');
+    fetchKline(code).then(function (d) {
+      if (!d.ok || !d.klines || !d.klines.length) {
+        md.querySelector('.kl-loading').style.display = 'none';
+        md.querySelector('.kl-msg').innerHTML = '<div class="kl-off">未能获取 K 线：' + E(d.error || '无数据') +
+          '<br><span style="color:var(--muted)">请确认本机已运行 <code>python tools/manage_users.py serve</code>（它内置行情代理）。</span></div>';
+        return;
+      }
+      md.querySelector('.kl-loading').style.display = 'none';
+      cv.style.display = 'block'; md.querySelector('.kl-legend').style.display = 'flex';
+      var kl = d.klines.map(function (k) {
+        return { date: k.date, open: +k.open, close: +k.close, high: +k.high, low: +k.low, vol: +k.vol, amount: +k.amount };
+      });
+      var last = kl[kl.length - 1], prev = kl[kl.length - 2] || last;
+      var chg = (last.close - prev.close) / prev.close * 100;
+      md.querySelector('.kl-last').innerHTML = '收盘 <b style="color:' + (chg >= 0 ? 'var(--up)' : 'var(--down)') + '">' +
+        last.close.toFixed(2) + '</b> <span style="color:' + (chg >= 0 ? 'var(--up)' : 'var(--down)') + '">' +
+        (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%</span> <span class="muted">(' + last.date + ')</span>';
+      requestAnimationFrame(function () { drawKline(cv, kl, klTheme()); });
+    }).catch(function (e) {
+      md.querySelector('.kl-loading').style.display = 'none';
+      md.querySelector('.kl-msg').innerHTML = '<div class="kl-off">无法连接本机行情代理：' + E((e && e.message) || e) +
+        '<br><span style="color:var(--muted)">请确认本机已运行 <code>python tools/manage_users.py serve</code>。</span></div>';
+    });
+  }
+  function openPatternList(pattern) {
+    ensureKlineStyle();
+    if (KL.overlay && KL.overlay.parentNode) KL.overlay.parentNode.removeChild(KL.overlay);
+    var ov = document.createElement('div'); ov.className = 'kl-ov';
+    var md = document.createElement('div'); md.className = 'kl';
+    ov.appendChild(md);
+    ov.addEventListener('click', function (e) { if (e.target === ov) ov.parentNode.removeChild(ov); });
+    document.body.appendChild(ov); KL.overlay = ov;
+    var A = D.auction || {}, items = A.items || {};
+    var lus = D.limit_ups || [];
+    var arr = lus.filter(function (r) { return items[r.code]; }).map(function (r) {
+      var a = items[r.code], o = {}; for (var k in r) o[k] = r[k]; for (var k2 in a) o[k2] = a[k2]; return o;
+    });
+    var list = arr.filter(function (a) { return a.pattern === pattern; })
+      .sort(function (a, b) { return (b.auction_score || 0) - (a.auction_score || 0); });
+    var rows = list.map(function (a) {
+      return '<div class="pitem">' + stk(a.code, a.name) +
+        '<span class="code">' + E(a.code) + '</span>' + lbBadge(a.streak) +
+        '<span class="muted">高开 ' + (a.open_pct >= 0 ? '+' : '') + f(a.open_pct, 2) + '%</span>' +
+        '<span class="muted">日内 ' + (a.intraday >= 0 ? '+' : '') + f(a.intraday, 1) + '%</span>' +
+        '<span class="muted">竞价强度 ' + f(a.auction_score, 0) + '</span></div>';
+    }).join('');
+    md.innerHTML = '<div class="kl-h"><div class="kl-t"><b>' + E(pattern) + '</b> · 共 ' + list.length + ' 只</div>' +
+      '<span class="kl-x" onclick="var o=this.closest(\'.kl-ov\');if(o)o.remove()">✕</span></div>' +
+      '<div class="kl-b">' + (list.length ? '<div class="plist">' + rows + '</div>' : '<div class="kl-empty">当日无该形态标的</div>') +
+      '<div class="kl-hint">点击任意个股名称，查看其日 K 线。</div></div>';
+  }
+
   /* ---------------- 启动 ---------------- */
   function boot() {
     if (!D) {
@@ -1247,6 +1457,14 @@
       window.scrollTo(0, 0);
       if (location.hash.slice(1) !== k) history.replaceState(null, '', '#' + k);
     }
+    /* 全局点击：个股名 → 日K线；竞价形态 chip → 该形态个股清单 */
+    document.addEventListener('click', function (e) {
+      var t = e.target; if (!t || !t.closest) return;
+      var st = t.closest('.stk');
+      if (st && st.dataset && st.dataset.code) { e.preventDefault(); openKline(st.dataset.code, st.dataset.name); return; }
+      var pc = t.closest('.pat-chip');
+      if (pc && pc.dataset && pc.dataset.p) { openPatternList(pc.dataset.p); return; }
+    });
     document.getElementById('tabs').addEventListener('click', function (e) {
       if (e.target.dataset && e.target.dataset.v) show(e.target.dataset.v);
     });

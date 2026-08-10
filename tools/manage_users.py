@@ -22,8 +22,12 @@ import string
 import secrets
 import argparse
 import webbrowser
+import time
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import parse_qs
+import urllib.request
+import urllib.error
+import re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from setup_github import (  # noqa: E402
@@ -43,6 +47,67 @@ def load():
 def save(cfg):
     with open(CFG, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+def fetch_kline(code):
+    """抓取日K线（东财优先，新浪兜底），返回归一化结构，供站点运行时展示。"""
+    code = (code or "").strip()
+    if not re.match(r"^\d{6}$", code):
+        return {"ok": False, "error": "代码格式应为 6 位数字"}
+    mkt = "1" if code[0] in "69" else "0"
+    # —— 东财日K（前复权），带一次重试抵御限流 ——
+    for attempt in range(2):
+        try:
+            url = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
+                   "?secid=%s.%s&fields1=f1,f2,f3,f4,f5,f6"
+                   "&fields2=f51,f52,f53,f54,f55,f56,f57"
+                   "&klt=101&fqt=1&end=20500101&lmt=130") % (mkt, code)
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            raw = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "ignore")
+            j = json.loads(raw)
+            if j.get("data") and j["data"].get("klines"):
+                name = j["data"].get("name", code)
+                kls = []
+                for s in j["data"]["klines"]:
+                    p = s.split(",")
+                    if len(p) < 7:
+                        continue
+                    kls.append({
+                        "date": p[0], "open": float(p[1]), "close": float(p[2]),
+                        "high": float(p[3]), "low": float(p[4]),
+                        "vol": float(p[5]), "amount": float(p[6]),
+                    })
+                if kls:
+                    return {"ok": True, "code": code, "name": name, "source": "eastmoney", "klines": kls}
+        except Exception:
+            pass
+        if attempt == 0:
+            time.sleep(0.6)
+    # —— 新浪兜底（东财被限流或超时时的可靠备用源）——
+    try:
+        pre = "sh" if code[0] in "69" else "sz"
+        url = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+               "CN_MarketData.getKLineData?symbol=%s%s&scale=240&ma=no&datalen=130") % (pre, code)
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0",
+                                                   "Referer": "https://finance.sina.com.cn"})
+        raw = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "ignore")
+        arr = json.loads(raw)
+        if isinstance(arr, list) and arr:
+            kls = []
+            for r in arr:
+                try:
+                    kls.append({
+                        "date": r["day"], "open": float(r["open"]), "close": float(r["close"]),
+                        "high": float(r["high"]), "low": float(r["low"]),
+                        "vol": float(r.get("volume", 0)), "amount": 0.0,
+                    })
+                except Exception:
+                    continue
+            if kls:
+                return {"ok": True, "code": code, "name": code, "source": "sina", "klines": kls}
+    except Exception:
+        pass
+    return {"ok": False, "error": "暂无可用的日K线数据（行情源超时或代码无效）"}
 
 
 def gen_pass(n=12):
@@ -80,6 +145,10 @@ class _APIHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/users":
             self._json(load())
+        elif self.path.startswith("/api/kline"):
+            q = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            code = (q.get("code") or [""])[0]
+            self._json(fetch_kline(code))
         elif self.path == "/":
             self.path = "/tools/admin.html"
             return SimpleHTTPRequestHandler.do_GET(self)
