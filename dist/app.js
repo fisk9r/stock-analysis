@@ -1193,7 +1193,7 @@
     muConnect();
   }
 
-  /* ---------------- K线（运行时从本机 serve 代理抓取，不打包） ---------------- */
+  /* ---------------- K线（浏览器直连腾讯财经公开接口，无需本机、不落盘） ---------------- */
   var KL = { overlay: null };
   function ensureKlineStyle() {
     if (document.getElementById('kl-css')) return;
@@ -1240,9 +1240,43 @@
   function stk(code, name) {
     return '<span class="stk" data-code="' + E(code || '') + '" data-name="' + E(name || code || '') + '">' + E(name || code || '') + '</span>';
   }
+  // 浏览器直连腾讯财经公开行情接口（Access-Control-Allow-Origin: *，可跨域 fetch）。
+  // 不依赖本机服务、不落地存储；腾讯不可达时经公开 CORS 代理兜底新浪。
   function fetchKline(code) {
-    return fetch('http://127.0.0.1:18789/api/kline?code=' + encodeURIComponent(code), { cache: 'no-store' })
-      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+    code = (code || '').trim();
+    if (!/^\d{6}$/.test(code)) return Promise.resolve({ ok: false, error: '代码格式应为6位数字', klines: [] });
+    var mkt = /^(60|68|90|11|50|51|56|58|110|113|118|132|204)/.test(code) ? 'sh' : 'sz';
+    var sym = mkt + code;
+    var tUrl = 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=' + sym + ',day,,,130,qfq';
+    function normalizeTencent(j) {
+      var node = j && j.data && j.data[sym];
+      var rows = node && (node.qfqday || node.day);
+      if (!rows || !rows.length) throw new Error('腾讯无K线数据');
+      var name = (node.qt && node.qt[sym] && node.qt[sym][1]) || code;
+      var klines = rows.map(function (r) {
+        return { date: r[0], open: +r[1], close: +r[2], high: +r[3], low: +r[4], vol: +r[5], amount: +r[5] * 100 * (+r[2]) };
+      });
+      return { ok: true, code: code, name: name, source: '腾讯财经', klines: klines };
+    }
+    function sinaFallback() {
+      var sUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(
+        'https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol=' + sym + '&scale=240&ma=no&datalen=130');
+      return fetch(sUrl, { mode: 'cors' }).then(function (r2) {
+        if (!r2.ok) throw new Error('HTTP ' + r2.status);
+        return r2.json();
+      }).then(function (arr) {
+        if (!arr || !arr.length) throw new Error('新浪也无数据');
+        var klines = arr.map(function (k) {
+          return { date: k.day, open: +k.open, close: +k.close, high: +k.high, low: +k.low, vol: +k.volume, amount: 0 };
+        });
+        return { ok: true, code: code, name: code, source: '新浪财经', klines: klines };
+      });
+    }
+    return fetch(tUrl, { mode: 'cors' })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(normalizeTencent)
+      .catch(function () { return sinaFallback(); })
+      .catch(function (e2) { return { ok: false, error: (e2 && e2.message) || '行情接口不可用', klines: [] }; });
   }
   /* canvas 蜡烛图：阳线红/阴线绿（A股习惯），叠加 MA5/10/20 + 量能 + 十字光标 */
   function drawKline(canvas, kl, theme) {
@@ -1333,13 +1367,13 @@
       '<div class="kl-h"><div class="kl-t"><b class="kl-name"></b> <span class="kl-code"></span> <span class="kl-last"></span></div>' +
       '<span class="kl-x" onclick="var o=this.closest(\'.kl-ov\');if(o)o.remove()">✕</span></div>' +
       '<div class="kl-b">' +
-      '<div class="kl-loading">正在从本机行情代理抓取日K线…</div>' +
+      '<div class="kl-loading">正在从腾讯财经实时抓取日K线…</div>' +
       '<canvas class="kl-cv" style="display:none"></canvas>' +
       '<div class="kl-legend" style="display:none">' +
       '<span style="color:var(--up)">● 阳线(涨)</span> <span style="color:var(--down)">● 阴线(跌)</span> ' +
       '<span style="color:#fbbf24">— MA5</span> <span style="color:#22d3ee">— MA10</span> <span style="color:#a78bfa">— MA20</span></div>' +
       '<div class="kl-msg"></div>' +
-      '<div class="kl-hint">数据经本机交易代理实时获取（东财 / 腾讯）。鼠标移到 K 线上可看每日开 / 收 / 高 / 低。A股惯例：红涨 / 绿跌。</div>' +
+      '<div class="kl-hint">数据实时取自腾讯财经公开接口，浏览器直连、不落地存储。鼠标移到 K 线上可看每日开 / 收 / 高 / 低。A股惯例：红涨 / 绿跌。</div>' +
       '</div>';
     md.querySelector('.kl-name').textContent = name || code;
     md.querySelector('.kl-code').textContent = code;
@@ -1348,11 +1382,12 @@
       if (!d.ok || !d.klines || !d.klines.length) {
         md.querySelector('.kl-loading').style.display = 'none';
         md.querySelector('.kl-msg').innerHTML = '<div class="kl-off">未能获取 K 线：' + E(d.error || '无数据') +
-          '<br><span style="color:var(--muted)">请确认本机已运行 <code>python tools/manage_users.py serve</code>（它内置行情代理）。</span></div>';
+          '<br><span style="color:var(--muted)">本功能由浏览器直连腾讯财经公开接口，请检查网络后重试。</span></div>';
         return;
       }
       md.querySelector('.kl-loading').style.display = 'none';
       cv.style.display = 'block'; md.querySelector('.kl-legend').style.display = 'flex';
+      md.querySelector('.kl-name').textContent = d.name || name || code;
       var kl = d.klines.map(function (k) {
         return { date: k.date, open: +k.open, close: +k.close, high: +k.high, low: +k.low, vol: +k.vol, amount: +k.amount };
       });
@@ -1364,8 +1399,8 @@
       requestAnimationFrame(function () { drawKline(cv, kl, klTheme()); });
     }).catch(function (e) {
       md.querySelector('.kl-loading').style.display = 'none';
-      md.querySelector('.kl-msg').innerHTML = '<div class="kl-off">无法连接本机行情代理：' + E((e && e.message) || e) +
-        '<br><span style="color:var(--muted)">请确认本机已运行 <code>python tools/manage_users.py serve</code>。</span></div>';
+      md.querySelector('.kl-msg').innerHTML = '<div class="kl-off">无法获取 K 线：' + E((e && e.message) || e) +
+        '<br><span style="color:var(--muted)">本功能由浏览器直连腾讯财经公开接口，请检查网络后重试。</span></div>';
     });
   }
   function openPatternList(pattern) {
