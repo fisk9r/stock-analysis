@@ -132,6 +132,7 @@
         if (remBox.checked) remember(id, pass); else forget();
         overlay.parentNode.removeChild(overlay);
         addSwitchButton();
+        window.__SA_USER__ = id;   // 供站点顶栏判断是否显示「管理用户」入口
         return renderApp();
       }).catch(function (e) {
         btn.disabled = false; loading.textContent = '';
@@ -219,6 +220,7 @@
         return fetchBlob(saved.id, saved.pass).then(function () {
           sp.parentNode.removeChild(sp);
           addSwitchButton();
+          window.__SA_USER__ = saved.id;   // 供站点顶栏判断是否显示「管理用户」入口
           return renderApp();
         }).catch(function () {
           forget();

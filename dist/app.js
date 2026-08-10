@@ -941,6 +941,186 @@
     setInterval(check, 180000);  // 每 3 分钟探测一次
   }
 
+  /* ---------------- 用户管理（owner 专属入口，对接本机 serve 服务） ---------------- */
+  var MU = { users: [], connected: false, overlay: null, noteEl: null };
+  function saEsc(s) { var d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+  function muGenPass() {
+    var a = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    var arr = new Uint8Array(14); crypto.getRandomValues(arr);
+    return Array.from(arr, function (v) { return a[v % a.length]; }).join('');
+  }
+  function ensureMgmtStyle() {
+    if (document.getElementById('sa-mgmt-css')) return;
+    var css = [
+      '.sa-mgmt-ov{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;',
+      'background:rgba(8,12,20,.85);backdrop-filter:blur(6px);',
+      'font-family:-apple-system,Segoe UI,Roboto,"Microsoft YaHei",sans-serif;}',
+      '.sa-mgmt{width:540px;max-width:92vw;max-height:88vh;overflow:auto;background:#0f1626;border:1px solid #1e2a44;',
+      'border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.5);color:#e8eefc;}',
+      '.sa-mgmt-h{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;',
+      'border-bottom:1px solid #1e2a44;font-size:15px;font-weight:700;color:#e8eefc;}',
+      '.sa-mgmt-x{cursor:pointer;color:#8aa0c8;font-size:16px;line-height:1;padding:2px 6px;border-radius:6px;}',
+      '.sa-mgmt-x:hover{background:#1e2a44;color:#e8eefc;}',
+      '.sa-mgmt-b{padding:16px 18px;}',
+      '.sa-mgmt-loading,.sa-mgmt-empty,.sa-mgmt-off{font-size:13px;color:#8aa0c8;line-height:1.7;}',
+      '.sa-mgmt-add{display:flex;gap:8px;margin-bottom:14px;}',
+      '.sa-mgmt-add input{flex:1;padding:9px 11px;border-radius:8px;border:1px solid #243453;background:#0a1120;',
+      'color:#e8eefc;font-size:14px;outline:none;font-family:inherit;}',
+      '.sa-mgmt-add input:focus{border-color:#3b82f6;}',
+      '.sa-mgmt-t{width:100%;border-collapse:collapse;font-size:13px;}',
+      '.sa-mgmt-t th{background:#0a1120;color:#8aa0c8;font-weight:600;font-size:11.5px;text-align:left;padding:8px 10px;border-bottom:1px solid #1e2a44;}',
+      '.sa-mgmt-t td{padding:8px 10px;border-bottom:1px solid #16203a;vertical-align:middle;}',
+      '.sa-mgmt-t .pw code{color:#34d399;font-family:"SF Mono",Menlo,monospace;font-size:12px;user-select:all;word-break:break-all;}',
+      '.sa-mgmt-t .tag{font-size:10.5px;color:#60a5fa;border:1px solid #2451a3;border-radius:4px;padding:0 5px;margin-left:4px;}',
+      '.mbtn{display:inline-flex;align-items:center;gap:4px;padding:7px 14px;border:0;border-radius:8px;font-size:12.5px;',
+      'font-weight:600;cursor:pointer;font-family:inherit;background:#1e2a44;color:#cfe0ff;white-space:nowrap;text-decoration:none;}',
+      '.mbtn:hover{background:#27375a;}',
+      '.mbtn-p{background:linear-gradient(135deg,#2563eb,#06b6d4);color:#fff;}',
+      '.mbtn-p:hover{filter:brightness(1.08);}',
+      '.mbtn-d{background:#3b1d1d;color:#fca5a5;}',
+      '.mbtn-d:hover{background:#4d2424;}',
+      '.mbtn-ghost{background:#0a1120;border:1px solid #243453;color:#9fb3d8;}',
+      '.mbtn-ghost:hover{background:#16203a;}',
+      '.sa-mgmt-actions{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;}',
+      '.sa-mgmt-note{margin-top:10px;font-size:12.5px;min-height:16px;color:#8aa0c8;}',
+      '.sa-mgmt-note.ok{color:#34d399;}.sa-mgmt-note.err{color:#f87171;}.sa-mgmt-note.info{color:#60a5fa;}',
+      '.sa-mgmt-hint{margin-top:10px;font-size:11.5px;color:#6b7a99;line-height:1.6;}',
+      '.sa-mgmt-off .cmd{display:block;margin:10px 0;padding:10px 12px;background:#0a1120;border:1px solid #243453;',
+      'border-radius:8px;color:#7dd3fc;font-family:"SF Mono",Menlo,monospace;font-size:13px;user-select:all;}',
+      '.sa-mgmt .muted{color:#6b7a99;font-size:12px;}'
+    ].join('');
+    var s = document.createElement('style'); s.id = 'sa-mgmt-css'; s.textContent = css;
+    document.head.appendChild(s);
+  }
+  function muNote(msg, type) {
+    if (!MU.noteEl) return;
+    MU.noteEl.textContent = msg;
+    MU.noteEl.className = 'sa-mgmt-note ' + (type || '');
+  }
+  function muConnect() {
+    var ac = new AbortController();
+    var t = setTimeout(function () { ac.abort(); }, 3000);
+    fetch('http://127.0.0.1:18789/api/users', { cache: 'no-store', signal: ac.signal })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (d) { clearTimeout(t); MU.users = (d && d.users) || []; MU.connected = true; muRender(); })
+      .catch(function (e) { clearTimeout(t); MU.connected = false; muRenderOffline(e); });
+  }
+  function muRender() {
+    var b = document.getElementById('saMgmtBody'); if (!b) return;
+    var rows = MU.users.map(function (u, i) {
+      var isOwner = u.id === 'owner';
+      return '<tr>' +
+        '<td class="id">' + saEsc(u.id) + '</td>' +
+        '<td class="nm">' + saEsc(u.name) + (isOwner ? ' <span class="tag">管理员</span>' : '') + '</td>' +
+        '<td class="pw">' + (isOwner ? '—' : '<code>' + saEsc(u.pass) + '</code>') + '</td>' +
+        '<td class="ac">' +
+        (isOwner ? '<span class="muted">不可删除</span>'
+          : '<button class="mbtn mbtn-d" data-act="rm" data-i="' + i + '">删除</button>') +
+        ' <button class="mbtn" data-act="cp" data-i="' + i + '">改口令</button>' +
+        '</td></tr>';
+    }).join('');
+    b.innerHTML =
+      '<div class="sa-mgmt-add"><input id="muNewName" placeholder="新用户名称，如：张三" maxlength="20">' +
+      '<button class="mbtn mbtn-p" id="muAddBtn">+ 添加</button></div>' +
+      (MU.users.length
+        ? '<table class="sa-mgmt-t"><thead><tr><th>账户</th><th>名称</th><th>口令</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>'
+        : '<div class="sa-mgmt-empty">暂无其他用户。添加一个，把「账户名 + 口令」发给对方即可。</div>') +
+      '<div class="sa-mgmt-actions">' +
+      '<button class="mbtn mbtn-p" id="muDeployBtn">保存并部署</button>' +
+      '<a class="mbtn mbtn-ghost" href="http://127.0.0.1:18789/" target="_blank" rel="noopener">在本地页面打开</a>' +
+      '</div>' +
+      '<div class="sa-mgmt-note" id="muNote"></div>' +
+      '<div class="sa-mgmt-hint">修改后必须「保存并部署」才会生效（云端为每个用户重新生成加密数据）。</div>';
+    MU.noteEl = document.getElementById('muNote');
+    document.getElementById('muAddBtn').addEventListener('click', function () {
+      var v = document.getElementById('muNewName').value.trim();
+      if (!v) { muNote('请输入名称', 'err'); return; }
+      muAdd(v);
+    });
+    document.getElementById('muDeployBtn').addEventListener('click', muSaveDeploy);
+    b.querySelectorAll('button[data-act]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var i = parseInt(btn.dataset.i, 10), act = btn.dataset.act;
+        if (act === 'rm') muRemove(i); else if (act === 'cp') muChgPass(i);
+      });
+    });
+  }
+  function muRenderOffline(e) {
+    var b = document.getElementById('saMgmtBody'); if (!b) return;
+    b.innerHTML = '<div class="sa-mgmt-off">' +
+      '<p>未检测到本机管理服务。管理用户需在本机运行管理服务（它持有 GitHub 令牌，负责真正写入并部署）。</p>' +
+      '<code class="cmd">python tools/manage_users.py serve</code>' +
+      '<div class="sa-mgmt-actions">' +
+      '<button class="mbtn mbtn-p" id="muCopy">复制命令</button>' +
+      '<a class="mbtn mbtn-ghost" href="http://127.0.0.1:18789/" target="_blank" rel="noopener">打开本地管理页面</a>' +
+      '</div>' +
+      '<div class="sa-mgmt-note" id="muNote"></div>' +
+      '<div class="sa-mgmt-hint">在项目目录运行上面命令后，刷新本页即可在此直接增删用户并一键部署。</div>' +
+      '</div>';
+    MU.noteEl = document.getElementById('muNote');
+    document.getElementById('muCopy').addEventListener('click', function () {
+      var cmd = 'python tools/manage_users.py serve';
+      if (navigator.clipboard) navigator.clipboard.writeText(cmd).then(
+        function () { muNote('已复制：' + cmd, 'ok'); },
+        function () { muNote('复制失败，请手动复制：' + cmd, 'err'); });
+      else muNote('请手动复制：' + cmd, 'info');
+    });
+  }
+  function muAdd(name) {
+    var base = (name.toLowerCase().replace(/[^a-z0-9一-龥]/g, '')).slice(0, 12) || ('user' + Date.now().toString(36));
+    var id = base, c = 1;
+    while (MU.users.some(function (u) { return u.id === id; })) id = base + (++c);
+    var pass = muGenPass();
+    MU.users.push({ id: id, name: name, pass: pass });
+    muRender(); muNote('已添加「' + name + '」，口令：' + pass + '（保存并部署后生效）', 'ok');
+  }
+  function muRemove(i) {
+    var u = MU.users[i]; if (!u || u.id === 'owner') return;
+    if (!confirm('删除「' + u.name + '」？删除后该用户将无法解密数据。')) return;
+    MU.users.splice(i, 1); muRender(); muNote('已删除「' + u.name + '」', 'info');
+  }
+  function muChgPass(i) {
+    var u = MU.users[i]; if (!u) return;
+    var p = prompt('为「' + u.name + '」设置新口令（留空则自动生成）：');
+    if (p === null) return;
+    u.pass = (p.trim()) || muGenPass();
+    muRender(); muNote('已为「' + u.name + '」更新口令：' + u.pass, 'ok');
+  }
+  function muSaveDeploy() {
+    muNote('正在保存并部署…', 'info');
+    fetch('http://127.0.0.1:18789/api/save-users', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ users: MU.users })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) throw new Error(d.error || '保存失败');
+        return fetch('http://127.0.0.1:18789/api/deploy', { method: 'POST' }).then(function (r2) { return r2.json(); });
+      })
+      .then(function (d2) {
+        if (d2 && d2.ok) muNote('部署已触发，约 2 分钟后生效 ✅', 'ok');
+        else muNote('保存成功，但部署失败：' + ((d2 && d2.error) || '未知错误'), 'err');
+      })
+      .catch(function (e) {
+        muNote('无法连接本机服务：' + ((e && e.message) || e) + '。请确认 manage_users.py serve 正在运行。', 'err');
+      });
+  }
+  function openUserMgr() {
+    ensureMgmtStyle();
+    if (MU.overlay && MU.overlay.parentNode) MU.overlay.parentNode.removeChild(MU.overlay);
+    var ov = document.createElement('div'); ov.className = 'sa-mgmt-ov';
+    var md = document.createElement('div'); md.className = 'sa-mgmt';
+    ov.appendChild(md);
+    ov.addEventListener('click', function (e) { if (e.target === ov) ov.parentNode.removeChild(ov); });
+    document.body.appendChild(ov);
+    MU.overlay = ov;
+    md.innerHTML = '<div class="sa-mgmt-h">⚙ 访问人员管理' +
+      '<span class="sa-mgmt-x" onclick="var o=this.closest(\'.sa-mgmt-ov\');if(o)o.remove()">✕</span></div>' +
+      '<div class="sa-mgmt-b" id="saMgmtBody"><div class="sa-mgmt-loading">正在连接本机管理服务…</div></div>';
+    MU.noteEl = null;
+    muConnect();
+  }
+
   /* ---------------- 启动 ---------------- */
   function boot() {
     if (!D) {
@@ -969,6 +1149,16 @@
       show(curView);
     });
     head();
+    /* owner 专属：站点顶栏「管理用户」入口，对接本机 serve 服务 */
+    if (window.__SA_USER__ === 'owner') {
+      var _tb = document.getElementById('themeBtn');
+      if (_tb) {
+        var _mb = document.createElement('button');
+        _mb.type = 'button'; _mb.className = 'theme-btn'; _mb.textContent = '⚙ 管理用户';
+        _mb.addEventListener('click', openUserMgr);
+        _tb.parentNode.insertBefore(_mb, _tb);
+      }
+    }
     initBackdrop();
     startFreshnessWatch();
     var views = { overview: viewOverview, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, rec: viewRec, auction: viewAuction };
