@@ -19,6 +19,26 @@
     var m = { '主线': 't-main', '支线': 't-sub', '零星': 't-min' };
     return '<span class="bd ' + (m[t] || 't-min') + '">' + E(t || '零星') + '</span>';
   }
+  function trendBadge(t) {
+    var c = t === '升温' ? C.up : t === '降温' ? C.down : C.gray;
+    return '<span style="display:inline-block;padding:2px 9px;border-radius:10px;font-size:11px;font-weight:700;color:#fff;background:' + c + '">' + E(t) + '</span>';
+  }
+  /* 近 N 日涨停家数的迷你走势，用于板块轮动 */
+  function spark(series, color) {
+    if (!series || !series.length) return '';
+    var w = 96, h = 26, max = Math.max.apply(null, series.concat([1]));
+    var min = Math.min.apply(null, series.concat([0])), rng = (max - min) || 1;
+    var pts = series.map(function (v, i) {
+      var x = series.length === 1 ? w / 2 : (i / (series.length - 1)) * (w - 6) + 3;
+      var y = h - 3 - ((v - min) / rng) * (h - 6);
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+    var lx = series.length === 1 ? w / 2 : w - 3;
+    var ly = h - 3 - ((series[series.length - 1] - min) / rng) * (h - 6);
+    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="vertical-align:middle">' +
+      '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.6" stroke-linejoin="round"/>' +
+      '<circle cx="' + lx.toFixed(1) + '" cy="' + ly.toFixed(1) + '" r="2.2" fill="' + color + '"/></svg>';
+  }
   function qBar(q, color) {
     var c = color || (q >= 75 ? C.up : q >= 55 ? C.gold : C.gray);
     return '<span class="mbar"><i style="width:' + Math.max(2, Math.min(100, q)) + '%;background:' + c + '"></i></span>';
@@ -330,6 +350,26 @@
         '</div>' +
         '<div style="margin-top:16px">' + pushCard() + '</div>';
     }
+
+    /* 财经要闻 */
+    var NW = D.news || {};
+    var nwItems = NW.items || [];
+    if (nwItems.length) {
+      var nwRows = nwItems.slice(0, 14).map(function (it) {
+        var sc = it.score || 0;
+        var scColor = sc >= 6 ? C.up : sc >= 3 ? C.gold : C.gray;
+        var title = '<div style="font-weight:600;color:var(--text)">' + E(it.title) + '</div>' +
+          (it.summary ? '<div style="font-size:12px;color:var(--muted);margin-top:2px;white-space:normal;max-width:640px">' + E(it.summary) + '</div>' : '');
+        return '<tr><td class="muted" style="white-space:nowrap;width:118px">' + E((it.date || '').slice(5, 16)) + '</td>' +
+          '<td class="name">' + title + '</td>' +
+          '<td class="muted" style="white-space:nowrap;width:74px">' + E(it.source || '') + '</td>' +
+          '<td class="c" style="width:66px"><span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:11px;font-weight:700;color:#fff;background:' + scColor + '">相关 ' + sc + '</span></td></tr>';
+      });
+      h += '<div style="margin-top:16px">' + card('📰 财经要闻（近期，按对 A 股相关性排序）',
+        '<div style="font-size:12px;color:var(--muted);margin-bottom:8px">' + E(NW.summary || '') + '</div>' +
+        table([{ t: '时间', a: 'c' }, { t: '标题' }, { t: '来源', a: 'c' }, { t: '相关性', a: 'c' }], nwRows, { scroll: true }),
+        '来源：东方财富 / 同花顺 7×24 快讯，经相关性打分过滤噪音') + '</div>';
+    }
     return h;
   }
 
@@ -533,6 +573,27 @@
       h += card('🪜 连板梯队持续性（近 ' + L.dates.length + ' 日）',
         CH.svgHeat({ rows: lrows, cols: L.dates, max: L.max }),
         '各高度涨停家数。较高连板(3-5板)持续有承接=情绪结构健康；高位行突然归零=退潮信号');
+    }
+
+    /* 板块轮动 · 主线持续性 */
+    var ROT = D.rotation || [];
+    if (ROT.length) {
+      var nd = (ROT[0].zt_days || []).length || 5;
+      var rotRows = ROT.map(function (r) {
+        var tColor = r.trend === '升温' ? C.up : r.trend === '降温' ? C.down : C.gray;
+        var tags = '';
+        if (r.is_new) tags += ' <span class="bd ok">新题材</span>';
+        if (r.persistent) tags += ' <span class="bd mid">持续主线</span>';
+        return '<tr><td class="name">' + E(r.name) + tags + '</td>' +
+          '<td class="r num"><b>' + (r.today || 0) + '</b> 家涨停</td>' +
+          '<td class="c">' + trendBadge(r.trend) + '</td>' +
+          '<td style="min-width:104px">' + spark(r.zt_days, tColor) + '</td></tr>';
+      });
+      h += card('🔄 板块轮动 · 主线持续性（近 ' + nd + ' 日）',
+        table([{ t: '行业' }, { t: '今日涨停', a: 'r' }, { t: '趋势', a: 'c' }, { t: '近 ' + nd + ' 日涨停家数' }], rotRows, { scroll: true }) +
+        '<div class="note" style="margin-top:8px">升温=板块涨停家数较 ' + nd + ' 日前增加；降温=减少；' +
+        '持续主线=近 ' + nd + ' 日有 ≥2 只涨停的天数 ≥3；新题材=此前无涨停、今日首次爆发。决定题材的容错与仓位。</div>',
+        '判断主线是升温接力 / 降温兑现 / 一日游');
     }
     return h;
   }
@@ -1020,7 +1081,9 @@
         '</td></tr>';
     }).join('');
     b.innerHTML =
-      '<div class="sa-mgmt-add"><input id="muNewName" placeholder="新用户名称，如：张三" maxlength="20">' +
+      '<div class="sa-mgmt-add">' +
+      '<input id="muNewId" placeholder="用户名（登录账户，如 lily）" maxlength="20">' +
+      '<input id="muNewName" placeholder="显示名称（可选，如 莉莉）" maxlength="20">' +
       '<button class="mbtn mbtn-p" id="muAddBtn">+ 添加</button></div>' +
       (MU.users.length
         ? '<table class="sa-mgmt-t"><thead><tr><th>账户</th><th>名称</th><th>口令</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>'
@@ -1033,9 +1096,10 @@
       '<div class="sa-mgmt-hint">修改后必须「保存并部署」才会生效（云端为每个用户重新生成加密数据）。</div>';
     MU.noteEl = document.getElementById('muNote');
     document.getElementById('muAddBtn').addEventListener('click', function () {
-      var v = document.getElementById('muNewName').value.trim();
-      if (!v) { muNote('请输入名称', 'err'); return; }
-      muAdd(v);
+      var uid = document.getElementById('muNewId').value.trim();
+      var unm = document.getElementById('muNewName').value.trim();
+      if (!uid) { muNote('请输入用户名', 'err'); return; }
+      muAdd(uid, unm);
     });
     document.getElementById('muDeployBtn').addEventListener('click', muSaveDeploy);
     b.querySelectorAll('button[data-act]').forEach(function (btn) {
@@ -1066,13 +1130,14 @@
       else muNote('请手动复制：' + cmd, 'info');
     });
   }
-  function muAdd(name) {
-    var base = (name.toLowerCase().replace(/[^a-z0-9一-龥]/g, '')).slice(0, 12) || ('user' + Date.now().toString(36));
-    var id = base, c = 1;
-    while (MU.users.some(function (u) { return u.id === id; })) id = base + (++c);
+  function muAdd(uname, dname) {
+    var id = (uname || '').trim().toLowerCase().replace(/[^a-z0-9一-龥]/g, '').slice(0, 20);
+    if (!id) { muNote('用户名含非法字符或为空', 'err'); return; }
+    if (MU.users.some(function (u) { return u.id === id; })) { muNote('用户名「' + id + '」已存在', 'err'); return; }
+    var name = (dname || '').trim() || id;
     var pass = muGenPass();
     MU.users.push({ id: id, name: name, pass: pass });
-    muRender(); muNote('已添加「' + name + '」，口令：' + pass + '（保存并部署后生效）', 'ok');
+    muRender(); muNote('已添加「' + name + '」（' + id + '），口令：' + pass + '（保存并部署后生效）', 'ok');
   }
   function muRemove(i) {
     var u = MU.users[i]; if (!u || u.id === 'owner') return;

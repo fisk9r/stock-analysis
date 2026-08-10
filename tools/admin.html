@@ -84,10 +84,14 @@ tr:hover{background:#f9fafb}
     </div>
     <div class="body">
       <!-- 添加用户表单 -->
-      <div class="form-row" style="margin-bottom:14px">
-        <div style="flex:1;min-width:0">
-          <label>新用户名称</label>
-          <input id="newName" placeholder="如：张三、李四" maxlength="20">
+      <div class="form-row" style="margin-bottom:14px;flex-wrap:wrap">
+        <div style="flex:1;min-width:160px">
+          <label>用户名（登录账户，必填）</label>
+          <input id="newId" placeholder="如：lily、zhangsan" maxlength="20">
+        </div>
+        <div style="flex:1;min-width:160px">
+          <label>显示名称（可选）</label>
+          <input id="newName" placeholder="如：莉莉、张三" maxlength="20">
         </div>
         <button class="btn btn-primary" onclick="addUser()" style="margin-top:20px">+ 添加用户</button>
       </div>
@@ -103,7 +107,7 @@ tr:hover{background:#f9fafb}
         <b>使用说明：</b><br>
         • 添加用户后会自动生成随机 16 位口令，请把「账户名 + 口令」发给对方。<br>
         • 删除用户后该账户的加密数据将在下次部署时移除，对方立即无法解密。<br>
-        • 修改完成后，运行 <code>python tools/manage_users.py deploy</code> 或点击下方「一键部署」同步到云端。
+        • 修改完成后，点击下方「一键部署」即可同步到云端（命令行等价命令：<code>python tools/manage_users.py sync</code>）。
       </div>
     </div>
   </div>
@@ -115,7 +119,7 @@ tr:hover{background:#f9fafb}
       <p style="font-size:13px;color:#4b5563;margin-bottom:12px">
         修改人员配置后，必须重新部署才能生效（云端会为每个用户重新生成加密数据）。
       </p>
-      <button class="btn btn-primary" onclick="doDeploy()">一键部署（git push + 触发构建）</button>
+      <button class="btn btn-primary" onclick="doDeploy()">一键部署到 GitHub</button>
       <p id="deployResult" style="margin-top:10px;font-size:12px;color:#6b7280"></p>
     </div>
   </div>
@@ -172,9 +176,7 @@ function generatePass() {
   return Array.from(arr, function(v) { return a[v % a.length]; }).join('');
 }
 
-function saveConfig(cb) {
-  var data = JSON.stringify({ users: users }, null, 2);
-  // 使用 fetch 写入需要后端支持；这里用 download 兜底 + 显示命令
+function downloadFallback(data) {
   var blob = new Blob([data], { type: 'application/json' });
   var url = URL.createObjectURL(blob);
   var a = document.createElement('a');
@@ -182,30 +184,32 @@ function saveConfig(cb) {
   a.download = 'allowed_users.json';
   a.click();
   URL.revokeObjectURL(url);
+  toast('已下载配置文件，请放到 config/allowed_users.json 后点「一键部署」', 'info');
+}
 
-  // 同时尝试通过 API 写入（如果本地有服务的话）
+function saveConfig(cb) {
+  var data = JSON.stringify({ users: users }, null, 2);
+  // 优先通过本地 API 直接写入 config/allowed_users.json；失败才下载兜底
   fetch('../api/save-users', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: data
   }).then(function(r) {
     if (r.ok) { toast('配置已保存', 'ok'); if (cb) cb(); }
-    else { toast('已下载配置文件，请手动放到 config/allowed_users.json', 'info'); }
+    else { downloadFallback(data); }
   }).catch(function() {
-    toast('已下载配置文件，请放到 config/allowed_users.json 后点「一键部署」', 'info');
+    downloadFallback(data);
   });
 }
 
 function addUser() {
-  var name = document.getElementById('newName').value.trim();
-  if (!name) { toast('请输入用户名称', 'err'); return; }
-  var id = name.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g, '').slice(0, 12) || ('user' + Date.now().toString(36));
-  // 确保 id 唯一
-  var base = id;
-  var c = 1;
-  while (users.some(function(u) { return u.id === id; })) { id = base + (++c); }
+  var id = document.getElementById('newId').value.trim().toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g, '').slice(0, 20);
+  if (!id) { toast('请输入用户名（登录账户）', 'err'); return; }
+  if (users.some(function(u) { return u.id === id; })) { toast('用户名「' + id + '」已存在', 'err'); return; }
+  var name = document.getElementById('newName').value.trim() || id;
   var pass = generatePass();
   users.push({ id: id, name: name, pass: pass });
+  document.getElementById('newId').value = '';
   document.getElementById('newName').value = '';
   renderTable();
   saveConfig();
@@ -244,13 +248,13 @@ function doDeploy() {
         resultEl.innerHTML = '<span style="color:#16a34a">部署成功！约 2 分钟后生效。</span>' + (d.url ? ' 站点：<a href="' + d.url + '" target="_blank">' + d.url + '</a>' : '');
         toast('部署成功！', 'ok');
       } else {
-        resultEl.innerHTML = '<span style="color:#dc2626">部署失败：' + (d.error || '未知错误') + '</span><br><span style="font-size:11px;color:#9ca3af">请在命令行运行：<code>cd .. && python tools/manage_users.py deploy</code></span>';
+        resultEl.innerHTML = '<span style="color:#dc2626">部署失败：' + (d.error || '未知错误') + '</span><br><span style="font-size:11px;color:#9ca3af">请在命令行运行：<code>cd stock-analysis && python tools/manage_users.py sync</code></span>';
       }
     })
     .catch(function() {
       resultEl.innerHTML = '<span style="color:#f59e0b">本地 API 不可用。请在命令行执行：</span><br>' +
         '<code style="display:block;margin-top:6px;padding:8px;background:#f3f4f6;border-radius:6px;font-size:12px;white-space:pre-wrap;color:#374151">' +
-        'cd stock-analysis\npython tools/manage_users.py deploy</code>';
+        'cd stock-analysis\npython tools/manage_users.py sync</code>';
     });
 }
 
