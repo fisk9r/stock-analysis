@@ -1,18 +1,26 @@
-name: 定时看门狗（兜底触发）
+name: 定时看门狗（兜底触发，尽量早送达）
 
 # 作用：GitHub 的 schedule 是「尽力而为」，高负载时可能延迟甚至丢弃某次触发。
-#   实测：盘前(09:02)、竞价(09:25) 被延迟 77~103 分钟，盘中异动(10:07/11:07…) 整段被跳过。
-#   本看门狗在交易时段每整点 :30 探一次，并保留收盘/复盘两个关键窗口：
-#     - 盘前 / 竞价 / 盘中异动：读状态包里的 push_log.jsonl，看「今天(北京)是否已推送过该 mode」，
-#       没推且已过兜底阈值就代为触发，确保用户主渠道至少收到一次。
-#     - 收盘完整分析：今天(北京)若还没有 mode=close 的推送记录，则触发 build（含 fetch+分析+推送+部署）。
-#   安全：仅用默认 GITHUB_TOKEN（无需额外 PAT）；以「当日是否已推送」为去重依据，不重复轰炸。
+#   实测：盘前(09:02)被延迟 77~103 分钟、盘中异动(10:07…)整段被跳过。
+#   本看门狗在交易时段布置多个密集检查点，主调度一旦被延迟/跳过，
+#   看门狗就在 15~40 分钟内代为触发，确保用户主渠道尽量早收到：
+#     - 盘前 / 竞价：09:15、09:40 两个检查点
+#     - 盘中异动：10:30 / 11:30 / 13:30 / 14:30 / 15:30 各检查点
+#     - 收盘完整分析：16:00、16:30 兜底（给主 15:20 充足时间，避免与主跑并发双发）
+#   安全：仅用默认 GITHUB_TOKEN；以「当日是否已推送该 mode」为去重依据，不重复轰炸。
+#   注意：复盘(20:00)由主调度负责，看门狗不重复触发（收盘/复盘都记 mode=close）。
 
 on:
   schedule:
-    - cron: '30 1-7 * * 1-5'   # 北京 09:30~15:30 每整点:30 探一次（覆盖盘前/竞价/盘中异动兜底）
-    - cron: '30 9 * * 1-5'     # 北京 17:30 兜底「收盘完整分析」（晚于正常 16:10，避免与在跑任务抢跑）
-    - cron: '35 12 * * 1-5'    # 北京 20:35 兜底「复盘补发」
+    - cron: '15 1 * * 1-5'   # 北京 09:15 盘前/竞价 兜底（主 08:50/09:25 若被延迟，此时救场）
+    - cron: '40 1 * * 1-5'   # 北京 09:40 竞价 最后兜底
+    - cron: '30 2 * * 1-5'   # 北京 10:30 盘中异动 兜底（覆盖 09:50/10:07 被跳过）
+    - cron: '30 3 * * 1-5'   # 北京 11:30 盘中异动 兜底
+    - cron: '30 5 * * 1-5'   # 北京 13:30 盘中异动 兜底
+    - cron: '30 6 * * 1-5'   # 北京 14:30 盘中异动 兜底
+    - cron: '30 7 * * 1-5'   # 北京 15:30 盘中异动 兜底（末笔）
+    - cron: '0 8 * * 1-5'    # 北京 16:00 收盘 兜底
+    - cron: '30 8 * * 1-5'   # 北京 16:30 收盘 最后兜底
   workflow_dispatch:
     inputs:
       task:
@@ -40,12 +48,8 @@ jobs:
           DOW=$(TZ=Asia/Shanghai date +%u)   # 1=周一 … 7=周日
           if [ "$DOW" -ge 6 ]; then echo "周末，看门狗休眠"; exit 0; fi
 
-          OWNER=fisk9r; REPO=stock-analysis
-          TODAY=$(TZ=Asia/Shanghai date +%Y-%m-%d)
-
-          # 1) 取状态包（含 push_log.jsonl，记录今日已推送的 mode）
-          GOT_STATE=0
           mkdir -p /tmp/wd && cd /tmp/wd
+          GOT_STATE=0
           if gh release download data-snapshot -p state.tar.gz -D . 2>/dev/null; then
             tar xzf state.tar.gz 2>/dev/null && GOT_STATE=1
           fi
@@ -54,44 +58,45 @@ jobs:
           if [ "$GOT_STATE" = "1" ] && [ -f dist/push_log.jsonl ]; then
             MODES=$(python3 - <<'PY'
           import json, datetime
-          try:
-              tz = datetime.timezone(datetime.timedelta(hours=8))
-              today = datetime.datetime.now(tz).strftime("%Y-%m-%d")
-              out = set()
-              for line in open("dist/push_log.jsonl", encoding="utf-8"):
-                  try:
-                      p = json.loads(line)
-                      if str(p.get("ts", "")).startswith(today):
-                          out.add(p.get("mode"))
-                  except Exception:
-                      pass
-              print("\n".join(sorted(out)))
-          except Exception:
-              pass
+          tz = datetime.timezone(datetime.timedelta(hours=8))
+          today = datetime.datetime.now(tz).strftime("%Y-%m-%d")
+          out = set()
+          for line in open("dist/push_log.jsonl", encoding="utf-8"):
+              try:
+                  p = json.loads(line)
+                  if str(p.get("ts", "")).startswith(today):
+                      out.add(p.get("mode"))
+              except Exception:
+                  pass
+          print("\n".join(sorted(out)))
           PY
           )
           fi
           has() { printf '%s\n' "$MODES" | grep -qx "$1"; }
 
-          DISPATCH=""
-          # 2) 盘前 / 竞价 / 盘中异动：仅在已拿到历史状态包时兜底（无数据可推就不瞎触发）
-          if [ "$GOT_STATE" = "1" ] && [ "$BH" -ge 9 ] && [ "$BH" -le 15 ]; then
-            [ "$BH" -ge 10 ] && ! has preauction && DISPATCH="$DISPATCH preauction"
-            [ "$BH" -ge 10 ] && ! has auction    && DISPATCH="$DISPATCH auction"
-            [ "$BH" -ge 11 ] && ! has anomaly    && DISPATCH="$DISPATCH anomaly"
+          # 当日该 mode 还没推送且确有状态包可推 → 才代为触发；否则不盲发（防重复/空推）
+          fire_if_missing() {
+            local mode="$1"
+            if has "$mode"; then echo "  ✔ $mode 今日已推送，跳过"; return; fi
+            if [ "$GOT_STATE" != "1" ]; then echo "  ⚠ 无状态包，不盲触发 $mode（避免重复/空推）"; return; fi
+            echo "  → 兜底触发：$mode"
+            gh workflow run stock.yml --ref main -f task="$mode"
+          }
+
+          echo "北京当前小时=$BH  今日已推送 mode：$(echo "$MODES" | tr '\n' ' ')"
+
+          # 盘前 / 竞价（09:15、09:40 两个检查点）
+          if [ "$BH" -ge 9 ] && [ "$BH" -le 10 ]; then
+            fire_if_missing preauction
+            fire_if_missing auction
           fi
-          # 3) 收盘完整分析：今天(北京)还没有 mode=close 的推送就触发 build（最完整，含部署）。
-          #    阈值设在 17:00 之后，避免与正在运行的 16:10 正常任务抢跑（它还没推送完会被误判为缺失）。
-          if [ "$BH" -ge 17 ] && ! has close; then
-            DISPATCH="$DISPATCH build"
+          # 盘中异动（10:30~15:30 各检查点）
+          if [ "$BH" -ge 10 ] && [ "$BH" -le 15 ]; then
+            fire_if_missing anomaly
+          fi
+          # 收盘完整分析（16:00、16:30 兜底）
+          if [ "$BH" -ge 16 ] && [ "$BH" -le 17 ]; then
+            fire_if_missing close
           fi
 
-          if [ -z "$DISPATCH" ]; then
-            echo "无需兜底：今日任务均已覆盖（已推送 mode = $(echo "$MODES" | tr '\n' ' ')）"
-            exit 0
-          fi
-
-          for t in $DISPATCH; do
-            echo "兜底触发任务：$t（当日已推送 mode = $(echo "$MODES" | tr '\n' ' ')）"
-            gh workflow run stock.yml --ref main -f task="$t"
-          done
+          echo "看门狗本轮结束"
