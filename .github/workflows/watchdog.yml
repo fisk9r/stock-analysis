@@ -11,7 +11,7 @@ name: 定时看门狗（兜底触发）
 on:
   schedule:
     - cron: '30 1-7 * * 1-5'   # 北京 09:30~15:30 每整点:30 探一次（覆盖盘前/竞价/盘中异动兜底）
-    - cron: '17 8 * * 1-5'     # 北京 16:17 兜底「收盘完整分析」
+    - cron: '30 9 * * 1-5'     # 北京 17:30 兜底「收盘完整分析」（晚于正常 16:10，避免与在跑任务抢跑）
     - cron: '35 12 * * 1-5'    # 北京 20:35 兜底「复盘补发」
   workflow_dispatch:
     inputs:
@@ -80,8 +80,9 @@ jobs:
             [ "$BH" -ge 10 ] && ! has auction    && DISPATCH="$DISPATCH auction"
             [ "$BH" -ge 11 ] && ! has anomaly    && DISPATCH="$DISPATCH anomaly"
           fi
-          # 3) 收盘完整分析：今天(北京)还没有 mode=close 的推送就触发 build（最完整，含部署）
-          if [ "$BH" -ge 16 ] && ! has close; then
+          # 3) 收盘完整分析：今天(北京)还没有 mode=close 的推送就触发 build（最完整，含部署）。
+          #    阈值设在 17:00 之后，避免与正在运行的 16:10 正常任务抢跑（它还没推送完会被误判为缺失）。
+          if [ "$BH" -ge 17 ] && ! has close; then
             DISPATCH="$DISPATCH build"
           fi
 
