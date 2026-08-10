@@ -393,7 +393,10 @@ def push(summary, dry_run=False, mode="close"):
         ("email", send_email, cfg.get("email")),
     ]
     if mode == "anomaly":
-        _prefer = ["wechat_pushplus", "wecom", "telegram", "email"]
+        # 盘中异动原本只走 PushPlus（省 ServerChan 额度）。但用户主看 Server酱，
+        # 且 GitHub 定时会跳过盘中 cron，导致「盘中消息收不到」。
+        # 改为双通道：PushPlus + ServerChan 都发，确保主渠道也能收到盘中异动。
+        _prefer = ["wechat_pushplus", "wechat_serverchan", "wecom", "telegram", "email"]
     else:
         _prefer = ["wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"]
     dispatchers = [(n, fn, c) for (n, fn, c) in _all if n in _prefer and c]
