@@ -316,8 +316,8 @@
           legend: [{ l: '连板晋级率 %', c: C.gold }, { l: '最高连板 ×10', c: C.purple }]
         }), '晋级率是连板可持续性的核心指标') +
         card('🏛️ 场外指数环境', indexTable(), '大盘环境决定题材容错空间') +
-        pushCard() +
-        '</div>';
+        '</div>' +
+        '<div style="margin-top:16px">' + pushCard() + '</div>';
     }
     return h;
   }
@@ -675,7 +675,7 @@
         var hc = it.hist_calib || {};
         var hcBadge = hc.level && hc.level !== '—' ?
           '<span class="bd ' + (hc.factor > 0.35 ? 'danger' : hc.factor > 0 ? 'mid' : 'ok') +
-          '" title="' + E(hc.note || '') + '">研判:' + E(hc.level) + '</span>' : '';
+          '" title="历史研判：' + E(hc.note || hc.level) + '">' + E(hc.level.length > 4 ? hc.level.slice(0, 4) : hc.level) + '</span>' : '';
         var wcol = it.worth_score >= 60 ? C.up : it.worth_score >= 45 ? C.gold : C.gray;
         var t = it.trend_meta || null;
         var kvHtml = t

@@ -221,11 +221,14 @@ td.code{color:var(--faint);font-size:11.5px}
 /* ---------------- 推荐卡 ---------------- */
 .rec{border:1px solid var(--border);border-radius:var(--r);overflow:hidden;background:var(--card);
   box-shadow:var(--shadow);display:flex;flex-direction:column}
-.rec .rh{padding:11px 14px;display:flex;align-items:center;gap:5px;border-bottom:1px solid var(--border-2);
-  background:var(--card-2);flex-wrap:wrap;line-height:1.4}
-.rec .rh .nm{font-size:15px;font-weight:700;color:var(--text);white-space:nowrap}
-.rec .rh .sc{margin-left:auto;font-size:19px;font-weight:750;font-variant-numeric:tabular-nums;
+.rec .rh{padding:9px 12px;display:flex;align-items:center;gap:3px;border-bottom:1px solid var(--border-2);
+  background:var(--card-2);line-height:1.35;min-height:40px}
+.rec .rh .nm{font-size:14px;font-weight:700;color:var(--text);white-space:nowrap;flex-shrink:0}
+.rec .rh .sc{margin-left:auto;font-size:18px;font-weight:750;font-variant-numeric:tabular-nums;
   flex-shrink:0}
+/* 推荐卡头部内的徽标压缩：确保桌面端一排放下 */
+.rec .rh .bd{padding:0 5px;font-size:10px;line-height:1.6;border-radius:4px}
+.rec .rh .code{font-size:10.5px;flex-shrink:0}
 .rec .rb{padding:11px 14px;font-size:12.5px;flex:1}
 .rec .rb .kv{display:flex;flex-wrap:wrap;gap:9px;margin-bottom:9px;font-size:11.5px;color:var(--muted)}
 .rec .rb .kv span b{color:var(--text);font-weight:650}
@@ -254,12 +257,16 @@ td.code{color:var(--faint);font-size:11.5px}
   .rec .rb{padding:10px 12px;font-size:12px}
 }
 
-/* 消息推送板块：分节展示，避免整块文字墙 */
-.push-section{margin-bottom:14px}
+/* 消息推送板块：全宽分节展示，PC端铺满 */
+.push-card-wrap{margin-top:16px}
+.push-card-wrap .card{max-width:100%}
+.push-section{margin-bottom:16px}
 .push-section > b:first-child{
-  display:inline-block;font-size:13px;font-weight:700;color:var(--accent);
-  border-left:3px solid var(--accent);padding-left:8px;margin-bottom:6px}
-.push-section > div{padding-left:11px;font-size:12.5px;line-height:1.7;color:var(--text-2)}
+  display:block;font-size:14px;font-weight:700;color:var(--accent);
+  border-left:4px solid var(--accent);padding-left:10px;margin-bottom:8px;
+  padding-top:2px}
+.push-section > div{padding-left:14px;font-size:13px;line-height:1.75;color:var(--text-2);
+  max-width:960px}
 .push-rec-item{display:inline-flex;align-items:center;gap:4px;margin:2px 6px 2px 0;
   font-size:12px;background:var(--card-2);border:1px solid var(--border);border-radius:6px;padding:3px 8px}
 
