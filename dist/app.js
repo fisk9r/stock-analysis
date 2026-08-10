@@ -113,13 +113,24 @@
       (m.snapshot_same_day ? '盘后快照·当日' : '盘后快照·降级') + '</span>';
     s += '<span class="pill gray">' + n2(m.universe) + ' 只 / ' + n2(m.trade_days) + ' 日</span>';
     s += '<span class="pill purple">' + E(m.generated_at || '') + '</span>';
-    // 数据新鲜度
+    // 数据新鲜度（实时计算距今时长，供轮询刷新时复用）
     var fresh = '';
+    var _gen = m.generated_at ? new Date(m.generated_at.replace(/-/g, '/').replace(' ', 'T')) : null;
     var dt = m.date ? new Date(m.date.replace(/-/g, '/')) : null;
+    function _rel(ts) {
+      if (!ts || isNaN(ts.getTime())) return '';
+      var mins = Math.floor((Date.now() - ts.getTime()) / 60000);
+      if (mins < 1) return '刚刚';
+      if (mins < 60) return mins + ' 分钟前';
+      var hrs = Math.floor(mins / 60);
+      if (hrs < 24) return hrs + ' 小时前';
+      return Math.floor(hrs / 24) + ' 天前';
+    }
     if (dt && !isNaN(dt.getTime())) {
       var days = Math.floor((Date.now() - dt.getTime()) / 86400000);
       if (days >= 2) fresh = '<span class="fresh stale">⚠ 数据已过期 ' + days + ' 天 · 请运行 update.bat 更新</span>';
-      else fresh = '<span class="fresh ok">✓ 数据新鲜 · 收盘后已更新</span>';
+      else fresh = '<span class="fresh ok">✓ 数据新鲜 · 收盘后已更新' +
+        (_gen && !isNaN(_gen.getTime()) ? '（生成于 ' + _rel(_gen) + '）' : '') + '</span>';
     }
     document.getElementById('dateline').innerHTML = s + fresh;
     document.getElementById('foot').innerHTML =
@@ -895,6 +906,41 @@
     tick();
   }
 
+  /* ---------------- 数据新鲜度轮询：检测后台是否已重新构建 ---------------- */
+  function startFreshnessWatch() {
+    var curGen = (D.meta && D.meta.generated_at) || '';
+    var banner = document.getElementById('refreshBanner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'refreshBanner';
+      banner.className = 'refresh-banner';
+      banner.style.display = 'none';
+      document.body.insertBefore(banner, document.body.firstChild);
+    }
+    function check() {
+      try {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', 'meta.json?_=' + Date.now(), true);
+        xhr.onreadystatechange = function () {
+          if (xhr.readyState !== 4) return;
+          if (xhr.status !== 200) return;
+          try {
+            var m = JSON.parse(xhr.responseText);
+            head();  // 刷新顶部新鲜度文案
+            if (m.generated_at && curGen && m.generated_at !== curGen) {
+              banner.textContent = '📡 已更新至 ' + (m.generated_at || '') + ' · 点击刷新查看最新分析';
+              banner.onclick = function () { location.reload(); };
+              banner.style.display = 'block';
+            }
+          } catch (e) {}
+        };
+        xhr.send();
+      } catch (e) {}
+    }
+    check();
+    setInterval(check, 180000);  // 每 3 分钟探测一次
+  }
+
   /* ---------------- 启动 ---------------- */
   function boot() {
     if (!D) {
@@ -924,6 +970,7 @@
     });
     head();
     initBackdrop();
+    startFreshnessWatch();
     var views = { overview: viewOverview, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, rec: viewRec, auction: viewAuction };
     var done = {};
     function show(k) {

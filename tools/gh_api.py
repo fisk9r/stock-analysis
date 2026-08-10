@@ -125,6 +125,33 @@ def push_files(message, paths, branch="main"):
     print("✅ 已推送 %d 个文件 -> %s（%s）" % (len(tree), new_commit[:10], message))
 
 
+# ----------------------------- Delete -----------------------------
+def delete_files(message, paths, branch="main"):
+    st, body = api("GET", "/repos/%s/%s/git/ref/heads/%s" % (OWNER, REPO, branch))
+    if st != 200:
+        raise SystemExit("读取分支引用失败（HTTP %d）：%s" % (st, body[:200]))
+    base_sha = json.loads(body)["object"]["sha"]
+    st, body = api("GET", "/repos/%s/%s/git/commits/%s" % (OWNER, REPO, base_sha))
+    base_tree = json.loads(body)["tree"]["sha"]
+    # sha 为 null 表示删除该路径（GitHub Git Data API 约定）
+    tree = [{"path": p, "mode": "100644", "type": "blob", "sha": None} for p in paths]
+    st, body = api("POST", "/repos/%s/%s/git/trees" % (OWNER, REPO),
+                   {"base_tree": base_tree, "tree": tree})
+    if st != 201:
+        raise SystemExit("创建树失败（HTTP %d）：%s" % (st, body[:200]))
+    new_tree = json.loads(body)["sha"]
+    st, body = api("POST", "/repos/%s/%s/git/commits" % (OWNER, REPO),
+                   {"message": message, "tree": new_tree, "parents": [base_sha]})
+    if st != 201:
+        raise SystemExit("创建提交失败（HTTP %d）：%s" % (st, body[:200]))
+    new_commit = json.loads(body)["sha"]
+    st, body = api("PATCH", "/repos/%s/%s/git/refs/heads/%s" % (OWNER, REPO, branch),
+                   {"sha": new_commit, "force": False})
+    if st not in (200, 201):
+        raise SystemExit("更新引用失败（HTTP %d）：%s" % (st, body[:200]))
+    print("✅ 已从仓库删除 %d 个文件 -> %s（%s）" % (len(tree), new_commit[:10], message))
+
+
 # ----------------------------- Workflow -----------------------------
 def dispatch(task="build"):
     # 取 workflow 文件名（stock.yml）
@@ -156,6 +183,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd")
     s = sub.add_parser("set-secret"); s.add_argument("name"); s.add_argument("file")
     s = sub.add_parser("push"); s.add_argument("message"); s.add_argument("files", nargs="+")
+    s = sub.add_parser("rm"); s.add_argument("message"); s.add_argument("files", nargs="+")
     s = sub.add_parser("dispatch"); s.add_argument("task", nargs="?", default="build")
     s = sub.add_parser("runs")
     args = ap.parse_args()
@@ -163,6 +191,8 @@ def main():
         set_secret(args.name, open(os.path.join(ROOT, args.file), encoding="utf-8").read())
     elif args.cmd == "push":
         push_files(args.message, args.files)
+    elif args.cmd == "rm":
+        delete_files(args.message, args.files)
     elif args.cmd == "dispatch":
         dispatch(args.task)
     elif args.cmd == "runs":

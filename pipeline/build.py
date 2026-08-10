@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """构建层：跑分析引擎 -> 生成前端 dist/data.js"""
 import glob
+import hashlib
 import json
 import os
 import sys
@@ -430,6 +431,27 @@ def run(date_override=None, dedup_close=False):
         f.write(";\n")
     kb = os.path.getsize(out) / 1024
     log("写出 %s（%.0f KB），总耗时 %.1fs" % (os.path.relpath(out, ROOT), kb, time.time() - t0))
+
+    # 公开版本标记：不含任何敏感数据，供前端轮询检测「是否有新数据」，
+    # 避免用户一直开着旧页面却不知道后台已经重新构建。
+    try:
+        _m = data.get("meta", {}) or {}
+        _fp = hashlib.md5(
+            json.dumps(_m, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()[:10]
+        meta_public = {
+            "date": _m.get("date"),
+            "generated_at": _m.get("generated_at"),
+            "build_seconds": _m.get("build_seconds"),
+            "source": _m.get("source"),
+            "snapshot_same_day": _m.get("snapshot_same_day"),
+            "version": _fp,
+        }
+        with open(os.path.join(DIST, "meta.json"), "w", encoding="utf-8") as mf:
+            json.dump(meta_public, mf, ensure_ascii=False, separators=(",", ":"))
+            mf.write("\n")
+    except Exception:
+        pass
 
     con.close()
     return data
