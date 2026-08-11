@@ -235,6 +235,23 @@ def run(date_override=None, dedup_close=False):
     else:
         log("  炸板样本不足，跳过规律统计")
 
+    log("涨停形态分类与次日规律统计 ...")
+    pattern_stats = engine.limit_up_pattern_stats(u, lookback=120)
+    shape_order = ["一字板", "地天板", "T字板", "烂板", "换手板"]
+    if pattern_stats:
+        for shp in shape_order:
+            if shp in pattern_stats:
+                p = pattern_stats[shp]
+                log("  %s：样本 %d，次日均收 %s%%（涨停率 %s%% / 收绿率 %s%%）"
+                    % (shp, p["samples"], p["avg_next_close"], p["limitup_rate"], p["green_rate"]))
+    else:
+        log("  形态样本不足，跳过规律统计")
+    pattern_today = {}
+    for r in lus:
+        shp = r.get("lu_shape")
+        if shp:
+            pattern_today[shp] = pattern_today.get(shp, 0) + 1
+
     log("断板概率模型 ...")
     risks = engine.break_risk(lus, stats, sent, sec_by_name, u, date, auction["items"])
 
@@ -296,6 +313,8 @@ def run(date_override=None, dedup_close=False):
             "series": series,
             "bench_heat": bench_heat,
             "zhaban_stats": zhaban_stats,
+            "pattern_stats": pattern_stats,
+            "pattern_today": pattern_today,
             "fundflow": (snap.get("fundflow") or [])[-30:],
         },
         "sectors": {"industry": inds[:30], "concept": cons},

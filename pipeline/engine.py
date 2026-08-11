@@ -43,6 +43,38 @@ def is_zhaban(bar, lim):
     return high_pct >= lim - 0.6
 
 
+def lu_shape(bar, lim, pc, api_zb=None):
+    """涨停形态分类（基于单根日K + 可选当日炸板次数）。返回：
+    一字板 / 地天板 / T字板 / 烂板 / 换手板。
+
+    - 一字板：开盘即涨停且全天无成交区间（o==h==l==c）。
+    - 地天板：盘中最低触及跌停（-lim）却最终封死涨停（极致弱转强）。
+    - T字板：开盘即涨停，盘中开板下探后回封（带实体下影）。
+    - 烂板：封板不稳——当日接口给出炸板次数（api_zb>0，金标准），或日K重建显示
+           盘中较开盘大幅回撤（>40% 涨幅区间）后回封。
+    - 换手板：正常换手封板（开盘低于涨停、回撤有限、健康封住），默认形态。
+    """
+    if is_yiziban(bar, lim):
+        return "一字板"
+    c = bar["c"]; o = bar["o"]; h = bar["h"]; l = bar["l"]
+    o_pct = (o - pc) / pc * 100.0 if pc else 0.0
+    l_pct = (l - pc) / pc * 100.0 if pc else 0.0
+    # 地天：盘中最低价触及跌停
+    if l_pct <= -(lim - 0.6):
+        return "地天板"
+    # 金标准：当日接口给出炸板次数 -> 烂板
+    if api_zb:
+        return "烂板"
+    # T字：开盘即涨停，盘中开板下探后回封
+    if o_pct >= lim - 0.6:
+        return "T字板"
+    # 烂板（日K重建近似）：开盘低于涨停，但盘中较开盘大幅回撤后回封
+    dip = (l - o) / o * 100.0 if o else 0.0
+    if dip <= -lim * 0.4:
+        return "烂板"
+    return "换手板"
+
+
 def clamp(v, lo=0.0, hi=1.0):
     return max(lo, min(hi, v))
 
@@ -286,6 +318,52 @@ def zhaban_statistics(u, lookback=120):
     }
 
 
+def limit_up_pattern_stats(u, lookback=120):
+    """历史规律：各涨停形态（一字/地天/T字/烂板/换手）次日表现统计。
+    量化『封板质量/形态』对次日延续性的影响——哪种形态次日最易连板、哪种最易收绿。
+    全部由日K重建且自带形态分类，可作为连板博弈与分歧度的经验参照。"""
+    dates = u.dates[-lookback:]
+    agg = {}
+    for d in dates[:-1]:
+        nd = u.next_date(d)
+        if nd is None:
+            continue
+        for code in u.zt.get(d, ()):
+            b = u.bar(code, d)
+            nb = u.bar(code, nd)
+            if not b or not nb or not b["c"]:
+                continue
+            lim = limit_pct(code, "")
+            if not is_limit_up(b, lim):
+                continue
+            pc = (b["c"] - b["chg"]) if (b["c"] - b["chg"]) > 0 else b["c"]
+            shp = lu_shape(b, lim, pc)
+            a = agg.setdefault(shp, {"samples": 0, "next_open": [], "next_close": [],
+                                     "limitup": 0, "green": 0, "strong": 0})
+            a["samples"] += 1
+            a["next_close"].append(nb["pct"])
+            a["next_open"].append((nb["o"] - b["c"]) / b["c"] * 100.0)
+            if code in u.zt.get(nd, ()):
+                a["limitup"] += 1
+            if nb["pct"] < 0:
+                a["green"] += 1
+            if nb["pct"] >= 3:
+                a["strong"] += 1
+    out = {}
+    for shp, a in agg.items():
+        if a["samples"] < 8:
+            continue
+        out[shp] = {
+            "samples": a["samples"],
+            "avg_next_open": round(mean(a["next_open"]), 2),
+            "avg_next_close": round(mean(a["next_close"]), 2),
+            "limitup_rate": round(a["limitup"] / a["samples"] * 100, 2),
+            "green_rate": round(a["green"] / a["samples"] * 100, 2),
+            "strong_rate": round(a["strong"] / a["samples"] * 100, 2),
+        }
+    return out
+
+
 # ============================================================== 3. 当日涨停画像
 def build_limit_ups(u, date, snap, code2boards, snap_is_same_day):
     """合并 K 线重建结果 + 当日涨停池 API 的封板细节"""
@@ -332,6 +410,7 @@ def build_limit_ups(u, date, snap, code2boards, snap_is_same_day):
             "gain60": round(gain60, 1) if gain60 is not None else None,
             "open_pct": (round((b["o"] / pc - 1) * 100, 2) if pc and pc > 0 else None),
             "amp": round(b["amp"] or 0, 2),
+            "lu_shape": lu_shape(b, limit_pct(code, s["name"]), pc, api_zb=api_r.get("zbc")),
             "prev_date": pd,
         })
     for r in rows:

@@ -378,6 +378,44 @@
         '华电辽能 / 圣阳股份 / 正丹股份 / 沃尔核材 / 寒武纪 / 拓维信息 / 光启技术') + '</div>';
     }
 
+    /* 涨停形态图谱 · 次日规律 */
+    var ps = mk.pattern_stats || {};
+    var pt = mk.pattern_today || {};
+    if (ps && Object.keys(ps).length) {
+      var SHAPE_COLOR = { "一字板": "#2f80ed", "地天板": "#9b51e0", "T字板": "#d4a017", "烂板": "#eb5757", "换手板": "#27ae60" };
+      var SHAPE_ORDER = ["一字板", "地天板", "T字板", "烂板", "换手板"];
+      function shpChip(s) {
+        var col = SHAPE_COLOR[s] || C.gray;
+        return '<span style="display:inline-block;padding:1px 8px;border-radius:9px;font-size:12px;font-weight:700;color:' + col + ';border:1px solid ' + col + '">' + E(s) + '</span>';
+      }
+      var pRows = SHAPE_ORDER.filter(function (s) { return ps[s]; }).map(function (shp) {
+        var p = ps[shp];
+        var nc = p.avg_next_close, no = p.avg_next_open;
+        var ncCol = nc >= 0 ? C.up : C.down;
+        var noCol = no >= 0 ? C.up : C.down;
+        return '<tr>' +
+          '<td class="name">' + shpChip(shp) + '</td>' +
+          '<td class="r num">' + p.samples + '</td>' +
+          '<td class="r num" style="color:' + noCol + '">' + (no >= 0 ? '+' : '') + f(no, 2) + '%</td>' +
+          '<td class="r num" style="color:' + ncCol + '">' + (nc >= 0 ? '+' : '') + f(nc, 2) + '%</td>' +
+          '<td class="r num" style="color:' + C.up + '">' + f(p.limitup_rate, 1) + '%</td>' +
+          '<td class="r num" style="color:' + C.down + '">' + f(p.green_rate, 0) + '%</td>' +
+          '<td class="r num" style="color:' + C.up + '">' + f(p.strong_rate, 1) + '%</td>' +
+          '</tr>';
+      });
+      var ptChips = SHAPE_ORDER.filter(function (s) { return pt[s]; }).map(function (s) {
+        return shpChip(s) + ' <b style="color:var(--text)">' + pt[s] + '</b>';
+      }).join(' &nbsp; ');
+      var pBody = (ptChips ? '<div style="margin-bottom:10px">今日形态分布：' + ptChips + '</div>' : '') +
+        table([
+          { t: '形态' }, { t: '样本', a: 'r' }, { t: '次日均开', a: 'r' }, { t: '次日均收', a: 'r' },
+          { t: '次日涨停率', a: 'r' }, { t: '次日收绿率', a: 'r' }, { t: '次日≥3%强延续', a: 'r' }
+        ], pRows) +
+        '<div class="note" style="margin-top:8px">形态规律基于近 120 日历史涨停次日表现重建：<b style="color:' + C.up + '">次日均收为正</b>=易连板延续，<b style="color:' + C.down + '">收绿率高</b>=分歧/派发需谨慎。一字/地天最强，烂板分歧最大。</div>';
+      h += '<div style="margin-top:16px">' + card('🧬 涨停形态图谱 · 次日规律', pBody,
+        '基于日K重建的涨停封板形态分类与各自历史次日胜率') + '</div>';
+    }
+
     /* 财经要闻 */
     var NW = D.news || {};
     var nwItems = NW.items || [];
