@@ -20,6 +20,15 @@ import argparse
 
 import urllib.request
 import urllib.error
+import time
+
+# 弱网/双栈环境下 urllib 常因 IPv6 黑洞或 IPv4 节点抖动而连接超时。
+# 强制所有 DNS 解析只返回 IPv4 地址（与能通的 curl -4 行为一致），提升推送/触发稳定性。
+import socket
+_orig_getaddrinfo = socket.getaddrinfo
+def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+socket.getaddrinfo = _ipv4_getaddrinfo
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOKEN_FILE = os.path.join(ROOT, "..", ".ghtoken")
@@ -35,7 +44,7 @@ def _token():
     return open(p, encoding="utf-8").read().strip()
 
 
-def api(method, path, data=None, binary=None, base=API, timeout=60):
+def api(method, path, data=None, binary=None, base=API, timeout=120):
     url = base + path
     req = urllib.request.Request(url, method=method)
     req.add_header("Authorization", "Bearer " + _token())
@@ -49,11 +58,19 @@ def api(method, path, data=None, binary=None, base=API, timeout=60):
         req.add_header("Content-Type", "application/octet-stream")
         req.add_header("Content-Length", str(len(binary)))
         req.data = binary
-    try:
-        r = urllib.request.urlopen(req, timeout=timeout)
-        return r.status, r.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", "replace")
+    last_err = None
+    for _attempt in range(3):
+        try:
+            r = urllib.request.urlopen(req, timeout=timeout)
+            return r.status, r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode("utf-8", "replace")
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last_err = e
+            if _attempt < 2:
+                time.sleep(2 * (_attempt + 1))
+                continue
+    raise last_err
 
 
 # ----------------------------- Secrets -----------------------------

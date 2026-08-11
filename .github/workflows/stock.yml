@@ -233,20 +233,21 @@ jobs:
             echo "✅ 状态已回存（$(du -h /tmp/$STATE_FILE | cut -f1)）"
           fi
 
-      # ---------- 7. 打包站点（剔除明文 data.js，仅发布加密 blob + 用户列表） ----------
+      # ---------- 7. 打包站点（公开分析 data.js + 加密 blob + 用户列表） ----------
       - name: 打包站点
         if: steps.task.outputs.task == 'build'
         run: |
           rm -rf site && mkdir -p site
           # 逐个拷贝：默认 shell 是 bash -e，一次 cp 多文件只要缺一个整步就挂
-          for f in index.html styles.css charts.js app.js auth.js nacl.js users.json meta.json; do
+          for f in index.html styles.css charts.js app.js auth.js nacl.js data.js users.json meta.json; do
             if [ -f "dist/$f" ]; then cp "dist/$f" site/; else echo "::warning::缺少 dist/$f"; fi
           done
           # 目标必须写全 site/data；写成 site/ 会因目录已存在而变成 site/data/data
           if [ -d dist/data ]; then cp -r dist/data site/data; fi
           touch site/.nojekyll
-          # 明文数据绝不能上公网——整套口令门禁就靠它不存在
-          rm -f site/data.js site/data.js.bak
+          # data.js 为纯市场分析结果（热度/情绪/趋势/炸板规律，不含任何用户与口令信息），
+          # 按需求公开发布，供访客直接查看；用户列表 users.json / 加密 blob data/*.bin 仍构成口令门禁。
+          rm -f site/data.js.bak
           if [ ! -f site/users.json ] || [ -z "$(ls -A site/data 2>/dev/null)" ]; then
             echo "::error::加密数据缺失（users.json 或 data/*.bin）。检查 ALLOWED_USERS_JSON 密钥。"
             exit 1
