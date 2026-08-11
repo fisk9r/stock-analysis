@@ -351,6 +351,33 @@
         '<div style="margin-top:16px">' + pushCard() + '</div>';
     }
 
+    /* 市场热度（标杆趋势股交易额度） */
+    var bh = mk.bench_heat || {};
+    if (bh && bh.stocks && bh.stocks.length) {
+      var heatColor = bh.level === '热' ? C.up : bh.level === '冷' ? C.down : C.gold;
+      var bhRows = bh.stocks.map(function (s) {
+        var ratioColor = s.amt_ratio >= 1.15 ? C.up : s.amt_ratio <= 0.82 ? C.down : C.gray;
+        var tColor = s.trending ? C.up : C.down;
+        return '<tr><td class="name">' + E(s.name) + '</td>' +
+          '<td class="r num">' + f(s.amt, 1) + '亿</td>' +
+          '<td class="r num" style="color:' + ratioColor + '">' + f(s.amt_ratio, 2) + '×</td>' +
+          '<td class="r num" style="color:' + (s.avg_daily >= 0 ? C.up : C.down) + '">' + (s.avg_daily >= 0 ? '+' : '') + f(s.avg_daily, 2) + '%</td>' +
+          '<td class="c"><span style="color:' + tColor + ';font-weight:700">' + (s.trending ? '多头' : '破位') + '</span></td></tr>';
+      });
+      var zb = mk.zhaban_stats || {};
+      var zbTxt = zb && zb.samples ? ('炸板股次日：平均' + (zb.avg_next_close >= 0 ? '+' : '') + f(zb.avg_next_close, 2) + '%、收绿率' + f(zb.green_rate, 0) + '%、反包涨停率' + f(zb.limitup_rate, 1) + '%') : '';
+      var bhBody = '<div style="display:flex;align-items:baseline;gap:14px;margin-bottom:10px">' +
+        '<span style="font-size:26px;font-weight:800;color:' + heatColor + '">' + E(bh.level) + '</span>' +
+        '<span class="muted">整体热度</span>' +
+        '<span style="margin-left:auto;font-size:12px" class="muted">标杆股合计成交额 <b style="color:var(--text)">' + f(bh.total_amt, 0) + '亿</b> · 相对20日均量 <b style="color:' + heatColor + '">' + f(bh.avg_amt_ratio, 2) + '×</b></span>' +
+        '</div>' +
+        table([{ t: '标杆趋势股' }, { t: '成交额', a: 'r' }, { t: '额/20日均', a: 'r' }, { t: '近5日日均', a: 'r' }, { t: '结构', a: 'c' }], bhRows) +
+        (zbTxt ? '<div class="note" style="margin-top:10px">💡 ' + zbTxt + '</div>' : '') +
+        '<div class="note" style="margin-top:6px">市场热度以标杆趋势股【交易额度（成交额）】为核心判据：放量+多头=抱团可参与，缩量+破位=退潮需严格止损。</div>';
+      h += '<div style="margin-top:16px">' + card('🔥 市场热度 · 标杆趋势股参照系', bhBody,
+        '华电辽能 / 圣阳股份 / 正丹股份 / 沃尔核材 / 寒武纪 / 拓维信息 / 光启技术') + '</div>';
+    }
+
     /* 财经要闻 */
     var NW = D.news || {};
     var nwItems = NW.items || [];
@@ -758,6 +785,8 @@
             + '<span>MA10 <b>' + f(t.ma10) + '</b></span>'
             + '<span>MA20 <b>' + f(t.ma20) + '</b></span>'
             + '<span>近5日 <b>' + (t.up_days) + '涨</b></span>'
+            + '<span>近5日均涨 <b style="color:' + (t.avg_daily >= 3 ? C.up : C.gold) + '">' + f(t.avg_daily, 1) + '%</b></span>'
+            + '<span>趋势带 <b style="color:' + (t.band === '主升强趋势' ? C.up : C.gold) + '">' + E(t.band) + '</b></span>'
             + '<span>偏离MA20 <b style="color:' + (t.momentum_pct >= 0 ? C.up : C.gold) + '">+' + f(t.momentum_pct, 1) + '%</b></span>'
             + '<span>量能 <b>' + f(t.vol_ratio, 1) + '倍</b></span>'
             + '<span>趋势分 <b style="color:' + scol + '">' + f(it.score, 1) + '</b></span>'
@@ -801,7 +830,7 @@
     h += group('🚫 高位风险回避（' + (R.avoid || []).length + '）', R.avoid, 'avoid',
       '连板≥3 且断板概率≥86%，次日冲高回落概率大，列出仅为提示回避');
     h += group('📈 趋势向上 · 主升候选（' + (R.trend || []).length + '）', R.trend, 'trend',
-      '均线多头排列（MA5>MA10>MA20）且非涨停的趋势票，主升段低吸候选');
+      '均线多头 + 近5日日均涨幅≥2% + 至少4天收涨 + 横盘日≤1（剔除“技术多头实则横盘”的票）');
 
     /* 全量评分表 */
     var rows = (R.all || []).map(function (it, i) {

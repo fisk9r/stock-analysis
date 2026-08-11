@@ -32,6 +32,17 @@ def is_yiziban(bar, lim):
             and bar["pct"] >= lim - 0.6)
 
 
+def is_zhaban(bar, lim):
+    """炸板：盘中最高价触及涨停价（high 涨幅 >= lim-0.6）但收盘未能封板。"""
+    if is_limit_up(bar, lim):
+        return False
+    c = bar.get("c")
+    if not c:
+        return False
+    high_pct = bar["pct"] + (bar["h"] - c) / c * 100.0
+    return high_pct >= lim - 0.6
+
+
 def clamp(v, lo=0.0, hi=1.0):
     return max(lo, min(hi, v))
 
@@ -133,6 +144,7 @@ class Universe(object):
     def _build(self):
         self.zt = {d: set() for d in self.dates}      # 当日涨停
         self.dt = {d: set() for d in self.dates}      # 当日跌停
+        self.zhaban = {d: set() for d in self.dates}  # 当日炸板（触涨停未封住）
         self.streak = {}                              # code -> {date: 连板数}
         self.flags = {}                               # code -> {date: {'yizi':bool}}
         for code, bs in self.bars.items():
@@ -152,6 +164,8 @@ class Universe(object):
                     st = 0
                     if is_limit_down(b, lim):
                         self.dt[d].add(code)
+                    if is_zhaban(b, lim):              # 触涨停却未封住 = 炸板
+                        self.zhaban[d].add(code)
                 sd[d] = st
             self.streak[code] = sd
             self.flags[code] = fl
@@ -222,6 +236,54 @@ def streak_statistics(u, lookback=120):
             "limitdown_rate": round(a["limitdown"] / a["total"] * 100, 2),
         }
     return out
+
+
+# ============================================================== 2.5 炸板（未回封）历史规律
+def zhaban_statistics(u, lookback=120):
+    """历史规律：炸板（触及涨停却未封住）个股的次日表现统计。
+    量化『分歧/派发』的延续性——炸板后次日多高开低走、收绿，还是反包涨停。
+    全部由日K重建，无需盘中逐笔，可作为市场分歧度与次日风险的经验参照。"""
+    dates = u.dates[-lookback:]
+    a = {"total": 0, "next_close": [], "next_open": [], "next_high": [],
+         "green": 0, "limitup": 0, "limitdown": 0, "strong": 0}
+    for d in dates[:-1]:
+        nd = u.next_date(d)
+        if nd is None:
+            continue
+        zset = u.zhaban.get(d, set())
+        if not zset:
+            continue
+        nb_all = u.zt.get(nd, set())
+        dt_all = u.dt.get(nd, set())
+        for code in zset:
+            b = u.bar(code, d)
+            nb = u.bar(code, nd)
+            if not b or not nb or not b["c"]:
+                continue
+            a["total"] += 1
+            a["next_close"].append(nb["pct"])
+            a["next_open"].append((nb["o"] - b["c"]) / b["c"] * 100.0)
+            a["next_high"].append((nb["h"] - b["c"]) / b["c"] * 100.0)
+            if nb["pct"] < 0:
+                a["green"] += 1
+            if code in nb_all:
+                a["limitup"] += 1
+            if code in dt_all:
+                a["limitdown"] += 1
+            if nb["pct"] >= 3:
+                a["strong"] += 1
+    if a["total"] < 10:
+        return None
+    return {
+        "samples": a["total"],
+        "avg_next_open": round(mean(a["next_open"]), 2),
+        "avg_next_close": round(mean(a["next_close"]), 2),
+        "avg_next_high": round(mean(a["next_high"]), 2),
+        "green_rate": round(a["green"] / a["total"] * 100, 2),
+        "limitup_rate": round(a["limitup"] / a["total"] * 100, 2),
+        "limitdown_rate": round(a["limitdown"] / a["total"] * 100, 2),
+        "strong_rate": round(a["strong"] / a["total"] * 100, 2),
+    }
 
 
 # ============================================================== 3. 当日涨停画像
@@ -401,6 +463,7 @@ def daily_emotion(u, date):
     pd = u.prev_date(date)
     zt = u.zt.get(date, set())
     dt = u.dt.get(date, set())
+    zb = u.zhaban.get(date, set())
     prev_zt = u.zt.get(pd, set()) if pd else set()
     # 昨日涨停今日表现
     perf, green, again = [], 0, 0
@@ -416,12 +479,16 @@ def daily_emotion(u, date):
     lb = [c for c in zt if u.streak[c].get(date, 0) >= 2]
     maxlb = max([u.streak[c].get(date, 0) for c in zt], default=0)
     br = market_breadth(u, date)
+    bh = benchmark_heat(u, date)   # 市场热度（以标杆股交易额度为核心）
     return {
-        "date": date, "zt": len(zt), "dt": len(dt), "lb": len(lb), "max_lb": maxlb,
+        "date": date, "zt": len(zt), "dt": len(dt), "zb": len(zb), "lb": len(lb), "max_lb": maxlb,
         "promote_rate": round(again / len(prev_zt) * 100, 1) if prev_zt else None,
         "yest_perf": round(mean(perf), 2) if perf else None,
         "yest_green": round(green / len(perf) * 100, 1) if perf else None,
         "up": br["up"], "down": br["down"], "amount": br["amount"],
+        "bench_heat_level": bh["level"], "bench_amt_ratio": bh["avg_amt_ratio"],
+        "bench_share_trending": bh["share_trending"], "bench_total_amt": bh["total_amt"],
+        "bench_avg_daily": bh["avg_daily"],
     }
 
 
@@ -432,10 +499,9 @@ def emotion_series(u, n=30):
 
 def sentiment_score(u, date, series, snap, snap_is_same_day):
     e = next((x for x in series if x["date"] == date), None) or daily_emotion(u, date)
-    zb_cnt = len(snap.get("zb") or []) if snap_is_same_day else None
-    seal_rate = None
-    if zb_cnt is not None and (e["zt"] + zb_cnt) > 0:
-        seal_rate = e["zt"] / (e["zt"] + zb_cnt) * 100
+    # 封板率：用日K重建（涨停 /（涨停+炸板）），历史上每日都可得，不依赖当日快照
+    zb_cnt = e.get("zb") or 0
+    seal_rate = (e["zt"] / (e["zt"] + zb_cnt) * 100) if (e["zt"] + zb_cnt) > 0 else None
     # 成交额环比
     idx = [i for i, x in enumerate(series) if x["date"] == date]
     amt_chg = None
@@ -462,6 +528,9 @@ def sentiment_score(u, date, series, snap, snap_is_same_day):
         {"k": "亏钱效应", "desc": "跌停家数（越少越好）",
          "raw": e["dt"], "unit": "家",
          "score": lerp_score(-e["dt"], -30, -8, 0), "w": 0.08},
+        {"k": "炸板家数", "desc": "触及涨停却未封住（分歧/派发信号）",
+         "raw": e["zb"], "unit": "家",
+         "score": lerp_score(-e["zb"], -25, -6, 0), "w": 0.06},
         {"k": "量能变化", "desc": "两市成交额环比",
          "raw": round(amt_chg, 1) if amt_chg is not None else None, "unit": "%",
          "score": lerp_score(amt_chg, -18, 0, 18), "w": 0.12},
@@ -469,6 +538,14 @@ def sentiment_score(u, date, series, snap, snap_is_same_day):
     if seal_rate is not None:
         comp.append({"k": "封板率", "desc": "涨停/(涨停+炸板)", "raw": round(seal_rate, 1),
                      "unit": "%", "score": lerp_score(seal_rate, 45, 72, 92), "w": 0.10})
+    # 市场热度（核心维度）：以标杆趋势股【交易额度（成交额）】判断
+    # 标杆股成交额相对自身 20 日均量放大 → 抱团温热、可积极参与；缩量 → 退潮。
+    bh = benchmark_heat(u, date)
+    bar = bh["avg_amt_ratio"]
+    if bar is not None:
+        comp.append({"k": "市场热度", "desc": "标杆趋势股成交额/20日均量（放大=热）",
+                     "raw": round(bar, 2), "unit": "倍",
+                     "score": lerp_score(bar, 0.8, 1.0, 1.3), "w": 0.16})
     tw = sum(c["w"] for c in comp)
     score = sum(c["score"] * c["w"] for c in comp) / tw
     for c in comp:
@@ -1014,6 +1091,79 @@ def global_market(indices):
 
 
 # ============================================================== 10.6 历史连板热度校准
+# ============================================================== 5.4 标杆趋势股 & 市场热度
+# 以历史上走出“真实强趋势（日均 3-5 个点、成交额持续放大）”的个股作为参照系，
+# 校准『趋势抱团』环境是否温热。市场热度以【交易额度（成交额）】为核心判据：
+# 标杆股成交额相对自身 20 日均量放大、且仍处多头结构 → 热度上行（抱团可参与）；
+# 反之成交额塌缩、结构破位 → 退潮（趋势票需严格止损）。
+# （代码均已在本项目本地 market.db 核实存在。）
+BENCHMARK_TREND_STOCKS = [
+    ("600396", "华电辽能"),   # 2024 电力抱团标杆，8→5→4→3 高度衰减经典
+    ("002580", "圣阳股份"),   # 2024-2025 储能/固态电池趋势龙头
+    ("300641", "正丹股份"),   # 2024 TMA 涨价十倍趋势股
+    ("002130", "沃尔核材"),   # 2024-2025 铜缆/高速连接趋势核心
+    ("688256", "寒武纪"),     # AI 芯片趋势抱团代表
+    ("002261", "拓维信息"),   # 算力/鸿蒙趋势活跃标的
+    ("002625", "光启技术"),   # 超材料趋势慢牛
+]
+
+
+def benchmark_heat(u, date):
+    """以【交易额度（成交额）】为核心的标杆趋势股热度研判。
+    返回每只标杆股的成交额(亿元)/环比(amt_ratio)/近5日日均涨幅/是否仍处多头，
+    并汇总为整体热度等级（热/温/冷）与 0~1 热度分。"""
+    rows = []
+    for code, name in BENCHMARK_TREND_STOCKS:
+        bs = u.bars.get(code)
+        if not bs:
+            continue
+        hist = [b for b in bs if b["d"] <= date]
+        if len(hist) < 25:
+            continue
+        closes = [b["c"] for b in hist]
+        last = hist[-1]
+        ma5 = mean(closes[-5:]); ma10 = mean(closes[-10:]); ma20 = mean(closes[-20:])
+        price = closes[-1]
+        amt = last.get("amt") or 0
+        amt20 = mean([b.get("amt") or 0 for b in hist[-21:-1]]) if len(hist) > 5 else amt
+        amt_ratio = (amt / amt20) if amt20 else 1.0
+        trending = (ma5 > ma10 > ma20) and (price > ma5)
+        avg_daily = mean([b.get("pct") or 0 for b in hist[-5:]])
+        momentum = (price / ma20 - 1) * 100 if ma20 else 0
+        rows.append({
+            "code": code, "name": name,
+            "amt": round(amt / 1e8, 2),                 # 亿元
+            "amt_ratio": round(amt_ratio, 2),            # 成交额 / 20日均量
+            "avg_daily": round(avg_daily, 2),            # 近5日日均涨幅(%)
+            "trending": trending,                        # 是否仍处多头结构
+            "momentum": round(momentum, 1),
+            "close": round(price, 2),
+        })
+    if not rows:
+        return {"level": "样本不足", "score": 0.0, "avg_amt_ratio": None,
+                "share_trending": 0.0, "avg_daily": None, "total_amt": 0.0, "stocks": []}
+    avg_amt_ratio = mean([r["amt_ratio"] for r in rows])
+    share_trending = sum(1 for r in rows if r["trending"]) / len(rows)
+    avg_daily = mean([r["avg_daily"] for r in rows])
+    total_amt = sum(r["amt"] for r in rows)
+    # 热度等级：以交易额度（成交额环比）为主导，叠加结构（是否仍多头）
+    if avg_amt_ratio >= 1.15 and share_trending >= 0.5:
+        level = "热"
+    elif avg_amt_ratio <= 0.82 or share_trending <= 0.25:
+        level = "冷"
+    else:
+        level = "温"
+    score = clamp(0.5 * (avg_amt_ratio - 0.7) / 0.6 + 0.5 * share_trending, 0, 1)
+    return {
+        "level": level, "score": round(score, 3),
+        "avg_amt_ratio": round(avg_amt_ratio, 2),
+        "share_trending": round(share_trending, 2),
+        "avg_daily": round(avg_daily, 2),
+        "total_amt": round(total_amt, 1),   # 亿元
+        "stocks": rows,
+    }
+
+
 def compute_regime(hist_rows, picks_rows, bars_series=None):
     """结合历史连板库 + bars 派生序列，研判当前『高度周期』位置与断板校准系数。
     hist_rows:   [(date,max_streak,lb_count,zt_count,sent_score,cycle_phase,env_k,n_rec)]
@@ -1057,7 +1207,8 @@ def compute_regime(hist_rows, picks_rows, bars_series=None):
     if declines >= 2 and cur_h <= peak - 2 and peak >= 4:
         factor += 0.28
         reasons.append("检测到『峰值后衰减通道』：空间高度自 %d 板峰值连续回落至 %d 板（连降 %d 日），"
-                       "参照华电辽能 8→5→4→3 历史规律，高位接力风险显著抬升" % (peak, cur_h, declines))
+                       "参照华电辽能、圣阳股份等历史标杆趋势股『高位放量见顶、缩量退潮』规律，"
+                       "高位接力风险显著抬升" % (peak, cur_h, declines))
     # ② 逼近历史峰值
     if ratio >= 0.85 and cur_h >= 5 and declines == 0:
         factor += (ratio - 0.7) * 0.6
@@ -1273,6 +1424,8 @@ def screen_uptrend(u, date, code2boards=None, topn=12):
     if not u or not u.dates:
         return []
     zt_today = u.zt.get(date, set())
+    bh = benchmark_heat(u, date)   # 市场热度（以标杆趋势股交易额度为核心）
+    heat_boost = {"热": 6, "温": 0, "冷": -8}.get(bh["level"], 0)
 
     def industry_of(code):
         boards = (code2boards or {}).get(code) or []
@@ -1303,41 +1456,59 @@ def screen_uptrend(u, date, code2boards=None, topn=12):
         price = closes[-1]
         align = (ma5 > ma10 > ma20) and (price > ma5)
         slope20 = ((ma20 - ma20_prev) / ma20_prev * 100) if ma20_prev else 0
-        up_days = sum(1 for b in hist[-5:] if (b.get("pct") or 0) > 0)
+        # 近 5 日真实日涨幅（用户要求：趋势票应有 3-5 个点/日的真实涨幅，而非
+        # “技术多头、实则横盘”）。avg_daily 命中 3-5% 带在评分中加权最高。
+        last5 = hist[-5:]
+        daily_pcts = [b.get("pct") or 0 for b in last5]
+        avg_daily = mean(daily_pcts)                  # 近 5 日日均涨幅(%)
+        up_days = sum(1 for x in daily_pcts if x > 0)
+        flat_days = sum(1 for x in daily_pcts if abs(x) < 1.0)   # 横盘日（几乎无波动）
         momentum = (price / ma20 - 1) * 100          # 距 MA20 偏离%
         vol20 = mean([b["v"] for b in hist[-21:-1]]) if len(hist) > 5 else (last["v"] or 1)
         vol_ratio = (last["v"] / vol20) if vol20 else 1
-        # ---- 评分 ----
+        # ---- 硬门槛：剔除横盘 ----
+        # 仅保留『均线多头 + 近5日日均涨幅≥2% + 至少4天收涨 + 横盘日≤1』的真实趋势票；
+        # 日均<2% 或 多日几无波动的一律淘汰，确保“趋势”名副其实。
+        if not align or avg_daily < 2.0 or up_days < 4 or flat_days > 1:
+            continue
+        # ---- 评分（趋势强度以日均涨幅为主，均线结构为辅）----
         sc = 0.0
-        sc += 42 if align else 0
-        sc += 10 if price > ma5 else 0
-        sc += clamp(slope20 / 2.0, 0, 16)             # MA20 上行加分
-        sc += up_days / 5.0 * 16                      # 近 5 日上涨天数
-        if 5 <= momentum <= 35:
-            sc += 20                                  # 主升段未透支
+        sc += 28 if align else 0                       # 趋势结构
+        sc += clamp((avg_daily - 1.0) / 4.0, 0, 1) * 34   # 日均涨幅（1%→0，5%→34，命中 3-5% 带）
+        sc += up_days / 5.0 * 13                        # 上涨连续性
+        sc += clamp(slope20 / 1.5, 0, 9)                # MA20 斜率（趋势加速）
+        if 5 <= momentum <= 45:
+            sc += 14                                    # 主升段未严重透支
         elif momentum > 0:
-            sc += max(0.0, 20 - (momentum - 35) * 0.6)
+            sc += max(0.0, 14 - (momentum - 45) * 0.5)
         else:
             sc -= 6
         if 1.0 <= vol_ratio <= 3.0:
-            sc += 10                                  # 温和放量
+            sc += 10                                    # 温和放量
         elif vol_ratio > 5:
-            sc -= 6                                   # 过旺
+            sc -= 6                                     # 过旺
+        sc += heat_boost                               # 市场热度（标杆成交额）调节
         sc = clamp(sc, 0, 100)
-        if not align:                                # 仅保留多头排列，确保“趋势向上”名副其实
-            continue
-        worth = clamp(0.5 * sc + 0.5 * (40 if momentum <= 35 else 10), 0, 100)
+        worth = clamp(0.5 * sc + 0.5 * (42 if momentum <= 45 else 12), 0, 100)
+        # 趋势带判定（用于前端徽章）：日均≥3% 为主升强趋势，否则稳健上行
+        band = "主升强趋势" if avg_daily >= 3.0 else "稳健上行"
         reasons = ["均线多头排列（MA5>MA10>MA20），短中期趋势向上"]
+        reasons.append("近 5 日日均涨幅 %.1f%%（%s），非横盘" % (avg_daily, band))
         if slope20 > 0.5:
             reasons.append("MA20 上行斜率 %.1f%%，趋势加速" % slope20)
-        if up_days >= 3:
+        if up_days >= 4:
             reasons.append("近 5 日 %d 天收涨，上攻连续性好" % up_days)
-        if 5 <= momentum <= 35:
+        if 5 <= momentum <= 45:
             reasons.append("距 MA20 偏离 +%.1f%%，主升段尚未透支" % momentum)
         if 1.0 <= vol_ratio <= 3.0:
             reasons.append("量能温和放大（约 %.1f 倍），资金持续介入" % vol_ratio)
+        if bh["level"] == "热":
+            reasons.append("标杆趋势股成交额放大(%.2fx)、%d/%d 仍处多头，趋势抱团环境温热"
+                           % (bh["avg_amt_ratio"], int(round(bh["share_trending"] * len(bh["stocks"]))), len(bh["stocks"])))
         risks = []
-        if momentum > 35:
+        if bh["level"] == "冷":
+            risks.append("标杆趋势股成交额缩量、抱团松动，趋势票需更严格止损")
+        if momentum > 45:
             risks.append("阶段涨幅偏大（偏离 MA20 +%.0f%%），注意回踩" % momentum)
         if vol_ratio > 4:
             risks.append("放量过猛（%.1f 倍），警惕短线分歧" % vol_ratio)
@@ -1353,7 +1524,8 @@ def screen_uptrend(u, date, code2boards=None, topn=12):
             "score": round(sc, 1), "worth_score": round(worth, 1),
             "trend_meta": {
                 "ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2),
-                "align": True, "up_days": up_days,
+                "align": True, "up_days": up_days, "avg_daily": round(avg_daily, 2),
+                "band": band,
                 "momentum_pct": round(momentum, 1), "vol_ratio": round(vol_ratio, 2),
                 "slope20": round(slope20, 2),
             },

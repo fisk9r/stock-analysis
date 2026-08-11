@@ -220,6 +220,21 @@ def run(date_override=None, dedup_close=False):
     sent = engine.sentiment_score(u, date, series, snap, same_day)
     cyc = engine.cycle_phase([x for x in series if x["date"] <= date])
 
+    log("市场热度研判（标杆趋势股交易额度）...")
+    bench_heat = engine.benchmark_heat(u, date)
+    log("  标杆趋势股市场热度：%s（成交额/20日均量 %.2fx，%d/%d 仍多头）"
+        % (bench_heat["level"], bench_heat["avg_amt_ratio"] or 0,
+           int(round((bench_heat["share_trending"] or 0) * len(bench_heat["stocks"]))), len(bench_heat["stocks"])))
+
+    log("炸板历史规律统计 ...")
+    zhaban_stats = engine.zhaban_statistics(u, lookback=120)
+    if zhaban_stats:
+        log("  炸板样本 %d 只，次日平均收盘 %s%%（收绿率 %s%%）"
+            % (zhaban_stats.get("samples", 0), zhaban_stats.get("avg_next_close"),
+               zhaban_stats.get("green_rate")))
+    else:
+        log("  炸板样本不足，跳过规律统计")
+
     log("断板概率模型 ...")
     risks = engine.break_risk(lus, stats, sent, sec_by_name, u, date, auction["items"])
 
@@ -279,6 +294,8 @@ def run(date_override=None, dedup_close=False):
             "sentiment": sent,
             "cycle": cyc,
             "series": series,
+            "bench_heat": bench_heat,
+            "zhaban_stats": zhaban_stats,
             "fundflow": (snap.get("fundflow") or [])[-30:],
         },
         "sectors": {"industry": inds[:30], "concept": cons},
