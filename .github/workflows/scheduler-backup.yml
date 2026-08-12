@@ -22,6 +22,7 @@ on:
     - cron: '25 7 * * 1-5'   # 北京 15:25 盘中异动 备份（末笔）
     - cron: '55 7 * * 1-5'   # 北京 15:55 收盘 备份兜底（主 15:20）
     - cron: '25 8 * * 1-5'   # 北京 16:25 收盘 最后备份兜底
+    - cron: '35 12 * * 1-5'  # 北京 20:35 复盘补发 备份兜底（与看门狗 20:20/20:50 错峰）
   workflow_dispatch:
     inputs:
       task:
@@ -29,7 +30,7 @@ on:
         required: false
         default: ''
         type: choice
-        options: ['', preauction, auction, anomaly, build]
+        options: ['', preauction, auction, anomaly, build, close_again, weekend]
 
 permissions:
   actions: write   # 用于代为触发 stock.yml 的 workflow_dispatch
@@ -46,7 +47,9 @@ jobs:
         run: |
           set -u
           BH=$(TZ=Asia/Shanghai date +%H)
-          DOW=$(TZ=Asia/Shanghai date +%u)   # 1=周一 … 7=周日
+          BHM=$(TZ=Asia/Shanghai date +%H%M)   # 北京 HHMM 四位数，精确窗口判定
+          BHM=$((10#$BHM))                      # 去前导零，避免 0912 被当八进制
+          DOW=$(TZ=Asia/Shanghai date +%u)      # 1=周一 … 7=周日
           if [ "$DOW" -ge 6 ]; then echo "周末，备份调度休眠"; exit 0; fi
 
           mkdir -p /tmp/bk && cd /tmp/bk
@@ -76,27 +79,36 @@ jobs:
           has() { printf '%s\n' "$MODES" | grep -qx "$1"; }
 
           # 当日该 mode 还没推送且确有状态包可推 → 才代为触发；否则不盲发（防重复/空推）
+          #   $1 = 判定用的 push mode（push_log.jsonl 里记的）
+          #   $2 = 实际派发的 stock.yml task（省略则同 mode）
+          # 二者必须分开：收盘 mode=close 对应 task=build（task 合法值里没有 close）。
           fire_if_missing() {
             local mode="$1"
+            local task="${2:-$1}"
             if has "$mode"; then echo "  ✔ $mode 今日已推送，跳过"; return; fi
             if [ "$GOT_STATE" != "1" ]; then echo "  ⚠ 无状态包，不盲触发 $mode（避免重复/空推）"; return; fi
-            echo "  → 备份触发：$mode"
-            gh workflow run stock.yml --ref main -f task="$mode"
+            echo "  → 备份触发：mode=$mode → task=$task"
+            gh workflow run stock.yml --ref main -f task="$task"
           }
 
-          echo "北京当前小时=$BH  今日已推送 mode：$(echo "$MODES" | tr '\n' ' ')"
+          echo "北京时间=$BHM  今日已推送 mode：$(echo "$MODES" | tr '\n' ' ')"
 
           # 盘前 / 竞价（09:12、09:33 两个检查点）
-          if [ "$BH" -ge 9 ] && [ "$BH" -le 10 ]; then
+          if [ "$BHM" -ge 900 ] && [ "$BHM" -le 1059 ]; then
             fire_if_missing preauction
             fire_if_missing auction
           fi
-          # 盘中异动（10:25~15:25 各检查点）
-          if [ "$BH" -ge 10 ] && [ "$BH" -le 15 ]; then
+          # 盘中异动（10:25~15:25 各检查点；15:40 后交给收盘窗口，避免串窗）
+          if [ "$BHM" -ge 1000 ] && [ "$BHM" -le 1540 ]; then
             fire_if_missing anomaly
           fi
-          # 收盘完整分析（15:55、16:25 兜底）
-          if [ "$BH" -ge 15 ] && [ "$BH" -le 17 ]; then
+          # 收盘完整分析（15:55、16:25 兜底）→ mode=close，派发 task=build
+          # 注意窗口起点必须 >1525，否则 15:25 的异动检查点会把刚开跑的主 build 重复触发。
+          if [ "$BHM" -ge 1550 ] && [ "$BHM" -le 1759 ]; then
+            fire_if_missing close build
+          fi
+          # 复盘补发（20:35 备份兜底）→ mode=close_again，派发 task=close_again
+          if [ "$BHM" -ge 2015 ] && [ "$BHM" -le 2159 ]; then
             fire_if_missing close_again
           fi
 

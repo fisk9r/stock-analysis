@@ -6,9 +6,17 @@ name: 定时看门狗（兜底触发，尽量早送达）
 #   看门狗就在 15~40 分钟内代为触发，确保用户主渠道尽量早收到：
 #     - 盘前 / 竞价：09:15、09:40 两个检查点
 #     - 盘中异动：10:30 / 11:30 / 13:30 / 14:30 / 15:30 各检查点
-#     - 收盘完整分析：16:00、16:30 兜底（给主 15:20 充足时间，避免与主跑并发双发）
+#     - 收盘完整分析：15:52、16:00、16:30 兜底（给主 15:20 充足时间，避免与主跑并发双发）
+#     - 复盘补发：20:20、20:50 兜底（给主 20:00 / 外部定时器 19:55 充足时间）
+#     - 周末发酵：周日 20:40 兜底（主 周日20:00 / 周一08:00）
 #   安全：仅用默认 GITHUB_TOKEN；以「当日是否已推送该 mode」为去重依据，不重复轰炸。
-#   注意：复盘(20:00)由主调度负责，看门狗不重复触发（收盘/复盘都记 mode=close）。
+#
+#   ⚠ mode 与 task 不同名，必须分开传（历史 bug 根源）：
+#     收盘完整分析 → task=build      推送记 mode=close
+#     复盘补发     → task=close_again 推送记 mode=close_again
+#   若在 16:00 用 mode=close_again 判定，会因「复盘 20:00 还没到点」而恒为缺失，
+#   导致看门狗提前 4 小时把复盘发掉并占位，20:00 的正式复盘反被 once-per-day 挡死。
+#   窗口一律用北京时间 HHMM 四位数精确判定，避免整点粒度造成检查点落空/串窗。
 
 on:
   schedule:
@@ -20,9 +28,12 @@ on:
     - cron: '30 5 * * 1-5'   # 北京 13:30 盘中异动 兜底
     - cron: '30 6 * * 1-5'   # 北京 14:30 盘中异动 兜底
     - cron: '30 7 * * 1-5'   # 北京 15:30 盘中异动 兜底（末笔）
-    - cron: '0 8 * * 1-5'    # 北京 16:00 收盘 兜底
     - cron: '52 7 * * 1-5'   # 北京 15:52 收盘 提前兜底（与主 16:00/16:30 错峰）
+    - cron: '0 8 * * 1-5'    # 北京 16:00 收盘 兜底
     - cron: '30 8 * * 1-5'   # 北京 16:30 收盘 最后兜底
+    - cron: '20 12 * * 1-5'  # 北京 20:20 复盘补发 兜底（主 20:00 / 外部定时器 19:55 之后）
+    - cron: '50 12 * * 1-5'  # 北京 20:50 复盘补发 最后兜底
+    - cron: '40 12 * * 0'    # 北京 20:40 周日 周末发酵 兜底（主 周日20:00）
   workflow_dispatch:
     inputs:
       task:
@@ -30,7 +41,7 @@ on:
         required: false
         default: ''
         type: choice
-        options: ['', preauction, auction, anomaly, build]
+        options: ['', preauction, auction, anomaly, build, close_again, weekend]
 
 permissions:
   actions: write   # 用于代为触发 stock.yml 的 workflow_dispatch
@@ -47,8 +58,11 @@ jobs:
         run: |
           set -u
           BH=$(TZ=Asia/Shanghai date +%H)
-          DOW=$(TZ=Asia/Shanghai date +%u)   # 1=周一 … 7=周日
-          if [ "$DOW" -ge 6 ]; then echo "周末，看门狗休眠"; exit 0; fi
+          BHM=$(TZ=Asia/Shanghai date +%H%M)         # 北京 HHMM 四位数，精确窗口判定
+          BHM=$((10#$BHM))                            # 去前导零，避免 0908 被当八进制
+          DOW=$(TZ=Asia/Shanghai date +%u)            # 1=周一 … 7=周日
+          # 周六全休；周日仅放行「周末发酵」兜底，其余交易日任务不巡检
+          if [ "$DOW" = "6" ]; then echo "周六，看门狗休眠"; exit 0; fi
 
           mkdir -p /tmp/wd && cd /tmp/wd
           GOT_STATE=0
@@ -77,27 +91,47 @@ jobs:
           has() { printf '%s\n' "$MODES" | grep -qx "$1"; }
 
           # 当日该 mode 还没推送且确有状态包可推 → 才代为触发；否则不盲发（防重复/空推）
+          #   $1 = 判定用的 push mode（push_log.jsonl 里记的）
+          #   $2 = 实际派发的 stock.yml task（省略则同 mode）
+          # 二者必须分开：收盘 mode=close 对应 task=build（task 合法值里没有 close）。
           fire_if_missing() {
             local mode="$1"
+            local task="${2:-$1}"
             if has "$mode"; then echo "  ✔ $mode 今日已推送，跳过"; return; fi
             if [ "$GOT_STATE" != "1" ]; then echo "  ⚠ 无状态包，不盲触发 $mode（避免重复/空推）"; return; fi
-            echo "  → 兜底触发：$mode"
-            gh workflow run stock.yml --ref main -f task="$mode"
+            echo "  → 兜底触发：mode=$mode → task=$task"
+            gh workflow run stock.yml --ref main -f task="$task"
           }
 
-          echo "北京当前小时=$BH  今日已推送 mode：$(echo "$MODES" | tr '\n' ' ')"
+          echo "北京时间=$BHM 周$DOW  今日已推送 mode：$(echo "$MODES" | tr '\n' ' ')"
 
-          # 盘前 / 竞价（09:15、09:40 两个检查点）
-          if [ "$BH" -ge 9 ] && [ "$BH" -le 10 ]; then
+          # 周日：只兜底「周末发酵」，直接结束
+          if [ "$DOW" = "7" ]; then
+            if [ "$BHM" -ge 2015 ] && [ "$BHM" -le 2159 ]; then
+              fire_if_missing weekend
+            else
+              echo "周日非周末发酵兜底窗口，跳过"
+            fi
+            echo "看门狗本轮结束"; exit 0
+          fi
+
+          # ── 以下为交易日（周一~周五）──
+          # 盘前 / 竞价（09:08、09:15、09:40 检查点）
+          if [ "$BHM" -ge 900 ] && [ "$BHM" -le 1059 ]; then
             fire_if_missing preauction
             fire_if_missing auction
           fi
-          # 盘中异动（10:30~15:30 各检查点）
-          if [ "$BH" -ge 10 ] && [ "$BH" -le 15 ]; then
+          # 盘中异动（10:30~15:30 各检查点；15:40 后交给收盘窗口，避免串窗）
+          if [ "$BHM" -ge 1000 ] && [ "$BHM" -le 1540 ]; then
             fire_if_missing anomaly
           fi
-          # 收盘完整分析（16:00、16:30 兜底）
-          if [ "$BH" -ge 16 ] && [ "$BH" -le 17 ]; then
+          # 收盘完整分析（15:52、16:00、16:30 兜底）→ mode=close，派发 task=build
+          if [ "$BHM" -ge 1550 ] && [ "$BHM" -le 1759 ]; then
+            fire_if_missing close build
+          fi
+          # 复盘补发（20:20、20:50 兜底）→ mode=close_again，派发 task=close_again
+          # 主 20:00 / 外部定时器 19:55 若失败或被丢弃，此处是唯一救场点。
+          if [ "$BHM" -ge 2015 ] && [ "$BHM" -le 2159 ]; then
             fire_if_missing close_again
           fi
 
