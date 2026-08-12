@@ -441,7 +441,7 @@ def run(date_override=None, dedup_close=False):
         for p in reversed(pushes):
             if p.get("mode") not in last:
                 last[p["mode"]] = p
-            if len(last) >= 4:  # 收盘后 / 竞价前 / 竞价确认 / 盘中异动
+            if len(last) >= 6:  # 盘前/竞价后/收盘/复盘补发/盘中异动/周末 共6类，全部保留
                 break
         data["last_push"] = last
     except Exception:

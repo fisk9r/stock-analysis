@@ -412,8 +412,15 @@ def _anomaly_recently_pushed(cooldown_min=12):
 
 def push(summary, dry_run=False, mode="close"):
     """summary: {"title": str, "text": str}。返回已送达通道列表。
-    mode: "close"（收盘后复盘）或 "preauction"（竞价前观察）。
-    无论是否配置通道，都会把推送内容落地为可见文件，避免『啥都看不到』。"""
+    mode 取值与去重（同一 mode 当天只发一次）对应：
+      - "preauction"  盘前预判（08:50）
+      - "auction"     竞价后确认（09:25）
+      - "close"       收盘后完整复盘（15:20）
+      - "close_again" 复盘补发（20:00，与 close 独立，不可共用否则被去重吞掉）
+      - "weekend"     周末发酵/周一前瞻（周日/周一）
+      - "anomaly"     盘中异动（随时，走 PushPlus 冷却去重，不占 ServerChan 额度）
+    无论是否配置通道，都会把推送内容落地为可见文件（last_push_<mode>.md），避免『啥都看不到』。
+    注意：去重账本 push_log.jsonl 仅在『至少一条通道真实送达』后才写，失败不污染去重。"""
     # 幂等去重：同一 mode 当天已推送过则跳过通道发送，避免多路触发重复轰炸
     # （GitHub 自带 schedule 常被丢弃，故叠加了看门狗/备份订阅/外部定时器多重触发，
     #  这里统一兜底：先到先发，后到静默）。
@@ -847,10 +854,10 @@ def format_weekend_summary(data, url="", news_items=None):
 
 
 if __name__ == "__main__":
-    # 测试：python notifier.py [--send] [--preauction|--auction|--anomaly]
+    # 测试：python notifier.py [--send] [--preauction|--auction|--anomaly|--close_again|--weekend]
     #   不加 --send 只打印不发送（安全默认）；加了 --send 才真正推送
     mode = "close"
-    for kw in ("preauction", "auction", "anomaly"):
+    for kw in ("preauction", "auction", "anomaly", "close_again", "weekend"):
         if ("--" + kw) in sys.argv:
             mode = kw
     dry_run = ("--send" not in sys.argv)
