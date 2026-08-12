@@ -483,7 +483,8 @@
     var LP = D.last_push || {};
     var LABELS = {
       close: '📊 收盘后复盘', preauction: '🔔 竞价前观察',
-      auction: '⚡ 竞价强度确认', anomaly: '🚨 盘中异动提醒'
+      auction: '⚡ 竞价强度确认', close_again: '🌙 复盘补发',
+      weekend: '🗓️ 周末发酵', anomaly: '🚨 盘中异动提醒'
     };
     function blk(mode, label) {
       var p = LP[mode];
@@ -491,13 +492,14 @@
       return '<div style="margin-top:10px"><b>' + label + '</b> <span class="faint">' + E(p.ts || '') + '</span></div>' +
              '<div style="font-size:13px;line-height:1.65">' + md2html(p.text || '') + '</div>';
     }
-    var modes = ['close', 'preauction', 'auction', 'anomaly'].filter(function (m) { return LP[m]; });
+    var modes = ['preauction', 'auction', 'close', 'close_again', 'weekend', 'anomaly']
+      .filter(function (m) { return LP[m]; });
     var inner = modes.length
       ? modes.map(function (m) { return blk(m, LABELS[m] || m); }).join('')
-      : '<div class="m">尚未生成推送。配置 config/notify.json 的微信/Telegram/邮件后，每日 <b>收盘后(16:10)</b> 与 <b>竞价前(9:00)</b> 自动推送；竞价强度确认与盘中异动可随时触发；即便未配置通道，此处也会留存最近一次推送内容。</div>';
+      : '<div class="m">尚未生成推送。配置 config/notify.json 的微信/Telegram/邮件后，每日 <b>盘前(08:50)</b>、<b>收盘(15:20)</b> 与 <b>复盘补发(20:00)</b> 自动推送；竞价确认与盘中异动可随时触发；即便未配置通道，此处也会留存最近一次推送内容。</div>';
     return card('📨 消息推送记录', '<div>' + inner +
       '</div><div class="m" style="margin-top:10px;color:var(--muted)">通道配置：config/notify.json（微信优先：企业微信群机器人 / ServerChan / PushPlus；亦支持 Telegram、SMTP 邮件）</div>',
-      '每日推送：收盘后复盘 + 竞价前观察；竞价确认与盘中异动可随时触发');
+      '每日推送：盘前观察 + 竞价确认 + 收盘复盘 + 复盘补发(20:00)；盘中异动可随时触发');
   }
 
   function indexTable() {
