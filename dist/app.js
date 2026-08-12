@@ -135,7 +135,7 @@
     s += '<span class="pill purple">' + E(m.generated_at || '') + '</span>';
     // 数据新鲜度（实时计算距今时长，供轮询刷新时复用）
     var fresh = '';
-    var _gen = m.generated_at ? new Date(m.generated_at.replace(/-/g, '/').replace(' ', 'T')) : null;
+    var _gen = m.generated_at ? new Date(m.generated_at.replace(' ', 'T')) : null;
     var dt = m.date ? new Date(m.date.replace(/-/g, '/')) : null;
     function _rel(ts) {
       if (!ts || isNaN(ts.getTime())) return '';
@@ -148,7 +148,7 @@
     }
     if (dt && !isNaN(dt.getTime())) {
       var days = Math.floor((Date.now() - dt.getTime()) / 86400000);
-      if (days >= 2) fresh = '<span class="fresh stale">⚠ 数据已过期 ' + days + ' 天 · 请运行 update.bat 更新</span>';
+      if (days >= 2) fresh = '<span class="fresh stale">⚠ 数据已过期 ' + days + ' 天 · 站点由定时任务自动更新，若长期未更新请检查推送状态或联系管理员</span>';
       else fresh = '<span class="fresh ok">✓ 数据新鲜 · 收盘后已更新' +
         (_gen && !isNaN(_gen.getTime()) ? '（生成于 ' + _rel(_gen) + '）' : '') + '</span>';
     }
