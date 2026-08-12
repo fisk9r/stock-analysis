@@ -23,6 +23,9 @@
 多路同时点火也只发一次，绝不重复轰炸。
 
 限速：创建接口限 5 次/分钟，故每创建 1 个 sleep 13 秒留余量。
+
+幂等：重复运行不会累积重复定时器——先 GET /jobs 列出已有任务，按 title 匹配，
+      已存在的更新（PUT /jobs/{id}），不存在的才创建（PUT /jobs）。
 """
 import os
 import sys
@@ -61,6 +64,38 @@ def cron_to_schedule(cron):
     }
 
 
+def _api(key, url, data=None, method="GET"):
+    """带 3 次重试的 cron-job.org 调用。HTTP 错误立即返回（确定性），
+    仅网络异常重试。返回 (status, parsed_json)。"""
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", "Bearer " + key)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.status, json.loads(r.read().decode("utf-8", "ignore"))
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.loads(e.read().decode("utf-8", "ignore"))
+            except Exception:
+                return e.code, {}
+        except Exception as e:
+            if attempt == 2:
+                return 0, {"error": str(e)}
+            time.sleep(3)
+    return 0, {}
+
+
+def list_jobs(key):
+    """返回 {title: jobId}，用于幂等匹配。"""
+    st, resp = _api(key, API)
+    if st != 200:
+        print("⚠️ 列出已有任务失败（HTTP %s），将按全量创建处理。" % st)
+        return {}
+    return {j.get("title"): j.get("jobId") for j in (resp.get("jobs") or [])}
+
+
 def main():
     key = os.environ.get("CRONJOB_API_KEY")
     pat = os.environ.get("GH_PAT")
@@ -72,6 +107,7 @@ def main():
     headers = {k: (v.replace("__GH_PAT__", pat) if isinstance(v, str) else v)
                for k, v in cfg["headers"].items()}
 
+    existing = list_jobs(key)
     ok = 0
     for job in cfg["jobs"]:
         body = {
@@ -89,23 +125,25 @@ def main():
             }
         }
         data = json.dumps(body).encode("utf-8")
-        # ⚠ 创建用 PUT（不是 POST）
-        req = urllib.request.Request(API, data=data, method="PUT")
-        req.add_header("Authorization", "Bearer " + key)
-        req.add_header("Content-Type", "application/json")
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                resp = json.loads(r.read().decode("utf-8", "ignore"))
-                print("✅ 已创建: %s  (cron=%s, task=%s, jobId=%s)"
-                      % (job["title"], job["cron"], job["task"], resp.get("jobId")))
-                ok += 1
-        except urllib.error.HTTPError as e:
-            print("❌ 失败: %s  HTTP %s  %s" % (job["title"], e.code,
-                                                e.read().decode("utf-8", "ignore")[:200]))
+        eid = existing.get(job["title"])
+        if eid:
+            url, action = "%s/%s" % (API, eid), "更新"
+        else:
+            url, action = API, "创建"
+        # ⚠ 创建/更新都用 PUT（不是 POST）
+        st, resp = _api(key, url, data, method="PUT")
+        new_id = resp.get("jobId") or eid
+        if st in (200, 201) and new_id:
+            print("✅ 已%s: %s  (cron=%s, task=%s, jobId=%s)"
+                  % (action, job["title"], job["cron"], job["task"], new_id))
+            ok += 1
+        else:
+            print("❌ 失败: %s  HTTP %s  %s" % (job["title"], st, str(resp)[:200]))
         # 创建限流 5 次/分钟 → 间隔 13 秒留余量
         time.sleep(13)
-    print("完成：%d/%d 个任务已注册到 cron-job.org" % (ok, len(cfg["jobs"])))
+    print("完成：%d/%d 个任务已注册/更新到 cron-job.org" % (ok, len(cfg["jobs"])))
     if ok:
+        print("（幂等：已存在的同名任务会被更新而非重复创建）")
         print("此后盘前/竞价/盘中(6次)/收盘/复盘 由云端定时器独立触发，不再依赖 GitHub 自带 schedule。")
 
 
