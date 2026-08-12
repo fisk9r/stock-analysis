@@ -25,6 +25,21 @@ from email.mime.text import MIMEText
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import store
+try:
+    import trade_calendar
+except Exception:      # 日历缺失时不阻断推送（宁可多推，不可漏推）
+    trade_calendar = None
+
+# CI runner 时区是 UTC，本机是北京时间；而看门狗解析 push_log 用的是北京日期。
+# 三者必须统一，否则跨日边界（北京 00:00~08:00）会导致去重判定与看门狗判定错位。
+# 全模块的"当前时间/当天"一律以北京时间为准。
+_BJ_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def _bj_now():
+    """北京时间的 naive datetime（去掉 tzinfo，便于与历史 ts 字符串直接比较）。"""
+    return datetime.datetime.now(_BJ_TZ).replace(tzinfo=None)
+
 
 ROOT = store.ROOT
 CFG_PATH = os.path.join(ROOT, "config", "notify.json")
@@ -364,7 +379,7 @@ def _already_pushed_today(mode):
         logp = os.path.join(DIST, "push_log.jsonl")
         if not os.path.exists(logp):
             return False
-        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        today = _bj_now().strftime("%Y-%m-%d")
         with open(logp, encoding="utf-8") as fh:
             for line in fh:
                 try:
@@ -387,7 +402,7 @@ def _anomaly_recently_pushed(cooldown_min=12):
         logp = os.path.join(DIST, "push_log.jsonl")
         if not os.path.exists(logp):
             return False
-        now = datetime.datetime.now()
+        now = _bj_now()
         with open(logp, encoding="utf-8") as fh:
             for line in fh:
                 try:
@@ -421,6 +436,17 @@ def push(summary, dry_run=False, mode="close"):
       - "anomaly"     盘中异动（随时，走 PushPlus 冷却去重，不占 ServerChan 额度）
     无论是否配置通道，都会把推送内容落地为可见文件（last_push_<mode>.md），避免『啥都看不到』。
     注意：去重账本 push_log.jsonl 仅在『至少一条通道真实送达』后才写，失败不污染去重。"""
+    # 非交易日拦截：cron 写的是「周一至周五」，法定节假日（春节/国庆等）照样点火。
+    # 若不拦，节假日会连日把「节前那根K线」当『今日复盘』推出去，既误导又白烧
+    # ServerChan 额度（5 条/天）。weekend 模式本就在周末推，豁免。
+    # 逃生阀：设环境变量 SA_FORCE_PUSH=1 可强制推送（手工补发/测试用）。
+    if (not dry_run and mode != "weekend" and trade_calendar is not None
+            and os.environ.get("SA_FORCE_PUSH") != "1"
+            and not trade_calendar.is_trade_day()):
+        print("[notifier][%s] %s（%s），跳过推送——避免把节前数据当『今日』发出"
+              % (mode, trade_calendar.why_closed() or "非交易日",
+                 _bj_now().strftime("%Y-%m-%d")))
+        return ["skipped:not-trade-day"]
     # 幂等去重：同一 mode 当天已推送过则跳过通道发送，避免多路触发重复轰炸
     # （GitHub 自带 schedule 常被丢弃，故叠加了看门狗/备份订阅/外部定时器多重触发，
     #  这里统一兜底：先到先发，后到静默）。
@@ -450,7 +476,7 @@ def push(summary, dry_run=False, mode="close"):
     #    注意：此处只写 last_push_<mode>.md 可见文件，绝不写去重账本 push_log.jsonl——
     #    去重账本只在“通道真实送达后”才记（见下方 block 3），避免“先记账再发通道”导致
     #    通道发送失败时账本已记“今日已推”，把当天重试永久挡掉（复盘/收盘再次跑成功却零送达）。
-    _ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _ts = _bj_now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         os.makedirs(DIST, exist_ok=True)
         art = os.path.join(DIST, "last_push_%s.md" % mode)
@@ -509,7 +535,62 @@ def push(summary, dry_run=False, mode="close"):
                                      "text": text}, ensure_ascii=False) + "\n")
         except Exception as e:
             print("[notifier] 去重账本写入失败（不影响已送达）：%r" % e)
+        _rotate_push_log()
     return results
+
+
+def _rotate_push_log(keep_days=90, full_text_days=7, brief_len=300):
+    """滚动清理去重账本，防止无限膨胀。
+
+    账本每条含推送全文（实测约 3.2KB/条），每交易日 4~6 条 → 一年约 3.9MB，
+    而它会被打进 state.tar.gz 每次 CI 上传/下载，且看门狗每个检查点都要解析。
+    策略（在保证功能前提下尽量瘦身）：
+      - 丢弃 keep_days 天之前的记录（去重只看当天，看板只取每 mode 最近一条）；
+      - full_text_days 天之前的记录把正文压到 brief_len 字符（保留 mode/ts 供审计）。
+    安全：任何异常都静默放弃清理，绝不影响已完成的推送与当天去重。
+    """
+    try:
+        logp = os.path.join(DIST, "push_log.jsonl")
+        if not os.path.exists(logp):
+            return
+        now = _bj_now()
+        keep_before = now - datetime.timedelta(days=keep_days)
+        brief_before = now - datetime.timedelta(days=full_text_days)
+        rows, changed = [], False
+        with open(logp, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    p = json.loads(line)
+                except Exception:
+                    changed = True          # 丢弃损坏行
+                    continue
+                try:
+                    dt = datetime.datetime.strptime(str(p.get("ts", "")), "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    rows.append(p)          # 时间戳异常的保留，交由人工判断
+                    continue
+                if dt < keep_before:
+                    changed = True
+                    continue
+                t = p.get("text") or ""
+                if dt < brief_before and len(t) > brief_len:
+                    p["text"] = t[:brief_len] + "…（历史记录已压缩）"
+                    changed = True
+                rows.append(p)
+        if not changed:
+            return
+        tmp = logp + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            for p in rows:
+                fh.write(json.dumps(p, ensure_ascii=False) + "\n")
+        os.replace(tmp, logp)
+        print("[notifier] 去重账本已滚动清理：保留 %d 条（%.1f KB）"
+              % (len(rows), os.path.getsize(logp) / 1024.0))
+    except Exception as e:
+        print("[notifier] 去重账本清理跳过（不影响推送）：%r" % e)
 
 
 def last_text_for_mode(mode):

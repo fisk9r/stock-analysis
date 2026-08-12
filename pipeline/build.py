@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import time
+import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import engine
@@ -19,6 +20,14 @@ DIST = os.path.join(ROOT, "dist")
 ARCHIVE = os.path.join(ROOT, "archive")
 
 
+_BJ_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def _bj_now():
+    """北京时间 naive datetime（与 notifier 一致；CI runner 为 UTC，必须用北京时间）。"""
+    return datetime.datetime.now(_BJ_TZ).replace(tzinfo=None)
+
+
 def log(*a):
     print("[build]", *a, flush=True)
 
@@ -30,8 +39,8 @@ def pick_date(u, override=None):
     if not u.dates:
         raise RuntimeError("行情库为空，请先运行 fetch.py")
     last = u.dates[-1]
-    today = time.strftime("%Y-%m-%d")
-    now = time.strftime("%H%M")
+    today = _bj_now().strftime("%Y-%m-%d")
+    now = _bj_now().strftime("%H%M")
     if last == today and now < "1505":
         return u.dates[-2] if len(u.dates) >= 2 else last
     return last
@@ -307,7 +316,7 @@ def run(date_override=None, dedup_close=False):
     data = {
         "meta": {
             "date": date, "prev_date": prev,
-            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "generated_at": _bj_now().strftime("%Y-%m-%d %H:%M:%S"),
             "snapshot_same_day": same_day,
             "snapshot_at": snap.get("fetched_at"),
             "universe": len(u.bars), "trade_days": len(u.dates),
@@ -672,7 +681,7 @@ def _parse_news_time(it):
 def _weekend_window_items(items):
     """筛选『周末发酵』窗口要闻：最近一个周五 15:00 之后至今。无日期的视为近期保留。"""
     import datetime as _dt
-    now = _dt.datetime.now()
+    now = _bj_now()
     today = now.date()
     offset = (today.weekday() - 4) % 7  # 4=周五，回退到最近周五（含当天）
     last_fri = today - _dt.timedelta(days=offset)
@@ -702,7 +711,7 @@ def push_weekend():
         lp = os.path.join(DIST, "push_log.jsonl")
         if os.path.exists(lp):
             import datetime as _dt
-            cutoff = (_dt.datetime.now() - _dt.timedelta(hours=18)).strftime("%Y-%m-%d %H:%M:%S")
+            cutoff = (_bj_now() - _dt.timedelta(hours=18)).strftime("%Y-%m-%d %H:%M:%S")
             for line in open(lp, encoding="utf-8"):
                 try:
                     p = json.loads(line)

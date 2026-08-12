@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import time
+import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import em_api as api
@@ -17,7 +18,14 @@ import store
 
 ROOT = store.ROOT
 ARCHIVE = os.path.join(ROOT, "archive")
-CLOSE_TIME = "1505"   # 收盘落定时间
+CLOSE_TIME = "1505"   # 收盘落定时间（北京时间）
+
+_BJ_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def _bj_now():
+    """北京时间 naive datetime（CI runner 为 UTC，必须用北京时间判断收盘/日期）。"""
+    return datetime.datetime.now(_BJ_TZ).replace(tzinfo=None)
 
 
 def log(*a):
@@ -25,7 +33,7 @@ def log(*a):
 
 
 def market_closed():
-    return time.strftime("%H%M") >= CLOSE_TIME
+    return _bj_now().strftime("%H%M") >= CLOSE_TIME
 
 
 def refresh_stocks(con):
@@ -33,7 +41,7 @@ def refresh_stocks(con):
     rows = api.all_stocks()
     rows = [r for r in rows if r["code"] and r["name"] and "退市" not in r["name"]]
     store.upsert_stocks(con, rows)
-    store.meta_set(con, "stocks_updated", time.strftime("%Y-%m-%d %H:%M:%S"))
+    store.meta_set(con, "stocks_updated", _bj_now().strftime("%Y-%m-%d %H:%M:%S"))
     con.commit()
     log("股票清单 %d 只" % len(rows))
     return rows
@@ -41,7 +49,7 @@ def refresh_stocks(con):
 
 def snapshot_to_bars(con, rows, date=None):
     """把当日快照直接写成日K（仅收盘后调用）"""
-    date = date or time.strftime("%Y-%m-%d")
+    date = date or _bj_now().strftime("%Y-%m-%d")
     tup = []
     for r in rows:
         if r["price"] is None or r["open"] is None or r["prev_close"] in (None, 0):
@@ -60,7 +68,7 @@ def refresh_bars(con, stocks, full_days=130):
     n_code = con.execute("SELECT COUNT(DISTINCT code) FROM bars").fetchone()[0] or 0
     n_date = con.execute("SELECT COUNT(DISTINCT date) FROM bars").fetchone()[0] or 0
     last = con.execute("SELECT MAX(date) FROM bars").fetchone()[0]
-    today = time.strftime("%Y-%m-%d")
+    today = _bj_now().strftime("%Y-%m-%d")
 
     need_full = n_code < len(stocks) * 0.6 or n_date < 60
     if need_full:
@@ -79,7 +87,7 @@ def refresh_bars(con, stocks, full_days=130):
     if market_closed():
         snapshot_to_bars(con, stocks, today)
     else:
-        log("尚未收盘（%s），跳过当日快照入库，分析将以上一交易日为准" % time.strftime("%H:%M"))
+        log("尚未收盘（%s），跳过当日快照入库，分析将以上一交易日为准" % _bj_now().strftime("%H:%M"))
     return 0
 
 
@@ -132,7 +140,7 @@ def refresh_boards(con, force=False, max_age_days=7):
         [b["bk"] for b in boards], workers=8,
         on_progress=lambda d, t: log("  成分 %d/%d  %.0fs" % (d, t, time.time() - t0)))
     store.upsert_boards(con, boards, members)
-    store.meta_set(con, "boards_updated", time.strftime("%Y-%m-%d %H:%M:%S"))
+    store.meta_set(con, "boards_updated", _bj_now().strftime("%Y-%m-%d %H:%M:%S"))
     con.commit()
     log("板块映射完成 %d 个板块，耗时 %.0fs" % (len(members), time.time() - t0))
 
@@ -163,7 +171,7 @@ def snapshot_today():
 
 def save_archive(snap):
     os.makedirs(ARCHIVE, exist_ok=True)
-    p = os.path.join(ARCHIVE, "snapshot_%s.json" % time.strftime("%Y%m%d"))
+    p = os.path.join(ARCHIVE, "snapshot_%s.json" % _bj_now().strftime("%Y%m%d"))
     with open(p, "w", encoding="utf-8") as f:
         json.dump(snap, f, ensure_ascii=False)
     log("盘后快照归档 -> %s" % os.path.relpath(p, ROOT))
