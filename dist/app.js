@@ -336,6 +336,60 @@
       card('🌡️ 场内情绪温度计', gaugeBody, '7 维加权 · 0–100 分') +
       card('🔄 情绪周期定位', cycBody, '近 6 个交易日趋势判定') + '</div>';
 
+    /* 短线情绪微观结构（首板/断层/晋级率分档/炸板率/赚钱效应细分） */
+    var MIC = D.micro || {};
+    if (MIC && MIC.zt !== undefined) {
+      var pf = MIC.profit || {}, pt = MIC.promote_tiered || {}, fb = MIC.first_board || {};
+      var mbody = '<div class="grid g3" style="gap:10px;margin-bottom:10px">' +
+        kpi('首板', (fb.count || 0) + ' 只', '新题材试错入口') +
+        kpi('最高连板', MIC.max_lb + ' 板', (MIC.gap && MIC.gap.length) ? ('断层缺 ' + MIC.gap.join('/') + ' 板') : '梯队完整') +
+        kpi('炸板率', (MIC.zhaban_rate == null ? '—' : MIC.zhaban_rate + '%'), '分歧/派发信号') + '</div>';
+      mbody += '<table class="tbl"><tr><th>赚钱效应</th><th>翻红率</th><th>再涨停率</th><th>平均涨幅</th><th>亏钱(翻绿)</th></tr><tr>' +
+        '<td class="r num">昨涨停今均</td><td class="r num">' + f(pf.red_rate, 1) + '%</td><td class="r num">' + f(pf.again_rate, 1) + '%</td>' +
+        '<td class="r num ' + (pf.avg_pct >= 0 ? '' : '') + '">' + f(pf.avg_pct, 1) + '%</td><td class="r num">' + f(pf.green_rate, 1) + '%</td></tr></table>';
+      mbody += '<table class="tbl" style="margin-top:8px"><tr><th>晋级率分档</th><th>1进2</th><th>2进3</th><th>3板及以上</th></tr><tr>' +
+        '<td>今日各档</td><td class="r num">' + f(pt['1进2'], 1) + '%</td><td class="r num">' + f(pt['2进3'], 1) + '%</td><td class="r num">' + f(pt['3板及以上'], 1) + '%</td></tr></table>';
+      h += card('🔬 短线情绪微观结构', mbody, '首板/梯队断层/晋级率分档/炸板率/赚钱效应细分 · 纯计算');
+    }
+
+    /* 近5日板块热度趋势 + 龙头谱系（题材持续性/退潮追踪） */
+    function spark(ser) {
+      var w = 150, h = 26, vs = ser.map(function (d) { return d.v; });
+      var mn = Math.min.apply(null, vs), mx = Math.max.apply(null, vs), rg = (mx - mn) || 1;
+      var pts = ser.map(function (d, i) {
+        var x = ser.length > 1 ? (i / (ser.length - 1)) * w : 0;
+        var y = h - ((d.v - mn) / rg) * (h - 4) - 2;
+        return x.toFixed(1) + ',' + y.toFixed(1);
+      }).join(' ');
+      return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">' +
+        '<polyline fill="none" stroke="' + C.blue + '" stroke-width="1.6" points="' + pts + '"/></svg>';
+    }
+    var STH = D.sector_trend_hist || {};
+    if (STH.trend && STH.trend.length) {
+      var trows = STH.trend.map(function (s) {
+        var ser = (s.strength || []).map(function (v, i) { return { l: (STH.dates[i] || '').slice(5), v: v }; });
+        return '<tr><td class="name">' + E(s.name) + '</td><td>' + spark(ser) + '</td>' +
+          '<td class="r num">' + f(s.strength[s.strength.length - 1], 0) + '</td>' +
+          '<td class="r num ' + (s.drift === '升温' ? '' : (s.drift === '降温' ? '' : '')) + '">' +
+          '<span style="color:' + (s.drift === '升温' ? C.up : s.drift === '降温' ? C.down : C.gray) + '">' + s.drift +
+          ' ' + (s.delta >= 0 ? '+' : '') + f(s.delta, 0) + '</span></td></tr>';
+      }).join('');
+      var lbody = '<table class="tbl"><tr><th>板块</th><th>5日强度</th><th>最新</th><th>趋势</th></tr>' + trows + '</table>';
+      if (STH.lineage && STH.lineage.length) {
+        var lrows = STH.lineage.map(function (x) {
+          var now = x.lead_now ? (x.lead_now.name + '(' + x.lead_now.streak + '板)') : '—';
+          var old = x.lead_5d_ago ? (x.lead_5d_ago.name + '(' + x.lead_5d_ago.streak + '板)') : '—';
+          var op = x.lead_old_today_pct;
+          return '<tr><td class="name">' + E(x.sector) + '</td><td>' + E(now) + '</td><td>' + E(old) + '</td>' +
+            '<td class="r num ' + (op >= 0 ? '' : '') + '"><span style="color:' + (op == null ? C.gray : op >= 0 ? C.up : C.down) + '">' +
+            (op == null ? '—' : f(op, 1) + '%') + '</span></td></tr>';
+        }).join('');
+        lbody += '<div style="margin-top:10px;font-size:12px;font-weight:700">龙头谱系（5日前领涨股现状）</div>' +
+          '<table class="tbl"><tr><th>主线板块</th><th>今日领涨</th><th>5日前领涨</th><th>现状</th></tr>' + lrows + '</table>';
+      }
+      h += card('🧭 近5日板块热度趋势 · 龙头谱系', lbody, '题材持续性/退潮追踪：升温板块可跟随，降温+龙头跌=退潮');
+    }
+
     /* 时间序列 */
     if (ser.length >= 3) {
       var sub = ser.slice(-30);

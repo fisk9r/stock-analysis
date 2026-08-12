@@ -734,6 +734,21 @@ def format_stock_summary(data, url="", mode="close"):
                 _pct(sent.get("promote_rate")), _pct(sent.get("seal_rate"))))
     if regime.get("level"):
         L.append("**连板热度研判**：%s" % regime.get("note", ""))
+    # 短线情绪微观结构（首板/断层/晋级率分档/炸板率/赚钱效应细分）
+    micro = data.get("micro") or {}
+    if micro:
+        p = micro.get("profit") or {}
+        pt = micro.get("promote_tiered") or {}
+        fb = micro.get("first_board", {})
+        L.append("**赚钱效应**：昨涨停今均 %s（翻红 %s / 再涨停 %s）｜ 亏钱效应(翻绿) %s"
+                 % (_pct(p.get("avg_pct")), _pct(p.get("red_rate")),
+                    _pct(p.get("again_rate")), _pct(p.get("green_rate"))))
+        L.append("**晋级率**：1进2 %s ｜ 2进3 %s ｜ 3板+ %s ｜ **首板** %d 只 ｜ **炸板率** %s"
+                 % (_pct(pt.get("1进2")), _pct(pt.get("2进3")), _pct(pt.get("3板及以上")),
+                    fb.get("count", 0), _pct(micro.get("zhaban_rate"))))
+        gap = micro.get("gap") or []
+        if gap:
+            L.append("**梯队断层**：缺 %s 板（中位断档，警惕高位分歧）" % "/".join("%d" % g for g in gap))
     L.append("")
     if narr.get("bullets"):
         L.append("### 复盘要点")

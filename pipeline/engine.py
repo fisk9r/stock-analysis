@@ -576,6 +576,131 @@ def emotion_series(u, n=30):
     return [daily_emotion(u, d) for d in ds]
 
 
+# ============================================================== 5.5 短线情绪微观结构
+def microstructure(u, date, lus, snap, code2boards, same_day):
+    """纯计算「短线情绪微观结构」（对标 vibe-astock / aiagents-stock 最热指标组）：
+    首板分析、连板梯队断层、晋级率分档(1进2/2进3/3板+)、炸板率、
+    赚钱效应细分(翻红率/再涨停率/平均涨幅/翻绿率)。全部由 130 天 K 线库重建，不依赖当日快照。"""
+    pd = u.prev_date(date)
+    zt = u.zt.get(date, set())
+    zb = u.zhaban.get(date, set())
+    # 首板（streak==1）
+    first = [r for r in lus if r.get("streak") == 1]
+    fb_shapes = {}
+    for r in first:
+        sh = r.get("lu_shape")
+        if sh:
+            fb_shapes[sh] = fb_shapes.get(sh, 0) + 1
+    # 连板梯队分布 + 断层检测
+    ladder_dist = {}
+    for r in lus:
+        ladder_dist[r["streak"]] = ladder_dist.get(r["streak"], 0) + 1
+    maxlb = max(ladder_dist, default=0)
+    gaps = [lv for lv in range(2, maxlb + 1) if lv not in ladder_dist]  # 1板恒有，从2板起看断档
+    # 晋级率分档：昨日涨停股今日各档晋级（再涨停且连板+1）
+    prev_zt = u.zt.get(pd, set()) if pd else set()
+    tiered = {"1进2": [0, 0], "2进3": [0, 0], "3板及以上": [0, 0]}
+    for code in prev_zt:
+        pstreak = u.streak[code].get(pd, 1)
+        today_in_zt = code in zt
+        tstreak = u.streak[code].get(date, 0)
+        if pstreak == 1:
+            tiered["1进2"][1] += 1
+            if today_in_zt and tstreak >= 2:
+                tiered["1进2"][0] += 1
+        elif pstreak == 2:
+            tiered["2进3"][1] += 1
+            if today_in_zt and tstreak >= 3:
+                tiered["2进3"][0] += 1
+        elif pstreak >= 3:
+            tiered["3板及以上"][1] += 1
+            if today_in_zt and tstreak >= pstreak + 1:
+                tiered["3板及以上"][0] += 1
+    promote_tiered = {}
+    for k, (a, b) in tiered.items():
+        promote_tiered[k] = round(a / b * 100, 1) if b else None
+    # 炸板率 / 封板率
+    denom = len(zt) + len(zb)
+    seal_rate = round(len(zt) / denom * 100, 1) if denom > 0 else None
+    zhaban_rate = round(len(zb) / denom * 100, 1) if denom > 0 else None
+    # 赚钱效应细分（翻红率/再涨停率/平均涨幅/翻绿率）
+    e = daily_emotion(u, date)
+    perf = []
+    for code in prev_zt:
+        b = u.bar(code, date)
+        if b:
+            perf.append(b["pct"])
+    red_rate = round(sum(1 for p in perf if p > 0) / len(perf) * 100, 1) if perf else None
+    return {
+        "zt": len(zt), "zb": len(zb),
+        "first_board": {"count": len(first), "shapes": fb_shapes},
+        "ladder_dist": ladder_dist, "max_lb": maxlb, "gap": gaps,
+        "promote_tiered": promote_tiered,
+        "seal_rate": seal_rate, "zhaban_rate": zhaban_rate,
+        "profit": {
+            "avg_pct": e.get("yest_perf"), "red_rate": red_rate,
+            "again_rate": e.get("promote_rate"), "green_rate": e.get("yest_green"),
+        },
+    }
+
+
+# ============================================================== 5.6 近5日板块热度趋势 + 龙头谱系
+def sector_trend_5d(u, date, code2boards, topn=6):
+    """题材持续性 / 退潮追踪（对标 aiagents-stock 板块轮动、vibe-astock 近5天热度+龙头谱系）：
+    取最近 5 个交易日，逐日重算行业板块强度，给出头部板块的 5 日强度曲线(升温/降温)，
+    并对今日主线板块追溯「5日前领涨股现在跌到哪了」。全部由 K 线库重建。"""
+    dates = u.dates[-5:]
+    # 逐日轻量重算行业板块强度（不依赖当日快照封板细节）
+    per = []
+    for d in dates:
+        lus_d = build_limit_ups(u, d, {}, code2boards, False)
+        inds_d, _ = sector_heat(lus_d, {}, u, d)
+        per.append((d, inds_d))
+    # 汇总成 板块 -> 每日强度序列
+    agg = {}
+    for d, inds in per:
+        for a in inds[:15]:
+            t = agg.setdefault(a["name"], {"name": a["name"], "kind": a["kind"],
+                                           "strength": [], "zt": [], "max_lb": [], "dates": []})
+            t["strength"].append(a["strength"]); t["zt"].append(a["zt"])
+            t["max_lb"].append(a["max_lb"]); t["dates"].append(d)
+    latest = {n: t["strength"][-1] for n, t in agg.items() if t["strength"]}
+    trend = []
+    for n in sorted(latest, key=lambda x: -latest[x])[:topn]:
+        t = agg[n]
+        s0 = t["strength"][0] if t["strength"] else 0
+        s1 = t["strength"][-1] if t["strength"] else 0
+        delta = round(s1 - s0, 1)
+        drift = "升温" if delta > 5 else ("降温" if delta < -5 else "持平")
+        trend.append({"name": n, "kind": t["kind"], "strength": t["strength"],
+                      "zt": t["zt"], "max_lb": t["max_lb"], "drift": drift, "delta": delta})
+    # 龙头谱系：今日主线板块的领涨股 + 5日前同板块领涨股现状
+    lus_today = build_limit_ups(u, date, {}, code2boards, False)
+    inds_today, _ = sector_heat(lus_today, {}, u, date)
+    mainline = [a for a in inds_today[:15] if a.get("tier") == "主线"]
+    d0 = dates[0]
+    lus_d0 = build_limit_ups(u, d0, {}, code2boards, False)
+    lineage = []
+    for a in mainline[:4]:
+        leads_now = sorted([r for r in lus_today if r["industry"] == a["name"]],
+                           key=lambda x: (-x["streak"], -x["quality"]))
+        leads_0 = sorted([r for r in lus_d0 if r["industry"] == a["name"]],
+                         key=lambda x: (-x["streak"], -x["quality"]))
+        lead_now = leads_now[0] if leads_now else None
+        lead_old = leads_0[0] if leads_0 else None
+        old_pct = None
+        if lead_old:
+            b0 = u.bar(lead_old["code"], date)
+            old_pct = round(b0["pct"], 2) if b0 else None
+        lineage.append({
+            "sector": a["name"], "strength": a["strength"],
+            "lead_now": {"name": lead_now["name"], "streak": lead_now["streak"]} if lead_now else None,
+            "lead_5d_ago": {"name": lead_old["name"], "streak": lead_old["streak"]} if lead_old else None,
+            "lead_old_today_pct": old_pct,
+        })
+    return {"dates": dates, "trend": trend, "lineage": lineage}
+
+
 def sentiment_score(u, date, series, snap, snap_is_same_day):
     e = next((x for x in series if x["date"] == date), None) or daily_emotion(u, date)
     # 封板率：用日K重建（涨停 /（涨停+炸板）），历史上每日都可得，不依赖当日快照

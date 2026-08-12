@@ -322,6 +322,22 @@ def run(date_override=None, dedup_close=False):
 
     # 阶梯
     ladder = {}
+    # 短线情绪微观结构（首板/梯队断层/晋级率分档/炸板率/赚钱效应细分）
+    try:
+        micro = engine.microstructure(u, date, lus, snap, code2boards, same_day)
+        log("  微观结构：首板 %d 只，梯队最高 %d 板，断层 %s"
+            % (micro["first_board"]["count"], micro["max_lb"], micro["gap"] or "无"))
+    except Exception as e:
+        log("  微观结构计算失败（不影响主流程）：%r" % e)
+        micro = {}
+    # 近5日板块热度趋势 + 龙头谱系（题材持续性/退潮追踪）
+    try:
+        sth = engine.sector_trend_5d(u, date, code2boards)
+        log("  板块趋势5日：头部 %d 个板块，主线谱系 %d 条"
+            % (len(sth.get("trend", [])), len(sth.get("lineage", []))))
+    except Exception as e:
+        log("  板块趋势5日失败（不影响主流程）：%r" % e)
+        sth = {"dates": [], "trend": [], "lineage": []}
     for r in lus:
         ladder.setdefault(str(r["streak"]), []).append(
             {"code": r["code"], "name": r["name"], "industry": r["industry"],
@@ -369,6 +385,8 @@ def run(date_override=None, dedup_close=False):
         "global_market": gm,
         "regime": regime,
         "news": load_news(),
+        "micro": micro,
+        "sector_trend_hist": sth,
     }
 
     # ---- 历史连板库落库：先回填前一日推荐的真实结局，再记录当日状态 ----
