@@ -439,17 +439,16 @@ def push(summary, dry_run=False, mode="close"):
         print("[notifier][dry-run][%s] title=%s\n%s" % (mode, title, text))
         return results
 
-    # 1) 始终落地可见文件痕迹
+    # 1) 始终落地可见文件痕迹（看板内可直接查看，不等同于“已推送”）。
+    #    注意：此处只写 last_push_<mode>.md 可见文件，绝不写去重账本 push_log.jsonl——
+    #    去重账本只在“通道真实送达后”才记（见下方 block 3），避免“先记账再发通道”导致
+    #    通道发送失败时账本已记“今日已推”，把当天重试永久挡掉（复盘/收盘再次跑成功却零送达）。
+    _ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         os.makedirs(DIST, exist_ok=True)
-        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         art = os.path.join(DIST, "last_push_%s.md" % mode)
         with open(art, "w", encoding="utf-8") as fh:
-            fh.write("# %s\n\n> 生成时间：%s\n\n```\n%s\n```\n" % (title, ts, text))
-        logp = os.path.join(DIST, "push_log.jsonl")
-        with open(logp, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"ts": ts, "mode": mode, "title": title,
-                                 "text": text}, ensure_ascii=False) + "\n")
+            fh.write("# %s\n\n> 生成时间：%s\n\n```\n%s\n```\n" % (title, _ts, text))
         results.append("file:%s" % os.path.relpath(art, ROOT))
     except Exception as e:
         print("[notifier] 文件痕迹写入失败：%r" % e)
@@ -486,6 +485,23 @@ def push(summary, dry_run=False, mode="close"):
         for r in results:
             if not r.startswith("file:"):
                 print("[notifier] %s" % r)
+
+    # 3) 仅在『至少一条通道真实送达』后才写去重账本 push_log.jsonl。
+    #    关键修复：绝不能“先记账再发通道”。若通道发送失败（弱网偶发），账本已记“今日已推”，
+    #    会导致当天其余重试被 once-per-day 去重永久挡掉，复盘/收盘再次“跑成功却零送达”。
+    #    把记账后置到真实送达之后，失败的推送不污染去重，允许后续重跑补发——与 close_again
+    #    独立 mode 修复配合，彻底根治“收不到复盘”。
+    delivered = any(r.startswith(("wechat_serverchan", "wechat_pushplus", "wecom",
+                                  "telegram", "email")) and "失败" not in r
+                     for r in results)
+    if delivered:
+        try:
+            logp = os.path.join(DIST, "push_log.jsonl")
+            with open(logp, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"ts": _ts, "mode": mode, "title": title,
+                                     "text": text}, ensure_ascii=False) + "\n")
+        except Exception as e:
+            print("[notifier] 去重账本写入失败（不影响已送达）：%r" % e)
     return results
 
 
