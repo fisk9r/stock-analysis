@@ -376,6 +376,38 @@ def _already_pushed_today(mode):
         return False
 
 
+def _anomaly_recently_pushed(cooldown_min=12):
+    """盘中异动(anomaly)允许日内多次推送，但外部定时器(cron-job.org)与 GitHub 主调度
+    会在同一时点各自触发 → 重复轰炸。用『最近 N 分钟内已推送过则跳过』去重。
+    N 必须小于 GitHub 盘中 anomaly 时点的最小间隔（09:50→10:07 为 17 分钟），
+    否则会误伤合法盘中信号。"""
+    try:
+        logp = os.path.join(DIST, "push_log.jsonl")
+        if not os.path.exists(logp):
+            return False
+        now = datetime.datetime.now()
+        with open(logp, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    p = json.loads(line)
+                except Exception:
+                    continue
+                if p.get("mode") != "anomaly":
+                    continue
+                ts = p.get("ts")
+                if not ts:
+                    continue
+                try:
+                    dt = datetime.datetime.strptime(str(ts), "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    continue
+                if (now - dt).total_seconds() < cooldown_min * 60:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def push(summary, dry_run=False, mode="close"):
     """summary: {"title": str, "text": str}。返回已送达通道列表。
     mode: "close"（收盘后复盘）或 "preauction"（竞价前观察）。
@@ -386,6 +418,11 @@ def push(summary, dry_run=False, mode="close"):
     if not dry_run and _already_pushed_today(mode):
         print("[notifier][%s] 今日已推送，跳过通道发送（防重复触发）" % mode)
         return ["skipped:dup"]
+    # 盘中异动：允许日内多次，但外部定时器与 GitHub 同窗口触发会重复，
+    # 用 12 分钟冷却去重（小于盘中时点最小间隔 17 分钟，不误伤合法信号）。
+    if not dry_run and mode == "anomaly" and _anomaly_recently_pushed(12):
+        print("[notifier][anomaly] 12分钟内已推送盘中异动，跳过（防外部定时器与GitHub同窗口重复）")
+        return ["skipped:dup-anomaly"]
     # 输出兜底：避免 print 带 emoji 在非 UTF-8 控制台（如 GBK）抛 UnicodeEncodeError
     try:
         sys.stdout.reconfigure(encoding="utf-8")

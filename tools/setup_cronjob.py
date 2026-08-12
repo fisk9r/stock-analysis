@@ -5,6 +5,10 @@
 由它独立直打 GitHub 的 workflow_dispatch API，彻底绕开 GitHub 自带 schedule
 （高负载会被延迟甚至整体丢弃，正是本次漏发盘前推送的根因）。
 
+⚠ 关键：cron-job.org 的「创建任务」端点是 **PUT /jobs**（不是 POST！POST 会 404），
+   schedule 是数组结构 {minutes,hours,mdays,months,wdays}（不是 cron 字符串），
+   requestMethod 用整数（1 = POST），自定义请求头与 body 放在 extendedData 里。
+
 用法（在仓库根目录执行）：
     CRONJOB_API_KEY=xxxx  GH_PAT=ghp_xxxx  python tools/setup_cronjob.py
 
@@ -14,17 +18,47 @@
     GH_PAT          : GitHub 个人访问令牌，需 workflow 作用域（复用本项目已有的 PAT 即可）。
                       仅用于调用 dispatch API，不写入任何文件。
 
-注册后：这 5 个任务会成为「权威触发器」，GitHub 自带 schedule + 看门狗 + 备份订阅
-变成冗余保险。notifier.push 另有 mode+当日 幂等去重，多路同时点火也只发一次。
+注册后：这 10 个任务会成为「权威触发器」，GitHub 自带 schedule + 看门狗 + 备份订阅
+变成冗余保险。notifier.push 另有 mode+当日 幂等去重 + anomaly 12分钟冷却，
+多路同时点火也只发一次，绝不重复轰炸。
+
+限速：创建接口限 5 次/分钟，故每创建 1 个 sleep 13 秒留余量。
 """
 import os
 import sys
 import json
+import time
 import urllib.request
 import urllib.error
 
 CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cronjob-config.json")
 API = "https://api.cron-job.org/jobs"
+
+
+def cron_to_schedule(cron):
+    """'M H DOM MON DOW' → cron-job.org 的 schedule 数组结构。
+    -1 表示『所有/每』；wdays 0=周日..6=周六（与标准 cron 一致）。"""
+    p = cron.split()
+
+    def field(f):
+        if f == "*":
+            return [-1]
+        if "-" in f:
+            a, b = f.split("-")
+            return list(range(int(a), int(b) + 1))
+        if "," in f:
+            return [int(x) for x in f.split(",")]
+        return [int(f)]
+
+    return {
+        "timezone": "Asia/Shanghai",
+        "expiresAt": 0,
+        "minutes": field(p[0]),
+        "hours": field(p[1]),
+        "mdays": field(p[2]),
+        "months": field(p[3]),
+        "wdays": field(p[4]),
+    }
 
 
 def main():
@@ -34,7 +68,7 @@ def main():
         sys.exit("用法：CRONJOB_API_KEY=xxx GH_PAT=xxx python tools/setup_cronjob.py")
     cfg = json.load(open(CFG, encoding="utf-8"))
 
-    # 注入真实 PAT（配置里是占位符 __GH_PAT__）
+    # 注入真实 PAT（配置里是占位符 __GH_PAT__），构造 extendedData.headers（dict 结构）
     headers = {k: (v.replace("__GH_PAT__", pat) if isinstance(v, str) else v)
                for k, v in cfg["headers"].items()}
 
@@ -44,30 +78,35 @@ def main():
             "job": {
                 "url": cfg["github_api"],
                 "enabled": True,
-                "schedule": job["schedule"],
-                "timezone": "Asia/Shanghai",
-                "requestMethod": "POST",
-                "requestHeaders": [{"name": k, "value": v} for k, v in headers.items()],
-                "requestBody": json.dumps({"ref": "main", "inputs": {"task": job["task"]}}),
-                "saveResponses": True,
                 "title": job["title"],
+                "saveResponses": True,
+                "schedule": cron_to_schedule(job["cron"]),
+                "requestMethod": 1,  # 1 = POST（GitHub dispatch 需要 POST）
+                "extendedData": {
+                    "headers": headers,
+                    "body": json.dumps({"ref": "main", "inputs": {"task": job["task"]}}),
+                },
             }
         }
         data = json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(API, data=data, method="POST")
+        # ⚠ 创建用 PUT（不是 POST）
+        req = urllib.request.Request(API, data=data, method="PUT")
         req.add_header("Authorization", "Bearer " + key)
         req.add_header("Content-Type", "application/json")
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
-                print("✅ 已创建: %s  (cron=%s, task=%s, HTTP %s)"
-                      % (job["title"], job["schedule"], job["task"], r.status))
+                resp = json.loads(r.read().decode("utf-8", "ignore"))
+                print("✅ 已创建: %s  (cron=%s, task=%s, jobId=%s)"
+                      % (job["title"], job["cron"], job["task"], resp.get("jobId")))
                 ok += 1
         except urllib.error.HTTPError as e:
             print("❌ 失败: %s  HTTP %s  %s" % (job["title"], e.code,
                                                 e.read().decode("utf-8", "ignore")[:200]))
+        # 创建限流 5 次/分钟 → 间隔 13 秒留余量
+        time.sleep(13)
     print("完成：%d/%d 个任务已注册到 cron-job.org" % (ok, len(cfg["jobs"])))
     if ok:
-        print("此后盘前/竞价/收盘/异动将由云端定时器独立触发，不再依赖 GitHub 自带 schedule。")
+        print("此后盘前/竞价/盘中(6次)/收盘/复盘 由云端定时器独立触发，不再依赖 GitHub 自带 schedule。")
 
 
 if __name__ == "__main__":
