@@ -302,6 +302,15 @@ def run(date_override=None, dedup_close=False):
         log("  强动量筛选失败（不影响主流程）：%r" % e)
         rec["momentum"] = []
 
+    # 板块趋势推荐：把趋势票按行业聚类，找出「多只票悄悄走主升、却没几只涨停」的
+    # 趋势抱团板块（与 sector_heat 按涨停家数排主线互补；如被动元件/医疗服务）
+    try:
+        rec["sector_trend"] = engine.sector_trend_recommend(u, date, code2boards, topn=6)
+        log("  板块趋势推荐 %d 个板块" % len(rec.get("sector_trend") or []))
+    except Exception as e:
+        log("  板块趋势推荐失败（不影响主流程）：%r" % e)
+        rec["sector_trend"] = []
+
     # 阶梯
     ladder = {}
     for r in lus:

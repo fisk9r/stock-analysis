@@ -890,6 +890,31 @@
     h += group('⚡ 强动量 · 连板余波（' + (R.momentum || []).length + '）', R.momentum, 'momentum',
       '近期≥2次涨停/≥2连板基因 + 多头未破位 + 距高点回撤≤18%（接住“连板妖股型、今日非涨停”掉缝里的票，如风范股份）');
 
+    /* 板块趋势推荐：把趋势向上的个股按行业聚类，找出趋势抱团最强的板块 */
+    (function () {
+      var ST = R.sector_trend || [];
+      if (!ST.length) return;
+      var body = '<div class="grid g2">' + ST.map(function (s) {
+        var scol = s.strength >= 65 ? C.up : s.strength >= 50 ? C.gold : C.gray;
+        var leads = (s.leads || []).map(function (x) {
+          return '<span class="chip">' + stk(x.code, x.name) +
+            (x.band === '主升强趋势' ? ' · 主升' : '') + '</span>';
+        }).join('');
+        return '<div class="rec sector"><div class="rh">' +
+          '<span class="nm">' + E(s.sector) + '</span>' +
+          '<span class="sc" style="color:' + scol + '">' + f(s.strength, 1) + '</span></div>' +
+          '<div class="rb"><div class="kv">' +
+            '<span>趋势票 <b>' + s.trend_count + '只</b></span>' +
+            '<span>均分 <b style="color:' + scol + '">' + f(s.avg_score, 1) + '</b></span>' +
+            '<span>日均 <b style="color:' + C.up + '">' + f(s.avg_daily, 1) + '%</b></span>' +
+            '<span>主升 <b>' + s.strong_count + '只</b></span>' +
+          '</div><div class="chips" style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px">' + leads + '</div>' +
+          '</div></div>';
+      }).join('') + '</div>';
+      h += card('🔥 板块趋势推荐（' + ST.length + '）', body,
+        '把趋势向上的个股按行业聚类，找出「多只票悄悄走主升、却没几只涨停」的趋势抱团板块（与按涨停家数排主线的板块热力互补）');
+    })();
+
     /* 全量评分表 */
     var rows = (R.all || []).map(function (it, i) {
       var wcol = it.worth_score >= 60 ? C.up : it.worth_score >= 45 ? C.gold : C.gray;

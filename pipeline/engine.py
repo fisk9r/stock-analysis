@@ -1614,6 +1614,55 @@ def screen_uptrend(u, date, code2boards=None, topn=12):
     return cands[:topn]
 
 
+def sector_trend_recommend(u, date, code2boards=None, topn=6):
+    """板块趋势推荐：把趋势向上选股（screen_uptrend）命中的个股按行业聚类，
+    找出『趋势抱团最强』的板块，输出板块级推荐 + 领涨标的。
+
+    与 sector_heat（按涨停家数排主线板块）互补：这里抓的是「多只票悄悄走主升、
+    但没几只涨停」的板块（如被动元件、医疗服务），用板块内趋势票数量、平均强度、
+    主升占比、平均日均涨幅综合排序，专门接住 sector_heat 漏掉的「温趋势板块」。
+
+    命名对齐用户诉求：类似风华高科（被动元件龙头，走趋势而非连板）这类票，
+    往往整板块多票同步趋势向上却涨停稀少 → 本函数把它们聚成「板块推荐」。"""
+    trend = screen_uptrend(u, date, code2boards, topn=40)
+    if not trend:
+        return []
+    from collections import defaultdict
+    by_ind = defaultdict(list)
+    for it in trend:
+        ind = it.get("industry") or "—"
+        if ind == "—":
+            continue
+        by_ind[ind].append(it)
+    rows = []
+    for ind, items in by_ind.items():
+        n = len(items)
+        avg_score = mean([x["score"] for x in items])
+        avg_daily = mean([(x.get("trend_meta") or {}).get("avg_daily", 0) for x in items])
+        strong = sum(1 for x in items
+                     if (x.get("trend_meta") or {}).get("band") == "主升强趋势")
+        # 板块趋势强度：趋势票数（抱团信号权重最高）+ 平均强度 + 主升占比 + 日均涨幅
+        s = 0.0
+        s += clamp((n - 1) / 3.0, 0, 1) * 38        # 趋势票数量：1只→0，4只+→38
+        s += clamp(avg_score / 100.0, 0, 1) * 30     # 平均趋势分
+        s += (strong / n) * 18                       # 主升占比
+        s += clamp((avg_daily - 2) / 3.0, 0, 1) * 14  # 平均日均涨幅：2%→0，5%+→14
+        s = clamp(s, 0, 100)
+        leads = sorted(items, key=lambda x: -x["score"])[:6]
+        rows.append({
+            "sector": ind, "kind": "industry",
+            "trend_count": n, "avg_score": round(avg_score, 1),
+            "avg_daily": round(avg_daily, 2), "strong_count": strong,
+            "strength": round(s, 1),
+            "leads": [{"code": x["code"], "name": x["name"], "score": round(x["score"], 1),
+                       "band": (x.get("trend_meta") or {}).get("band"),
+                       "avg_daily": (x.get("trend_meta") or {}).get("avg_daily")}
+                      for x in leads],
+        })
+    rows.sort(key=lambda r: (-r["strength"]))
+    return rows[:topn]
+
+
 def screen_momentum(u, date, code2boards=None, topn=12):
     """强动量 · 连板余波选股：捕捉『近期有连板基因 + 多头结构未破位 + 仍在强势区』
     的票——典型如风范股份（601700，连板妖股型，今天非涨停但趋势未结束）。
