@@ -169,6 +169,15 @@
     return '';
   }
 
+  /* 主线 / 龙头 打标：是否属于主线板块、是否为主线龙头（来自 recommend.mainline_map） */
+  function mlBadge(it) {
+    var m = it && ML && ML[it.code];
+    if (!m) return '';
+    if (m.is_leader) return '<span class="bd lb4" title="所属【' + E(m.sector) + '】为主线板块，该股为板块龙头">👑龙头</span>';
+    if (m.is_mainline) return '<span class="bd danger" title="所属【' + E(m.sector) + '】为主线板块">🔴主线</span>';
+    return '';
+  }
+
   function qualityCard() {
     var q = D.data_quality;
     if (!q) return '';
@@ -792,6 +801,7 @@
   /* ============ 视图 6：当日推荐 ============ */
   function viewRec() {
     var R = D.recommend || {}, st = (D.market || {}).sentiment || {}, cy = (D.market || {}).cycle || {};
+    var ML = R.mainline_map || {};
     var h = '';
     h += card('🧭 次日操作总纲', '<div class="grid g4" style="margin-bottom:14px">' +
       kpi('建议仓位', E(R.position || '—'), '基于情绪分 ' + f(st.score, 1)) +
@@ -860,7 +870,7 @@
             + '</div>';
         return '<div class="rec ' + cls + '"><div class="rh">' +
           '<span class="nm">' + stk(it.code, it.name) + '</span><span class="code faint">' + E(it.code) + '</span>' +
-          lbBadge(it.streak) + tierBadge(it.sector_tier) + vaBadge + hcBadge +
+          lbBadge(it.streak) + tierBadge(it.sector_tier) + mlBadge(it) + vaBadge + hcBadge +
           '<span class="sc" style="color:' + scol + '">' + f(it.score, 1) + '</span></div>' +
           '<div class="rb">' + kvHtml +
           '<ul>' + (it.reasons || []).map(function (r) { return '<li>' + E(r) + '</li>'; }).join('') + '</ul>' +
@@ -890,18 +900,24 @@
     h += group('⚡ 强动量 · 连板余波（' + (R.momentum || []).length + '）', R.momentum, 'momentum',
       '近期≥2次涨停/≥2连板基因 + 多头未破位 + 距高点回撤≤18%（接住“连板妖股型、今日非涨停”掉缝里的票，如风范股份）');
 
-    /* 板块趋势推荐：把趋势向上的个股按行业聚类，找出趋势抱团最强的板块 */
+    /* 板块趋势推荐：把趋势向上的个股按行业聚类，找出趋势抱团最强的板块，并标注主线/龙头 */
     (function () {
       var ST = R.sector_trend || [];
       if (!ST.length) return;
       var body = '<div class="grid g2">' + ST.map(function (s) {
         var scol = s.strength >= 65 ? C.up : s.strength >= 50 ? C.gold : C.gray;
+        var tierTag = s.tier === '主线'
+          ? '<span class="bd lb4" title="' + (s.resonance ? '同时被涨停主线确认（双主线共振），主线信号最强' : '趋势强度居前，判定为主线板块') + '">' + (s.resonance ? '🔥双主线' : '主线') + '</span>'
+          : '<span class="bd gray" title="趋势抱团但强度未达主线门槛">支线</span>';
         var leads = (s.leads || []).map(function (x) {
+          var tag = x.is_leader
+            ? '<span class="bd lb4" style="margin-left:4px">👑龙头</span>'
+            : '<span class="faint" style="margin-left:4px">领涨</span>';
           return '<span class="chip">' + stk(x.code, x.name) +
-            (x.band === '主升强趋势' ? ' · 主升' : '') + '</span>';
+            (x.band === '主升强趋势' ? ' · 主升' : '') + tag + '</span>';
         }).join('');
         return '<div class="rec sector"><div class="rh">' +
-          '<span class="nm">' + E(s.sector) + '</span>' +
+          '<span class="nm">' + E(s.sector) + '</span>' + tierTag +
           '<span class="sc" style="color:' + scol + '">' + f(s.strength, 1) + '</span></div>' +
           '<div class="rb"><div class="kv">' +
             '<span>趋势票 <b>' + s.trend_count + '只</b></span>' +
@@ -912,14 +928,14 @@
           '</div></div>';
       }).join('') + '</div>';
       h += card('🔥 板块趋势推荐（' + ST.length + '）', body,
-        '把趋势向上的个股按行业聚类，找出「多只票悄悄走主升、却没几只涨停」的趋势抱团板块（与按涨停家数排主线的板块热力互补）');
+        '把趋势向上的个股按行业聚类，找出「多只票悄悄走主升、却没几只涨停」的趋势抱团板块；🔥双主线=同时被涨停主线确认的强主线，👑=该主线板块的龙头');
     })();
 
     /* 全量评分表 */
     var rows = (R.all || []).map(function (it, i) {
       var wcol = it.worth_score >= 60 ? C.up : it.worth_score >= 45 ? C.gold : C.gray;
       return '<tr><td class="faint">' + (i + 1) + '</td><td class="code">' + E(it.code) + '</td>' +
-        '<td class="name">' + stk(it.code, it.name) + qBadge(it) + '</td><td class="c">' + lbBadge(it.streak) + '</td>' +
+        '<td class="name">' + stk(it.code, it.name) + qBadge(it) + mlBadge(it) + '</td><td class="c">' + lbBadge(it.streak) + '</td>' +
         '<td class="muted">' + E(it.industry || '—') + '</td><td class="c">' + tierBadge(it.sector_tier) + '</td>' +
         '<td class="r num">' + f(it.quality, 0) + '</td><td class="r num">' + f(it.p_continue, 0) + '%</td>' +
         '<td class="r num">' + f(it.demon, 0) + '</td>' +

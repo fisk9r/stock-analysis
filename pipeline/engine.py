@@ -1614,7 +1614,7 @@ def screen_uptrend(u, date, code2boards=None, topn=12):
     return cands[:topn]
 
 
-def sector_trend_recommend(u, date, code2boards=None, topn=6):
+def sector_trend_recommend(u, date, code2boards=None, sectors=None, topn=6):
     """板块趋势推荐：把趋势向上选股（screen_uptrend）命中的个股按行业聚类，
     找出『趋势抱团最强』的板块，输出板块级推荐 + 领涨标的。
 
@@ -1660,6 +1660,18 @@ def sector_trend_recommend(u, date, code2boards=None, topn=6):
                       for x in leads],
         })
     rows.sort(key=lambda r: (-r["strength"]))
+    # ---- 主线 / 龙头 判定 ----
+    # 涨停主线：sector_heat 按行业聚合的 tier（主线=涨停≥5 且最高连板≥2）。
+    # 趋势主线：本函数按趋势强度排进前列的板块。两者同时成立 ⇒ 双主线共振。
+    heat_tier = {s["name"]: s.get("tier") for s in (sectors or []) if s.get("kind") == "industry"}
+    for rank, r in enumerate(rows):
+        ht = heat_tier.get(r["sector"])
+        is_mainline = (rank < 3) or (ht == "主线") or (r["strength"] >= 82)
+        r["heat_tier"] = ht or "—"
+        r["tier"] = "主线" if is_mainline else "支线"
+        r["resonance"] = bool(ht == "主线")   # 同时被涨停主线确认 ⇒ 双主线
+        if is_mainline and r["leads"]:        # 龙头：主线板块内趋势分最高者
+            r["leads"][0]["is_leader"] = True
     return rows[:topn]
 
 

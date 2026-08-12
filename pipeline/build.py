@@ -305,11 +305,20 @@ def run(date_override=None, dedup_close=False):
     # 板块趋势推荐：把趋势票按行业聚类，找出「多只票悄悄走主升、却没几只涨停」的
     # 趋势抱团板块（与 sector_heat 按涨停家数排主线互补；如被动元件/医疗服务）
     try:
-        rec["sector_trend"] = engine.sector_trend_recommend(u, date, code2boards, topn=6)
+        rec["sector_trend"] = engine.sector_trend_recommend(u, date, code2boards, sectors=inds, topn=6)
         log("  板块趋势推荐 %d 个板块" % len(rec.get("sector_trend") or []))
+        # 主线/龙头 → 个股映射（供个股级视图打标：是否属于主线、是否为主线龙头）
+        mmap = {}
+        for _s in (rec.get("sector_trend") or []):
+            for _x in (_s.get("leads") or []):
+                mmap[_x["code"]] = {"sector": _s["sector"],
+                                    "is_mainline": _s.get("tier") == "主线",
+                                    "is_leader": bool(_x.get("is_leader"))}
+        rec["mainline_map"] = mmap
     except Exception as e:
         log("  板块趋势推荐失败（不影响主流程）：%r" % e)
         rec["sector_trend"] = []
+        rec["mainline_map"] = {}
 
     # 阶梯
     ladder = {}
