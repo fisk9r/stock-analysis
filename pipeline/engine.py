@@ -1612,3 +1612,148 @@ def screen_uptrend(u, date, code2boards=None, topn=12):
         })
     cands.sort(key=lambda x: -x["score"])
     return cands[:topn]
+
+
+def screen_momentum(u, date, code2boards=None, topn=12):
+    """强动量 · 连板余波选股：捕捉『近期有连板基因 + 多头结构未破位 + 仍在强势区』
+    的票——典型如风范股份（601700，连板妖股型，今天非涨停但趋势未结束）。
+
+    与 screen_uptrend（平滑趋势，要求近5日日均涨≥2%且≥4天收涨）互补：
+    本函数允许剧烈震荡/分歧，但要求『有真实连板历史 + 未跌破关键均线 + 距近期
+    高点回撤可控』。这类票是「连板妖股基因」的延续，screen_uptrend 会因震荡被
+    正确排除，纯连板通道又只接涨停，于是掉缝里——本函数专门接住它们。
+
+    返回结构与 recommend() 兼容（含 momentum_meta 供前端渲染）。"""
+    if not u or not u.dates:
+        return []
+    zt_today = u.zt.get(date, set())
+    bh = benchmark_heat(u, date)
+    heat_boost = {"热": 6, "温": 0, "冷": -8}.get(bh["level"], 0)
+
+    def industry_of(code):
+        boards = (code2boards or {}).get(code) or []
+        return next((n for _, n, k in boards if k == "industry"), "—")
+
+    # 近 12 个交易日窗口（统计连板基因与回撤基准）
+    W = 12
+    dates_upto = [d for d in u.dates if d <= date]
+    win = dates_upto[-W:]
+    def lu_in_win(code):
+        return sum(1 for d in win if code in (u.zt.get(d) or set()))
+    def max_streak_in_win(code):
+        best = cur = 0
+        for d in win:
+            if code in (u.zt.get(d) or set()):
+                cur += 1; best = max(best, cur)
+            else:
+                cur = 0
+        return best
+    def last_lu_back(code):
+        """最近一次涨停距今多少个交易日（0=当日）。"""
+        for k in range(len(dates_upto) - 1, -1, -1):
+            if code in (u.zt.get(dates_upto[k]) or set()):
+                return len(dates_upto) - 1 - k
+        return 99
+
+    cands = []
+    for code, bs in u.bars.items():
+        hist = [b for b in bs if b["d"] <= date]
+        if len(hist) < 25:
+            continue
+        name = u.stocks.get(code, {}).get("name", code)
+        if not name or "ST" in name or "*" in name or "退" in name:
+            continue
+        closes = [b["c"] for b in hist]
+        highs = [b["h"] for b in hist]
+        last = hist[-1]
+        lim = u.lim.get(code, 10.0)
+        # 排除当日涨停（涨停已在连板板块呈现，避免重复）
+        if code in zt_today or (last.get("pct") or 0) >= lim - 0.5:
+            continue
+        amt = last.get("amt") or 0
+        # 流动性过滤：成交额过低（< 1.2 亿）不选
+        if amt < 1.2e8:
+            continue
+        # ---- 连板基因门槛：近 12 日至少 2 次涨停，或曾出现≥2连板 ----
+        luc = lu_in_win(code)
+        lstreak = max_streak_in_win(code)
+        if luc < 2 and lstreak < 2:
+            continue
+        ma5 = mean(closes[-5:]); ma10 = mean(closes[-10:]); ma20 = mean(closes[-20:])
+        if ma20 <= 0:
+            continue
+        ma20_prev = mean(closes[-25:-5]) if len(closes) >= 25 else ma20
+        price = closes[-1]
+        slope20 = ((ma20 - ma20_prev) / ma20_prev * 100) if ma20_prev else 0
+        # 多头结构：MA20 上行 + 价格仍在 MA10 上方（允许回踩，但不可跌破 MA20）
+        if slope20 <= 0 or price < ma20 or price < ma10 * 0.97:
+            continue
+        # 距近期（近 W 日）高点回撤可控（≤18%），避免已见顶派发的票
+        hi_win = max(highs[-W:]) if len(highs) >= W else last["h"]
+        drawdown = (hi_win - price) / hi_win * 100
+        if drawdown > 18:
+            continue
+        # 近 10 日累计涨幅需为正且具强度（≥12%），确认是强动量而非阴跌反弹
+        base = closes[-11]
+        gain10 = (price / base - 1) * 100 if base > 0 else 0
+        if gain10 < 12:
+            continue
+        vol20 = mean([b["v"] for b in hist[-21:-1]]) if len(hist) > 5 else (last["v"] or 1)
+        vol_ratio = (last["v"] / vol20) if vol20 else 1
+        recency = last_lu_back(code)  # 0=当日(已排除), 1=昨日...
+        momentum_pct = (price / ma20 - 1) * 100
+        # ---- 评分（连板基因权重最高，其次余波新鲜度与回撤控制）----
+        sc = 0.0
+        sc += min(lstreak, 4) / 4.0 * 30          # 最高连板数（连板基因核心）
+        sc += min(luc, 4) / 4.0 * 14              # 窗口内涨停频次
+        sc += clamp(slope20 / 1.5, 0, 10)          # MA20 斜率（趋势加速）
+        sc += clamp((18 - drawdown) / 18.0, 0, 1) * 18   # 距高点回撤越小越强
+        sc += clamp((8 - recency) / 8.0, 0, 1) * 14     # 最近涨停距今越近越热
+        if 1.0 <= vol_ratio <= 3.5:
+            sc += 8
+        elif vol_ratio > 6:
+            sc -= 6
+        sc += heat_boost
+        sc = clamp(sc, 0, 100)
+        worth = clamp(0.5 * sc + 0.5 * (40 if drawdown <= 10 else 20), 0, 100)
+        band = "连板余波" if recency <= 3 else "强动量延续"
+        reasons = []
+        reasons.append("近 %d 日 %d 次涨停（最高 %d 连板），具备连板妖股基因" % (W, luc, lstreak))
+        if recency <= 3:
+            reasons.append("最近一次涨停距今仅 %d 个交易日，余波未散" % recency)
+        reasons.append("MA20 上行斜率 +%.1f%%，多头结构未破位" % slope20)
+        if drawdown <= 10:
+            reasons.append("距近 %d 日高点仅回撤 %.1f%%，仍处强势区" % (W, drawdown))
+        else:
+            reasons.append("自近 %d 日高点回撤 %.1f%%（≤18%%），未破位" % (W, drawdown))
+        if 1.0 <= vol_ratio <= 3.5:
+            reasons.append("量能温和（约 %.1f 倍），资金仍有承接" % vol_ratio)
+        risks = []
+        if bh["level"] == "冷":
+            risks.append("标杆趋势股抱团松动，连板余波票需严格止损、快进快出")
+        if drawdown > 12:
+            risks.append("已从近期高点回撤 %.0f%%，警惕高位派发" % drawdown)
+        if (last.get("turn") or 0) > 12:
+            risks.append("换手 %.0f%%，短线筹码松动分歧大" % last["turn"])
+        if recency >= 5:
+            risks.append("连板余波偏冷（最近涨停距今 %d 日），延续性下降" % recency)
+        risks.append("非涨停强动量票，按『趋势不破位』持有，有效跌破 MA20 即离场")
+        cands.append({
+            "code": code, "name": name, "streak": lstreak, "industry": industry_of(code),
+            "close": round(price, 2),
+            "float_mv": u.stocks.get(code, {}).get("float_mv"),
+            "turn": round(last.get("turn") or 0, 2),
+            "quality": 0, "p_continue": 0, "demon": 0,
+            "score": round(sc, 1), "worth_score": round(worth, 1),
+            "momentum_meta": {
+                "ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2),
+                "slope20": round(slope20, 2),
+                "lu_count": luc, "max_streak": lstreak, "recency": recency,
+                "drawdown": round(drawdown, 1), "gain10": round(gain10, 1),
+                "band": band, "vol_ratio": round(vol_ratio, 2),
+                "momentum_pct": round(momentum_pct, 1),
+            },
+            "reasons": reasons[:5], "risks": risks[:3],
+        })
+    cands.sort(key=lambda x: -x["score"])
+    return cands[:topn]

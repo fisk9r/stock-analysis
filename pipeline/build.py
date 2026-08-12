@@ -284,6 +284,15 @@ def run(date_override=None, dedup_close=False):
         log("  趋势向上筛选失败（不影响主流程）：%r" % e)
         rec["trend"] = []
 
+    # 强动量 · 连板余波选股（接住『连板妖股基因、今天非涨停』掉缝里的票，
+    # 如风范股份；与 screen_uptrend 的平滑趋势互补，两档并列呈现）
+    try:
+        rec["momentum"] = engine.screen_momentum(u, date, code2boards, topn=12)
+        log("  强动量/连板余波筛选 %d 只" % len(rec.get("momentum") or []))
+    except Exception as e:
+        log("  强动量筛选失败（不影响主流程）：%r" % e)
+        rec["momentum"] = []
+
     # 阶梯
     ladder = {}
     for r in lus:

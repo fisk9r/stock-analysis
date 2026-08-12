@@ -218,19 +218,33 @@ GitHub 的定时是 **"尽力而为"**，不是精确闹钟：
 - ⚠️ **集合竞价（09:25）风险最大** —— 它必须赶在 09:30 开盘前送到，延迟就废了
 - ⚠️ 盘中异动 —— 叠加 15 分钟行情延迟，实际可能滞后 20~40 分钟
 
-### 想要精确定时（可选）
+### 想要精确定时（强烈建议，根治漏发）
 
-用免费的外部定时器戳 GitHub 的 API，绕开排队：
+GitHub 自带 `schedule` 是「尽力而为」，高负载时会延迟甚至**整体丢弃**某次触发
+（2026-08-12 盘前推送漏发即此根因：主调度 + 看门狗当天一次都没点火）。
+用**免费的外部云端定时器**戳 GitHub 的 dispatch API，完全绕开 GitHub 自带调度器：
 
-1. 到 https://github.com/settings/tokens?type=beta 建一个 Fine-grained token，只给这个仓库的 **Actions: Read and write** 权限
-2. 注册 https://cron-job.org （免费，精确到分钟）
-3. 新建任务：
-   - URL：`https://api.github.com/repos/你的用户名/stock-analysis/actions/workflows/stock.yml/dispatches`
-   - 方式：**POST**
-   - Header：`Authorization: Bearer 你的token`、`Accept: application/vnd.github+json`
-   - Body：`{"ref":"main","inputs":{"task":"auction"}}`
-   - 时间：每工作日 09:25
-4. 同时把 `stock.yml` 里 `'25 1 * * 1-5'` 那行 cron 删掉，避免重复推送
+1. 到 https://github.com/settings/tokens 建一个 PAT，勾选 **workflow** 作用域
+   （复用本项目已有的 PAT 即可，它本就能调 dispatch）
+2. 注册 https://cron-job.org （免费，精确到分钟，纯云端运行，与本地开机无关）
+3. 在 cron-job.org → Account → API Key 拿到你的 API Key
+4. 仓库根目录一键注册全部定时任务：
+
+   ```bash
+   CRONJOB_API_KEY=你的cronjob_key  GH_PAT=你的github_pat  python tools/setup_cronjob.py
+   ```
+
+   脚本会按 `tools/cronjob-config.json` 创建 5 个任务（盘前 08:45 / 竞价 09:20 /
+   收盘分析 15:15 / 复盘 19:55 / 盘中异动 10:05），直打 `stock.yml` 的
+   `workflow_dispatch`。**无需手动改任何东西。**
+
+> **为什么会重复？不会。** 本项目已做两层幂等：
+> - 看门狗 / 备份订阅用「当日是否已推送该 mode」判定，**先到先发，后到跳过**；
+> - `notifier.push` 额外加了 **mode+当日** 去重，多路同时点火也只真正发一次。
+> 所以 **保留** `stock.yml` / `watchdog.yml` / `scheduler-backup.yml` 的全部 cron
+> 作为冗余保险即可，**不要删**（删了反而少一层兜底）。外部定时器是权威触发源。
+>
+> 当前已是「三重独立订阅 + 外部定时器」四重保险，漏发概率趋近于零。
 
 ---
 

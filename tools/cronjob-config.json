@@ -1,0 +1,19 @@
+{
+  "comment": "cron-job.org 外部定时器配置。根治 GitHub 自带 schedule 不可靠（高负载会延迟甚至整体丢弃）。详见 DEPLOY-GITHUB.md「精确定时」。本文件不含任何密钥：GitHub PAT 由 setup_cronjob.py 从环境变量 GH_PAT 注入。",
+  "base_url": "https://api.cron-job.org/jobs",
+  "github_api": "https://api.github.com/repos/fisk9r/stock-analysis/actions/workflows/stock.yml/dispatches",
+  "headers": {
+    "Accept": "application/vnd.github+json",
+    "Authorization": "Bearer __GH_PAT__",
+    "Content-Type": "application/json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "stock-analysis-scheduler"
+  },
+  "jobs": [
+    { "title": "stock-preauction", "schedule": "45 8 * * 1-5",  "task": "preauction" },
+    { "title": "stock-auction",    "schedule": "20 9 * * 1-5",  "task": "auction" },
+    { "title": "stock-build",      "schedule": "15 15 * * 1-5",  "task": "build" },
+    { "title": "stock-close",      "schedule": "55 19 * * 1-5",  "task": "close_again" },
+    { "title": "stock-anomaly",    "schedule": "5 10 * * 1-5",   "task": "anomaly" }
+  ]
+}

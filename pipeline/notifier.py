@@ -349,10 +349,43 @@ def send_email(cfg, title, text):
     return True, "邮件已发送"
 
 
+# 这些 mode 每天只应推送一次；多次触发（GitHub 主调度 + 看门狗 + 备份订阅 +
+# 外部定时器）时由本去重保证不重复轰炸。盘中异动(anomaly)刻意多次推送，不在此列。
+_ONCE_PER_DAY = {"preauction", "auction", "close", "weekend"}
+
+
+def _already_pushed_today(mode):
+    """同一 mode 当天是否已推送过（读 push_log.jsonl 判定）。"""
+    if mode not in _ONCE_PER_DAY:
+        return False
+    try:
+        logp = os.path.join(DIST, "push_log.jsonl")
+        if not os.path.exists(logp):
+            return False
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        with open(logp, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    p = json.loads(line)
+                    if p.get("mode") == mode and str(p.get("ts", "")).startswith(today):
+                        return True
+                except Exception:
+                    pass
+        return False
+    except Exception:
+        return False
+
+
 def push(summary, dry_run=False, mode="close"):
     """summary: {"title": str, "text": str}。返回已送达通道列表。
     mode: "close"（收盘后复盘）或 "preauction"（竞价前观察）。
     无论是否配置通道，都会把推送内容落地为可见文件，避免『啥都看不到』。"""
+    # 幂等去重：同一 mode 当天已推送过则跳过通道发送，避免多路触发重复轰炸
+    # （GitHub 自带 schedule 常被丢弃，故叠加了看门狗/备份订阅/外部定时器多重触发，
+    #  这里统一兜底：先到先发，后到静默）。
+    if not dry_run and _already_pushed_today(mode):
+        print("[notifier][%s] 今日已推送，跳过通道发送（防重复触发）" % mode)
+        return ["skipped:dup"]
     # 输出兜底：避免 print 带 emoji 在非 UTF-8 控制台（如 GBK）抛 UnicodeEncodeError
     try:
         sys.stdout.reconfigure(encoding="utf-8")

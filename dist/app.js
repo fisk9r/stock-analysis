@@ -815,6 +815,7 @@
           '" title="历史研判：' + E(hc.note || hc.level) + '">' + E(hc.level.length > 4 ? hc.level.slice(0, 4) : hc.level) + '</span>' : '';
         var wcol = it.worth_score >= 60 ? C.up : it.worth_score >= 45 ? C.gold : C.gray;
         var t = it.trend_meta || null;
+        var m = it.momentum_meta || null;
         var kvHtml = t
           ? '<div class="kv">'
             + '<span>收盘 <b>' + f(it.close) + '</b></span>'
@@ -828,6 +829,21 @@
             + '<span>偏离MA20 <b style="color:' + (t.momentum_pct >= 0 ? C.up : C.gold) + '">+' + f(t.momentum_pct, 1) + '%</b></span>'
             + '<span>量能 <b>' + f(t.vol_ratio, 1) + '倍</b></span>'
             + '<span>趋势分 <b style="color:' + scol + '">' + f(it.score, 1) + '</b></span>'
+            + '<span>买入价值 <b style="color:' + wcol + '">' + f(it.worth_score, 0) + '</b></span>'
+            + '</div>'
+          : m
+          ? '<div class="kv">'
+            + '<span>收盘 <b>' + f(it.close) + '</b></span>'
+            + '<span>行业 <b>' + E(it.industry || '—') + '</b></span>'
+            + '<span>近12日涨停 <b style="color:' + C.up + '">' + m.lu_count + '</b></span>'
+            + '<span>最高连板 <b>' + m.max_streak + '</b></span>'
+            + '<span>余波(距涨停) <b>' + m.recency + '日</b></span>'
+            + '<span>近10日涨幅 <b style="color:' + C.up + '">+' + f(m.gain10, 1) + '%</b></span>'
+            + '<span>距高点回撤 <b style="color:' + (m.drawdown <= 10 ? C.up : C.gold) + '">' + f(m.drawdown, 1) + '%</b></span>'
+            + '<span>MA20斜率 <b>+' + f(m.slope20, 1) + '%</b></span>'
+            + '<span>趋势带 <b style="color:' + C.up + '">' + E(m.band) + '</b></span>'
+            + '<span>量能 <b>' + f(m.vol_ratio, 1) + '倍</b></span>'
+            + '<span>动量分 <b style="color:' + scol + '">' + f(it.score, 1) + '</b></span>'
             + '<span>买入价值 <b style="color:' + wcol + '">' + f(it.worth_score, 0) + '</b></span>'
             + '</div>'
           : '<div class="kv">'
@@ -869,6 +885,8 @@
       '连板≥3 且断板概率≥86%，次日冲高回落概率大，列出仅为提示回避');
     h += group('📈 趋势向上 · 主升候选（' + (R.trend || []).length + '）', R.trend, 'trend',
       '均线多头 + 近5日日均涨幅≥2% + 至少4天收涨 + 横盘日≤1（剔除“技术多头实则横盘”的票）');
+    h += group('⚡ 强动量 · 连板余波（' + (R.momentum || []).length + '）', R.momentum, 'momentum',
+      '近期≥2次涨停/≥2连板基因 + 多头未破位 + 距高点回撤≤18%（接住“连板妖股型、今日非涨停”掉缝里的票，如风范股份）');
 
     /* 全量评分表 */
     var rows = (R.all || []).map(function (it, i) {

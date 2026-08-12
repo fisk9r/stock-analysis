@@ -1,0 +1,103 @@
+name: 调度备份（第二独立订阅 · 兜底触发）
+
+# 作用：与主调度 stock.yml、看门狗 watchdog.yml 形成「三重独立 schedule 订阅」。
+#   三者各自向 GitHub 注册了独立的 cron 订阅。GitHub 在高负载时通常只丢弃
+#   【单个】cron 事件（常见：延迟几十分钟或跳过某次），但极少同时丢弃三个
+#   不同文件的订阅。任一订阅点火，就能代为触发关键任务。
+#   本工作流用「当日是否已推送该 mode」为去重依据（与看门狗同源、读同一份
+#   push_log），因此即便多个订阅同时点火，也只有最先到的那次真正触发，绝不
+#   重复轰炸。notifier.push 另有 mode+当日 幂等去重作双重保险。
+#   仍无法覆盖的极端场景（GitHub 整体丢弃全部 schedule）：由外部定时器
+#   cron-job.org 直打 workflow_dispatch API 兜底，见 tools/cronjob-config.json
+#   与 tools/setup_cronjob.sh（DEPLOY-GITHUB.md「精确定时」）。
+
+on:
+  schedule:
+    - cron: '12 1 * * 1-5'   # 北京 09:12 盘前/竞价 备份兜底（主 08:50/09:25）
+    - cron: '33 1 * * 1-5'   # 北京 09:33 竞价 最后备份兜底
+    - cron: '25 2 * * 1-5'   # 北京 10:25 盘中异动 备份（覆盖 09:50/10:07 被跳过）
+    - cron: '25 3 * * 1-5'   # 北京 11:25 盘中异动 备份
+    - cron: '25 5 * * 1-5'   # 北京 13:25 盘中异动 备份
+    - cron: '25 6 * * 1-5'   # 北京 14:25 盘中异动 备份
+    - cron: '25 7 * * 1-5'   # 北京 15:25 盘中异动 备份（末笔）
+    - cron: '55 7 * * 1-5'   # 北京 15:55 收盘 备份兜底（主 15:20）
+    - cron: '25 8 * * 1-5'   # 北京 16:25 收盘 最后备份兜底
+  workflow_dispatch:
+    inputs:
+      task:
+        description: '手动兜底的任务（空=按规则自动判定）'
+        required: false
+        default: ''
+        type: choice
+        options: ['', preauction, auction, anomaly, build]
+
+permissions:
+  actions: write   # 用于代为触发 stock.yml 的 workflow_dispatch
+  contents: read   # 用于下载状态包（含 push_log.jsonl）
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: 判定并兜底触发
+        run: |
+          set -u
+          BH=$(TZ=Asia/Shanghai date +%H)
+          DOW=$(TZ=Asia/Shanghai date +%u)   # 1=周一 … 7=周日
+          if [ "$DOW" -ge 6 ]; then echo "周末，备份调度休眠"; exit 0; fi
+
+          mkdir -p /tmp/bk && cd /tmp/bk
+          GOT_STATE=0
+          if gh release download data-snapshot -p state.tar.gz -D . 2>/dev/null; then
+            tar xzf state.tar.gz 2>/dev/null && GOT_STATE=1
+          fi
+
+          MODES=""
+          if [ "$GOT_STATE" = "1" ] && [ -f dist/push_log.jsonl ]; then
+            MODES=$(python3 - <<'PY'
+          import json, datetime
+          tz = datetime.timezone(datetime.timedelta(hours=8))
+          today = datetime.datetime.now(tz).strftime("%Y-%m-%d")
+          out = set()
+          for line in open("dist/push_log.jsonl", encoding="utf-8"):
+              try:
+                  p = json.loads(line)
+                  if str(p.get("ts", "")).startswith(today):
+                      out.add(p.get("mode"))
+              except Exception:
+                  pass
+          print("\n".join(sorted(out)))
+          PY
+            )
+          fi
+          has() { printf '%s\n' "$MODES" | grep -qx "$1"; }
+
+          # 当日该 mode 还没推送且确有状态包可推 → 才代为触发；否则不盲发（防重复/空推）
+          fire_if_missing() {
+            local mode="$1"
+            if has "$mode"; then echo "  ✔ $mode 今日已推送，跳过"; return; fi
+            if [ "$GOT_STATE" != "1" ]; then echo "  ⚠ 无状态包，不盲触发 $mode（避免重复/空推）"; return; fi
+            echo "  → 备份触发：$mode"
+            gh workflow run stock.yml --ref main -f task="$mode"
+          }
+
+          echo "北京当前小时=$BH  今日已推送 mode：$(echo "$MODES" | tr '\n' ' ')"
+
+          # 盘前 / 竞价（09:12、09:33 两个检查点）
+          if [ "$BH" -ge 9 ] && [ "$BH" -le 10 ]; then
+            fire_if_missing preauction
+            fire_if_missing auction
+          fi
+          # 盘中异动（10:25~15:25 各检查点）
+          if [ "$BH" -ge 10 ] && [ "$BH" -le 15 ]; then
+            fire_if_missing anomaly
+          fi
+          # 收盘完整分析（15:55、16:25 兜底）
+          if [ "$BH" -ge 15 ] && [ "$BH" -le 17 ]; then
+            fire_if_missing close_again
+          fi
+
+          echo "备份调度本轮结束"
