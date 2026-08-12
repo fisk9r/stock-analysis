@@ -411,11 +411,14 @@ def run(date_override=None, dedup_close=False):
                 deploy_url = open(du, encoding="utf-8").read().strip()
             summary = notifier.format_stock_summary(data, deploy_url, mode="close")
             if dedup_close:
-                prev = notifier.last_close_text()
-                if prev is not None and prev.strip() == summary["text"].strip():
-                    log("  收盘补发内容与当日『收盘后』推送完全相同，跳过（节省 ServerChan 额度，留给异动/强晋级）")
-                else:
-                    notifier.push(summary, mode="close")
+                # 复盘补发(close_again)必须用独立的 mode，与 15:20 收盘(mode="close")互不干扰，
+                # 否则会被 notifier 的 once-per-day 去重当成“今日已推送”直接吞掉
+                # （已复现：run 58 复盘跑成功却零发送，用户收不到复盘）。
+                # 复盘必须保证送达：仅由 once-per-day 挡住多重定时器的重复触发，
+                # 不再做“内容相同则跳过”——避免用户再次收不到复盘。
+                summary = dict(summary)
+                summary["title"] = summary["title"].replace("盘后复盘", "复盘补发")
+                notifier.push(summary, mode="close_again")
             else:
                 notifier.push(summary, mode="close")
         except Exception as e:

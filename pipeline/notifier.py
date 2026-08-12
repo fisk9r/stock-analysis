@@ -351,7 +351,9 @@ def send_email(cfg, title, text):
 
 # 这些 mode 每天只应推送一次；多次触发（GitHub 主调度 + 看门狗 + 备份订阅 +
 # 外部定时器）时由本去重保证不重复轰炸。盘中异动(anomaly)刻意多次推送，不在此列。
-_ONCE_PER_DAY = {"preauction", "auction", "close", "weekend"}
+# close 与 close_again 必须分开：15:20 收盘用 "close"，20:00 复盘用 "close_again"。
+# 若共用 "close"，复盘会被 once-per-day 当成“今日已推送”直接吞掉（已复现：run 58 复盘静默）。
+_ONCE_PER_DAY = {"preauction", "auction", "close", "close_again", "weekend"}
 
 
 def _already_pushed_today(mode):
@@ -487,9 +489,10 @@ def push(summary, dry_run=False, mode="close"):
     return results
 
 
-def last_close_text():
-    """返回 push_log.jsonl 中最近一次 mode=='close' 推送的正文；无则返回 None。
-    用于『收盘补发』与『收盘后』推送去重：内容相同时跳过，节省 ServerChan 额度。"""
+def last_text_for_mode(mode):
+    """返回 push_log.jsonl 中最近一次指定 mode 推送的正文；无则返回 None。
+    用于『复盘补发』与『收盘后』推送去重：内容相同时跳过，节省 ServerChan 额度。
+    复盘(close_again)与收盘(close)必须用各自独立的 mode，否则复盘会被 once-per-day 吞掉。"""
     try:
         logp = os.path.join(DIST, "push_log.jsonl")
         if not os.path.exists(logp):
@@ -504,11 +507,16 @@ def last_close_text():
                     p = json.loads(line)
                 except Exception:
                     continue
-                if p.get("mode") == "close":
+                if p.get("mode") == mode:
                     last = p.get("text")
         return last
     except Exception:
         return None
+
+
+def last_close_text():
+    """兼容旧调用：返回最近一次 mode=='close' 推送的正文。"""
+    return last_text_for_mode("close")
 
 
 def get_prev_rec_codes(con, date):
