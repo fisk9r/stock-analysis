@@ -156,6 +156,11 @@ jobs:
 
       # ---------- 3. 连通性自检（早失败，别留半截数据） ----------
       - name: 行情源自检
+        # 必须注入推送凭据：探针会调 notifier.load_config() 统计 ServerChan/PushPlus 数量。
+        # 不注入的话它永远读到 0 个，打出"⚠ 未读到任何推送凭据"——真丢凭据时也淹没在
+        # 长期误报里，自检等于失效（实测 anomaly 那次日志：探针报 0 个，实际 PushPlus 成功 2/2）。
+        env:
+          NOTIFY_JSON: ${{ secrets.NOTIFY_JSON }}
         run: python tools/probe_net.py --quick
 
       # ---------- 4. 抓取最新行情 ----------
