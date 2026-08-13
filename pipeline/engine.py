@@ -1852,6 +1852,49 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
     }
 
 
+def preopen_plan(rec, inds, relay, risks):
+    """聚合推荐/板块/接力/风险，生成简洁「盘前策略」（看板卡片 + 盘前推送共用）。
+
+    直接复用 recommend() 已算好的 position(仓位) 与 strategies(策略要点)，
+    再补充：主线预判(板块 tier=主线)、接力方向(sector_relay)、关注池(核心前排+接力前排)、
+    风险提醒(断板概率最高者)。纯聚合，不引入新模型，零额外行情计算。
+    """
+    rec = rec or {}
+    inds = inds or []
+    relay = relay or {}
+    risks = risks or []
+    mains = [s["name"] for s in inds if s.get("tier") == "主线"][:3]
+    relay_dir = [x["name"] for x in relay.get("relay", [])] if relay.get("available") else []
+
+    def _wi(it, reason):
+        return {"name": it.get("name"), "code": it.get("code"),
+                "streak": it.get("streak"), "reason": reason,
+                "relay_dir": bool(it.get("relay_dir"))}
+
+    seen, watch = set(), []
+    for it in (rec.get("core") or [])[:6]:
+        watch.append(_wi(it, "核心连板前排")); seen.add(it.get("code"))
+    for it in (rec.get("relay") or []):
+        if it.get("code") in seen:
+            continue
+        if it.get("relay_dir"):
+            watch.append(_wi(it, "接力方向前排")); seen.add(it.get("code"))
+    watch = watch[:8]
+
+    rk = sorted(risks, key=lambda x: -(x.get("p_break") or 0))[:3]
+    risk_txt = ["%s（%d板，断板概率%.0f%%）" % (r.get("name"), r.get("streak", 0), r.get("p_break") or 0)
+                for r in rk]
+
+    return {
+        "position": rec.get("position") or "—",
+        "strategies": rec.get("strategies") or [],
+        "main_line": mains,
+        "relay_dir": relay_dir,
+        "watch": watch,
+        "risks": risk_txt,
+    }
+
+
 def screen_uptrend(u, date, code2boards=None, topn=12):
     """趋势向上选股：在全市场 K 线中筛选『均线多头排列 + 价格站上短均 + MA20 上行
     + 量能配合』且非当日涨停的趋势票，作为主升段低吸候选。

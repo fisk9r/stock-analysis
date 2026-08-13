@@ -706,6 +706,15 @@ def _board(it):
     return ("%d板" % s) if s else "首板"
 
 
+def _signed(v, nd=0):
+    """带符号数值格式化（资金流向等）：None → '—'，正数补 '+'。"""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    return ("%+." + str(int(nd)) + "f") % x
+
+
 def format_stock_summary(data, url="", mode="close"):
     """ServerChan/PushPlus(markdown) 排版：盘面数据 / 复盘要点 / 推荐 / 风险，分区清晰、留白克制。
     mode='close' 收盘后；mode='preauction' 竞价前。"""
@@ -739,6 +748,22 @@ def format_stock_summary(data, url="", mode="close"):
                 L.append("> 共 %d 只候选，仅列前 %d 只；完整强弱判定见看板。" % (len(rec.get("all") or []), MAX_RECS))
         else:
             L.append("（暂无昨日推荐标的）")
+        # 盘前策略（聚合仓位/主线/接力/关注池/风险）
+        pp = data.get("preopen_plan") or {}
+        if pp.get("position"):
+            L.append("")
+            L.append("**盘前策略**")
+            L.append("- 建议仓位：**%s**" % pp["position"])
+            if pp.get("main_line"):
+                L.append("- 主线预判：%s" % "、".join(pp["main_line"]))
+            if pp.get("relay_dir"):
+                L.append("- 接力方向：%s" % "、".join(pp["relay_dir"]))
+            for _s in (pp.get("strategies") or [])[:4]:
+                L.append("- %s" % _s)
+            if pp.get("watch"):
+                L.append("- 关注池：" + "、".join("%s(%s)" % (w["name"], w.get("reason", "")) for w in pp["watch"][:8]))
+            if pp.get("risks"):
+                L.append("- 风险提醒：%s" % "；".join(pp["risks"]))
         if url:
             L.append("")
             L.append("完整看板：%s" % url)
@@ -786,7 +811,7 @@ def format_stock_summary(data, url="", mode="close"):
         L.append("**资金流向**：全市场主力净流入 %s 亿（净流入板块 %d / 净流出 %d）｜ 主力净流入行业Top：%s"
                  % (("+" if money.get("total_main_net", 0) >= 0 else "") + str(money.get("total_main_net")),
                     money.get("net_in_boards", 0), money.get("net_out_boards", 0),
-                    "、".join((b.get("name") or "") + f(b.get("net"), 0) + "亿" for b in money.get("boards_in", [])[:3])))
+                    "、".join((b.get("name") or "") + _signed(b.get("net"), 0) + "亿" for b in money.get("boards_in", [])[:3])))
         if n:
             L.append("**北向资金**：沪 %s / 深 %s / 合计 %s 亿（净流入）" % (n.get("sh"), n.get("sz"), n.get("total")))
         else:

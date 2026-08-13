@@ -243,6 +243,53 @@
         '上涨占比 ' + pct(em.up / Math.max(1, (em.up || 0) + (em.down || 0)) * 100)) +
       '</div>';
 
+    /* 市场可视化：温度走势(双线) + 板块涨停 TOP10 */
+    var VZ = D.viz;
+    if (VZ && VZ.temp && VZ.temp.length) {
+      var _pts = VZ.temp.map(function (e) { return { l: e.d, v: e.zt, v2: e.lb }; });
+      var _temp = CH.svgLine(_pts, {
+        w: 460, h: 178, dual: true, color: C.up, color2: C.gold,
+        legend: [{ l: '涨停家数', c: C.up }, { l: '连板高度(板)', c: C.gold }]
+      });
+      var _sec = (VZ.sector_zt || []).map(function (s) {
+        var c = s.tier === '主线' ? C.up : s.tier === '支线' ? C.gold : C.blue;
+        return { l: s.name, v: s.zt, c: c };
+      });
+      var _secChart = _sec.length ? CH.svgHBar(_sec, { w: 460, fmt: function (v) { return v + ' 只'; } })
+                                  : '<div class="empty">无</div>';
+      var _vizBody = '<div style="margin-bottom:10px"><b style="color:var(--muted);font-size:12px">市场温度走势（近 ' +
+        VZ.temp.length + ' 日）</b>' + _temp + '</div>' +
+        '<div><b style="color:var(--muted);font-size:12px">板块涨停家数 TOP10</b>' + _secChart + '</div>';
+      h += card('📊 市场可视化 · 温度/主线', _vizBody,
+        '涨停家数与连板高度双线刻画市场温度；板块涨停 TOP10 一眼看清新老主线');
+    }
+
+    /* 盘前策略：仓位 / 主线 / 接力 / 关注池 / 风险 一屏速览 */
+    var PP = D.preopen_plan;
+    if (PP && PP.position) {
+      var _pp = '<div class="chips" style="margin-bottom:8px">' +
+        '<span class="chip" style="border-color:' + C.gold + ';color:' + C.gold + '">建议仓位 <b>' + E(PP.position) + '</b></span>' +
+        (PP.main_line && PP.main_line.length ? '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + '">主线预判 ' + PP.main_line.map(E).join('/') + '</span>' : '') +
+        (PP.relay_dir && PP.relay_dir.length ? '<span class="chip" style="border-color:' + C.purple + ';color:' + C.purple + '">接力方向 ' + PP.relay_dir.map(E).join('/') + '</span>' : '') +
+        '</div>';
+      if (PP.strategies && PP.strategies.length) {
+        _pp += '<div class="bullets">' + PP.strategies.slice(0, 5).map(function (s) { return '<div class="b">· ' + E(s) + '</div>'; }).join('') + '</div>';
+      }
+      if (PP.watch && PP.watch.length) {
+        _pp += '<div style="margin-top:8px"><b style="color:var(--muted);font-size:12px">关注池（前排）</b><div class="chips" style="margin-top:4px">' +
+          PP.watch.map(function (w) {
+            var _tag = w.relay_dir ? '<span class="bd" style="border-color:' + C.purple + ';color:' + C.purple + ';font-size:10px;padding:0 4px">接力</span>' : '';
+            return '<span class="chip">' + E(w.name) + (w.streak ? ' <b>' + w.streak + '板</b>' : '') +
+              ' <span class="muted">' + E(w.reason) + '</span>' + _tag + '</span>';
+          }).join('') + '</div></div>';
+      }
+      if (PP.risks && PP.risks.length) {
+        _pp += '<div style="margin-top:8px"><b style="color:var(--muted);font-size:12px">风险提醒</b><div class="note" style="margin-top:4px">' +
+          PP.risks.map(E).join('；') + '</div></div>';
+      }
+      h += card('🎯 盘前策略', _pp, '聚合仓位/主线/接力/关注池/风险，开盘前一眼看清今日该怎么打');
+    }
+
     /* 竞价定调 */
     var A0 = D.auction || {};
     if (A0 && A0.summary) {

@@ -352,6 +352,13 @@ def run(date_override=None, dedup_close=False):
     log("生成当日推荐 ...")
     rec = engine.recommend(lus, risks, demons, inds, sent, cyc, stats, auction["items"], regime, relay)
 
+    # 盘前策略：聚合 recommend 的仓位/策略 + 板块/接力/风险，供看板与盘前推送
+    try:
+        plan = engine.preopen_plan(rec, inds, relay, risks)
+    except Exception as e:
+        log("  盘前策略生成失败（不影响主流程）：%r" % e)
+        plan = {}
+
     # 趋势向上选股（独立于连板体系，覆盖主升段趋势票）
     try:
         rec["trend"] = engine.screen_uptrend(u, date, code2boards, topn=12)
@@ -428,6 +435,16 @@ def run(date_override=None, dedup_close=False):
 
     e_today = next((x for x in series if x["date"] == date), None) or {}
     idx = snap.get("index") or []
+
+    # ---- 可视化数据（市场温度走势 + 板块涨停 TOP）----
+    # series/emotion_series 已含每日 zt(涨停家数) 与 max_lb(连板高度)，直接取近 20 日。
+    _viz_series = (series or [])[-20:]
+    viz = {
+        "temp": [{"d": e["date"][5:], "zt": e.get("zt", 0), "lb": e.get("max_lb", 0)} for e in _viz_series],
+        "sector_zt": [{"name": s["name"], "zt": s.get("zt") or 0, "tier": s.get("tier")}
+                      for s in sorted(inds, key=lambda x: -(x.get("zt") or 0))[:10]],
+    }
+
     data = {
         "meta": {
             "date": date, "prev_date": prev,
@@ -459,6 +476,8 @@ def run(date_override=None, dedup_close=False):
         "ladder_history": ladder_hist,
         "rotation": rotation,
         "sector_relay": relay,
+        "viz": viz,
+        "preopen_plan": plan,
         "demons": demons[:40],
         "demon_templates": [{"code": t["code"], "name": t["name"], "start": t["start"],
                              "gain": t["gain"], "max_streak": t["max_streak"],
