@@ -718,8 +718,16 @@ def push_auction():
 
 def push_anomaly():
     """盘中异动捕捉：优先用东方财富实时行情生成『异动提醒』（随时捕捉），
-    失败则回退到最近一次已分析数据。始终经 PushPlus 推送（双 token 同时送达），
-    不占 ServerChan 的 5 条关键节点额度。"""
+    失败则回退到最近一次已分析数据。归档走 ServerChan（与盘前/收盘同一可靠通道），
+    PushPlus 仅作冗余/溢出兜底（ServerChan 单 key 5 条/天额度用尽后自动降级）。
+
+    ⚠ 交易时段闸：仅在北京时间 09:15–15:00（且为交易日）才真正推送；其余时段
+    （凌晨 / 休市）即使被外部定时器或看门狗误点火，也直接跳过，绝不发出『盘中异动』
+    （曾发生中国时间 4 点误推盘中异动的事故，根因即此处缺交易时段判断）。"""
+    # 交易时段闸：非 09:15–15:00 北京时段不推送盘中异动（根治 4 点误推）
+    if not notifier._in_anomaly_window():
+        print("[anomaly] 当前非交易时段（北京 %s），跳过" % notifier._bj_now().strftime("%H:%M"))
+        return ["skipped:off-hours"]
     # 1) 实时异动（最优）：盘中随时捕捉涨停/急拉/板块异动
     try:
         s = _live_anomaly_summary(_deploy_url())

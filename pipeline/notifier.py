@@ -41,6 +41,20 @@ def _bj_now():
     return datetime.datetime.now(_BJ_TZ).replace(tzinfo=None)
 
 
+def _in_anomaly_window():
+    """盘中异动仅在交易时段（周一至周五 09:15–15:00 北京时间）允许推送。
+
+    其余时间（早盘前 / 午夜 / 非交易日）一律拦截，避免被任意触发器误当成
+    『盘中异动』推出去——曾出现中国时间凌晨 4 点误推盘中异动的事故：外部定时器
+    / 看门狗在休市时段点火，而原代码只对『交易日』做判断（凌晨仍是交易日），
+    于是把空数据当『盘中异动』发出。交易时段闸从根上堵死这类误推。"""
+    now = _bj_now()
+    if now.weekday() >= 5:          # 周六(5) / 周日(6) 休市
+        return False
+    t = now.time()
+    return datetime.time(9, 15) <= t <= datetime.time(15, 0)
+
+
 ROOT = store.ROOT
 CFG_PATH = os.path.join(ROOT, "config", "notify.json")
 DIST = os.path.join(ROOT, "dist")
@@ -453,6 +467,13 @@ def push(summary, dry_run=False, mode="close"):
     if not dry_run and _already_pushed_today(mode):
         print("[notifier][%s] 今日已推送，跳过通道发送（防重复触发）" % mode)
         return ["skipped:dup"]
+    # 交易时段闸：盘中异动(anomaly)只有在 09:15–15:00 北京时间（且为交易日）才允许推送。
+    # 外部定时器 / 看门狗误在休市时段（如凌晨 4 点）点火时，绝不推送『盘中异动』，
+    # 从根上根治「中国时间 4 点误推盘中异动」的事故。
+    if not dry_run and mode == "anomaly" and not _in_anomaly_window():
+        print("[notifier][anomaly] 当前非交易时段（北京 %s），跳过盘中异动推送"
+              % _bj_now().strftime("%H:%M"))
+        return ["skipped:off-hours"]
     # 盘中异动：允许日内多次，但外部定时器与 GitHub 同窗口触发会重复，
     # 用 12 分钟冷却去重（小于盘中时点最小间隔 17 分钟，不误伤合法信号）。
     if not dry_run and mode == "anomaly" and _anomaly_recently_pushed(12):
