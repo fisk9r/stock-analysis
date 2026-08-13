@@ -688,7 +688,12 @@ def _top_recs(core, relay, allit, n):
 
 def _global_signal(g):
     if g.get("available"):
-        return "%s — %s" % (g.get("signal"), g.get("detail", "外围数据缺失，按中性处理"))
+        s = "%s — %s" % (g.get("signal"), g.get("detail", "外围数据缺失，按中性处理"))
+        etfs = g.get("etfs") or []
+        if etfs:
+            s += "；ETF：" + "、".join("%s%s%%" % (e["name"], ("+" if e["pct"] >= 0 else "") + str(round(e["pct"], 1)))
+                                   for e in etfs)
+        return s
     return "数据缺失，按中性处理"
 
 
@@ -764,6 +769,35 @@ def format_stock_summary(data, url="", mode="close"):
         gap = micro.get("gap") or []
         if gap:
             L.append("**梯队断层**：缺 %s 板（中位断档，警惕高位分歧）" % "/".join("%d" % g for g in gap))
+    # 竞价强度定调（涨停股集合竞价强弱）
+    auc = data.get("auction") or {}
+    mv = auc.get("market_view") or {}
+    if mv and mv.get("avg_score") is not None:
+        L.append("**竞价强度**：涨停股竞价定调 %s 分（%s）｜ 平均高开 %s ｜ 弱转强 %d / 强转弱 %d ｜ 抢筹 %d / 派发预警 %d"
+                 % (mv.get("avg_score"), mv.get("strength"),
+                    _pct(auc.get("summary", {}).get("avg_open_pct")),
+                    mv.get("momentum", {}).get("weak_strong", 0),
+                    mv.get("momentum", {}).get("strong_weak", 0),
+                    len(mv.get("qiangchou", [])), len(mv.get("paifa", []))))
+    # 主力/北向资金流向
+    money = data.get("money") or {}
+    if money and money.get("boards_in"):
+        n = money.get("north")
+        L.append("**资金流向**：全市场主力净流入 %s 亿（净流入板块 %d / 净流出 %d）｜ 主力净流入行业Top：%s"
+                 % (("+" if money.get("total_main_net", 0) >= 0 else "") + str(money.get("total_main_net")),
+                    money.get("net_in_boards", 0), money.get("net_out_boards", 0),
+                    "、".join((b.get("name") or "") + f(b.get("net"), 0) + "亿" for b in money.get("boards_in", [])[:3])))
+        if n:
+            L.append("**北向资金**：沪 %s / 深 %s / 合计 %s 亿（净流入）" % (n.get("sh"), n.get("sz"), n.get("total")))
+        else:
+            L.append("**北向资金**：数据源停更（东财调整口径，暂不可用）")
+    # 选股回测
+    bt = data.get("backtest") or {}
+    if bt and bt.get("total"):
+        h1 = bt.get("h1") or {}; h3 = bt.get("h3") or {}; h5 = bt.get("h5") or {}
+        L.append("**选股回测**（样本 %d）：次日胜率 %s%% / 持有3日 %s%% / 持有5日 %s%%（均收益 %s%% / %s%% / %s%%）"
+                 % (bt["total"], h1.get("win", "-"), h3.get("win", "-"), h5.get("win", "-"),
+                    h1.get("avg", "-"), h3.get("avg", "-"), h5.get("avg", "-")))
     L.append("")
     if narr.get("bullets"):
         L.append("### 复盘要点")

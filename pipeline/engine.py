@@ -1179,7 +1179,100 @@ def auction_profile(u, date, limit_ups):
         "weak_strong": weak, "strong_weak": strong, "high_open": high_open,
         "avg_open_pct": avg, "vol_anomaly": vol_anom, "vol_warn": vol_warn,
     }
-    return {"summary": summary, "items": items}
+    # ===== 市场级竞价强度聚合（供前端『竞价强度定调』专卡）=====
+    scores = [it["auction_score"] for it in items.values()]
+    avg_score = round(mean(scores), 1) if scores else 0.0
+    score_dist = {"强(>=80)": 0, "中(60-80)": 0, "弱(<60)": 0}
+    for s in scores:
+        if s >= 80:
+            score_dist["强(>=80)"] += 1
+        elif s >= 60:
+            score_dist["中(60-80)"] += 1
+        else:
+            score_dist["弱(<60)"] += 1
+    gap_dist = {"一字": 0, "大幅高开": 0, "高开": 0, "平开": 0, "低开": 0}
+    for it in items.values():
+        gap_dist[it["gap_type"]] = gap_dist.get(it["gap_type"], 0) + 1
+    strength = "强" if avg_score >= 75 else ("中" if avg_score >= 55 else "弱")
+    qiang = [it for it in items.values()
+             if it["vol_anomaly"].get("flag") == "放量异动" and not it["vol_anomaly"].get("warn")]
+    paifa = [it for it in items.values() if it["vol_anomaly"].get("warn")]
+    qiang.sort(key=lambda x: x["vol_anomaly"].get("ratio", 0), reverse=True)
+    paifa.sort(key=lambda x: x["vol_anomaly"].get("ratio", 0), reverse=True)
+    market_view = {
+        "avg_score": avg_score, "strength": strength, "score_dist": score_dist,
+        "gap_dist": gap_dist, "momentum": {"weak_strong": weak, "strong_weak": strong},
+        "qiangchou": [{"code": x["code"], "name": x["name"], "streak": x["streak"],
+                       "open_pct": x["open_pct"], "ratio": x["vol_anomaly"].get("ratio", 0)}
+                      for x in qiang[:5]],
+        "paifa": [{"code": x["code"], "name": x["name"], "streak": x["streak"],
+                   "open_pct": x["open_pct"], "pattern": x["pattern"],
+                   "ratio": x["vol_anomaly"].get("ratio", 0)} for x in paifa[:5]],
+    }
+    return {"summary": summary, "items": items, "market_view": market_view}
+
+
+# ============================================================== 9. 选股回测（历史真实推荐 + K线前向收益）
+def backtest(u, con, horizons=(1, 3, 5)):
+    """对历史真实推荐标的做前向收益回测（零成本：用已落库的每日推荐 + K线精确前向价）。
+    返回 {total, h1, h3, h5, by_tag} 或 None（样本不足）。"""
+    try:
+        rows = con.execute("SELECT date,code,name,streak,tag FROM rec_picks").fetchall()
+    except Exception:
+        return None
+    if not rows:
+        return None
+    didx = {d: i for i, d in enumerate(u.dates)}
+    rets = {h: [] for h in horizons}
+    by_tag = {}
+    total = 0
+    for date, code, name, streak, tag in rows:
+        i = didx.get(date)
+        if i is None:
+            continue
+        b0 = u.bar(code, date)
+        if not b0 or not b0.get("c"):
+            continue
+        p0 = b0["c"]
+        tag = tag or "其他"
+        rec_rets, ok = {}, False
+        for h in horizons:
+            j = i + h
+            if j >= len(u.dates):
+                continue
+            b1 = u.bar(code, u.dates[j])
+            if not b1:
+                continue
+            ret = (b1["c"] / p0 - 1) * 100
+            rets[h].append(ret)
+            rec_rets[h] = ret
+            ok = True
+        if ok:
+            total += 1
+            by_tag.setdefault(tag, {"n": 0, "wins": 0, "sum": 0.0})
+            key = 3 if 3 in rec_rets else 1
+            by_tag[tag]["n"] += 1
+            if rec_rets.get(key, 0) > 0:
+                by_tag[tag]["wins"] += 1
+            by_tag[tag]["sum"] += rec_rets.get(key, 0)
+    if total == 0:
+        return None
+
+    def agg(lst):
+        if not lst:
+            return None
+        wins = sum(1 for x in lst if x > 0)
+        return {"n": len(lst), "win": round(wins / len(lst) * 100, 1),
+                "avg": round(sum(lst) / len(lst), 2),
+                "best": round(max(lst), 1), "worst": round(min(lst), 1)}
+
+    out = {"total": total,
+           "h1": agg(rets.get(1)), "h3": agg(rets.get(3)), "h5": agg(rets.get(5)),
+           "by_tag": {t: {"n": v["n"],
+                          "win": round(v["wins"] / v["n"] * 100, 1) if v["n"] else 0,
+                          "avg": round(v["sum"] / v["n"], 2) if v["n"] else 0}
+                      for t, v in by_tag.items() if v["n"] >= 3}}
+    return out
 
 
 # ============================================================== 9. 连板梯队持续性（近 N 日）
@@ -1262,12 +1355,13 @@ def global_market(indices):
     def avg(region):
         xs = [x["pct"] for x in indices if x.get("region") == region and x.get("pct") is not None]
         return round(mean(xs), 2) if xs else None
-    us = avg("美股"); jp = avg("日股"); kr = avg("韩股")
-    # 美股对 A 股次日高开/方向主导，日韩为区域情绪辅助
+    us = avg("美股"); jp = avg("日股"); kr = avg("韩股"); hk = avg("港股")
+    # 美股对 A 股次日高开/方向主导，港股为最强关联外围，日韩为区域情绪辅助
     us_s = clamp((us or 0) / 1.6, -3.2, 3.2)
     jp_s = clamp((jp or 0) / 2.2, -1.5, 1.5)
     kr_s = clamp((kr or 0) / 2.2, -1.5, 1.5)
-    blended = us_s * 0.72 + jp_s * 0.16 + kr_s * 0.12
+    hk_s = clamp((hk or 0) / 1.8, -2.2, 2.2)
+    blended = us_s * 0.64 + hk_s * 0.16 + jp_s * 0.12 + kr_s * 0.08
     score = round(clamp(blended * 22, -100, 100), 1)
     # A 股次日上涨概率（logit 合成，正负皆可）
     a_up = round(sigmoid(blended * 0.55) * 100, 1)
@@ -1284,14 +1378,19 @@ def global_market(indices):
     parts = []
     if us is not None:
         parts.append("美股 %s%.2f%%" % ("+" if us >= 0 else "", us))
+    if hk is not None:
+        parts.append("港股 %s%.2f%%" % ("+" if hk >= 0 else "", hk))
     if jp is not None:
         parts.append("日经 %s%.2f%%" % ("+" if jp >= 0 else "", jp))
     if kr is not None:
         parts.append("韩国 %s%.2f%%" % ("+" if kr >= 0 else "", kr))
+    etfs = [{"name": x["name"], "pct": x["pct"]} for x in indices
+            if x.get("region") == "ETF" and x.get("pct") is not None]
     detail = "外围（" + "，".join(parts) + "）→ 对 A 股次日%s指引（上涨概率约 %.0f%%）" % (
         "正面" if score > 0 else ("负面" if score < 0 else "中性"), a_up)
     return {"available": True, "signal": signal, "score": score, "a_up_prob": a_up,
-            "us_pct": us, "jp_pct": jp, "kr_pct": kr, "detail": detail}
+            "us_pct": us, "jp_pct": jp, "kr_pct": kr, "hk_pct": hk,
+            "etfs": etfs, "detail": detail}
 
 
 # ============================================================== 10.6 历史连板热度校准

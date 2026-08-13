@@ -264,8 +264,10 @@
         '<span class="chip" style="border-color:' + (G.score >= 0 ? C.up : C.down) + ';color:' + (G.score >= 0 ? C.up : C.down) + '">外围信号 ' + E(G.signal || '中性') + '</span>' +
         '<span class="chip">A股次日上涨概率 <b>' + f(G.a_up_prob, 0) + '%</b></span>' +
         (G.us_pct !== null && G.us_pct !== undefined ? '<span class="chip">美股 <b>' + (G.us_pct >= 0 ? '+' : '') + f(G.us_pct, 2) + '%</b></span>' : '') +
+        (G.hk_pct !== null && G.hk_pct !== undefined ? '<span class="chip">港股 <b>' + (G.hk_pct >= 0 ? '+' : '') + f(G.hk_pct, 2) + '%</b></span>' : '') +
         (G.jp_pct !== null && G.jp_pct !== undefined ? '<span class="chip">日经 <b>' + (G.jp_pct >= 0 ? '+' : '') + f(G.jp_pct, 2) + '%</b></span>' : '') +
         (G.kr_pct !== null && G.kr_pct !== undefined ? '<span class="chip">韩国 <b>' + (G.kr_pct >= 0 ? '+' : '') + f(G.kr_pct, 2) + '%</b></span>' : '') +
+        (G.etfs && G.etfs.length ? '<span class="chip">ETF ' + G.etfs.map(function (e) { return E(e.name) + (e.pct >= 0 ? '+' : '') + f(e.pct, 1) + '%'; }).join(' ') + '</span>' : '') +
         '</div>';
       if (G.indices && G.indices.length) {
         gbody += '<div class="tbl-wrap"><table><thead><tr><th>市场</th><th>指数</th><th class="r">涨跌幅</th></tr></thead><tbody>' +
@@ -275,7 +277,7 @@
           }).join('') + '</tbody></table></div>';
       }
       gbody += '<div class="note">' + E(gdetail || '外围数据缺失，按中性处理') + '</div>';
-      h += card('🌐 外围市场定调（美股/日股/韩股 → A股次日）', gbody,
+      h += card('🌐 外围市场定调（美股/港股/日股/韩股/ETF → A股次日）', gbody,
         '外围涨跌通过情绪传导影响 A 股次日开盘方向与强度');
     }
 
@@ -388,6 +390,83 @@
           '<table class="tbl"><tr><th>主线板块</th><th>今日领涨</th><th>5日前领涨</th><th>现状</th></tr>' + lrows + '</table>';
       }
       h += card('🧭 近5日板块热度趋势 · 龙头谱系', lbody, '题材持续性/退潮追踪：升温板块可跟随，降温+龙头跌=退潮');
+    }
+
+    /* 竞价强度定调（涨停梯队集合竞价强弱 · 离线重建） */
+    var AUC = D.auction || {};
+    var MV = AUC.market_view || {};
+    if (MV && MV.avg_score !== undefined) {
+      var aqBody = '<div class="grid g3" style="gap:10px;margin-bottom:10px">' +
+        kpi('竞价强度', MV.avg_score + ' 分', '涨停股竞价定调 · ' + MV.strength) +
+        kpi('平均高开', (AUC.summary ? f(AUC.summary.avg_open_pct, 2) : '—') + '%', '一字板 ' + (AUC.summary ? AUC.summary.yizi : 0) + ' 只') +
+        kpi('弱转强/强转弱', (AUC.summary ? AUC.summary.weak_strong : 0) + ' / ' + (AUC.summary ? AUC.summary.strong_weak : 0), '竞价分歧转向') + '</div>';
+      var gd = MV.gap_dist || {}, gdTotal = 0;
+      Object.keys(gd).forEach(function (k) { gdTotal += gd[k]; }); gdTotal = gdTotal || 1;
+      var gdColors = { '一字': C.gold, '大幅高开': C.up, '高开': C.up, '平开': C.gray, '低开': C.down };
+      var gdBar = '<div style="display:flex;height:18px;border-radius:4px;overflow:hidden;margin:4px 0 2px">';
+      Object.keys(gd).forEach(function (k) {
+        var w = gd[k] / gdTotal * 100;
+        if (w > 0) gdBar += '<div title="' + k + ' ' + gd[k] + '" style="width:' + w.toFixed(1) + '%;background:' + (gdColors[k] || C.gray) + '"></div>';
+      });
+      gdBar += '</div><div style="font-size:11px;color:' + C.faint + '">高开分布：' +
+        Object.keys(gd).map(function (k) { return k + ' ' + gd[k]; }).join(' · ') + '</div>';
+      aqBody += gdBar;
+      var qc = (MV.qiangchou || []).map(function (x) { return E(x.name) + '(' + x.streak + '板 +' + f(x.open_pct, 1) + '%)'; }).join('、') || '—';
+      var pf = (MV.paifa || []).map(function (x) { return E(x.name) + '(' + x.streak + '板 +' + f(x.open_pct, 1) + '%)'; }).join('、') || '—';
+      aqBody += '<div style="margin-top:8px;font-size:12px"><span style="color:' + C.up + '">抢筹放量</span>：' + qc + '</div>' +
+        '<div style="font-size:12px;margin-top:2px"><span style="color:' + C.down + '">派发预警</span>：' + pf + '</div>';
+      h += card('🔥 竞价强度定调', aqBody, '涨停股集合竞价强弱（离线重建 · 不需盘中逐笔）');
+    }
+
+    /* 主力/北向资金流向 */
+    var MONEY = D.money || {};
+    if (MONEY && MONEY.boards_in) {
+      var mi = MONEY.boards_in || [], mo = MONEY.boards_out || [];
+      var north = MONEY.north;
+      var mbody = '<div class="grid g3" style="gap:10px;margin-bottom:10px">' +
+        kpi('全市场主力净流入', (MONEY.total_main_net == null ? '—' : (MONEY.total_main_net >= 0 ? '+' : '') + MONEY.total_main_net + ' 亿'), '净流入板块 ' + (MONEY.net_in_boards || 0) + ' / 流出 ' + (MONEY.net_out_boards || 0)) +
+        kpi('北向资金', north ? ('+' + north.total + ' 亿') : '数据源停更', north ? ('沪 ' + north.sh + ' / 深 ' + north.sz) : '东财口径调整') +
+        kpi('净流入行业Top', (mi[0] ? E(mi[0].name) : '—'), mi[0] ? (E(mi[0].net) + ' 亿') : '') + '</div>';
+      var inRows = mi.map(function (b) {
+        return '<tr><td class="name">' + E(b.name) + '</td><td class="r num" style="color:' + C.up + '">+' + f(b.net, 1) + '亿</td><td class="r num">' + f(b.rate, 1) + '%</td></tr>';
+      }).join('');
+      var outRows = mo.map(function (b) {
+        return '<tr><td class="name">' + E(b.name) + '</td><td class="r num" style="color:' + C.down + '">' + f(b.net, 1) + '亿</td><td class="r num">' + f(b.rate, 1) + '%</td></tr>';
+      }).join('');
+      mbody += '<div style="display:flex;gap:14px;flex-wrap:wrap">' +
+        '<div style="flex:1;min-width:240px"><div style="font-size:12px;font-weight:700;color:' + C.up + ';margin-bottom:4px">主力净流入行业 Top10</div>' +
+        '<table class="tbl"><tr><th>行业</th><th>净流入</th><th>净率</th></tr>' + inRows + '</table></div>' +
+        '<div style="flex:1;min-width:240px"><div style="font-size:12px;font-weight:700;color:' + C.down + ';margin-bottom:4px">主力净流出行业 Top5</div>' +
+        '<table class="tbl"><tr><th>行业</th><th>净流入</th><th>净率</th></tr>' + outRows + '</table></div></div>';
+      h += card('💰 主力/北向资金流向', mbody, '行业板块主力净流入排行（东财实时）· 北向若空白为数据源停更');
+    }
+
+    /* 选股回测（历史真实推荐 + K线前向收益） */
+    var BT = D.backtest || {};
+    if (BT && BT.total) {
+      function btCell(s) {
+        if (!s) return '<td class="r num">—</td>';
+        var col = s.win >= 55 ? C.up : (s.win < 45 ? C.down : C.gold);
+        return '<td class="r num"><span style="color:' + col + '">' + s.win + '%</span><br><span style="font-size:10px;color:' + C.faint + '">均' + (s.avg >= 0 ? '+' : '') + s.avg + '%</span></td>';
+      }
+      var bbody = '<table class="tbl"><tr><th>持有周期</th><th>样本</th><th>胜率/均收益</th></tr>' +
+        '<tr><td>次日 +1</td><td class="r num">' + (BT.h1 ? BT.h1.n : '—') + '</td>' + btCell(BT.h1) + '</tr>' +
+        '<tr><td>持有 +3</td><td class="r num">' + (BT.h3 ? BT.h3.n : '—') + '</td>' + btCell(BT.h3) + '</tr>' +
+        '<tr><td>持有 +5</td><td class="r num">' + (BT.h5 ? BT.h5.n : '—') + '</td>' + btCell(BT.h5) + '</tr></table>';
+      var btg = BT.by_tag || {};
+      var tk = Object.keys(btg);
+      if (tk.length) {
+        var trows = tk.map(function (t) {
+          var v = btg[t];
+          var col = v.win >= 55 ? C.up : (v.win < 45 ? C.down : C.gold);
+          return '<tr><td class="name">' + E(t) + '</td><td class="r num">' + v.n + '</td>' +
+            '<td class="r num"><span style="color:' + col + '">' + v.win + '%</span></td>' +
+            '<td class="r num ' + (v.avg >= 0 ? '' : '') + '"><span style="color:' + (v.avg >= 0 ? C.up : C.down) + '">' + (v.avg >= 0 ? '+' : '') + v.avg + '%</span></td></tr>';
+        }).join('');
+        bbody += '<div style="margin-top:8px;font-size:12px;font-weight:700">分类型胜率（样本≥3）</div>' +
+          '<table class="tbl"><tr><th>类型</th><th>样本</th><th>胜率</th><th>均收益</th></tr>' + trows + '</table>';
+      }
+      h += card('📊 选股回测', bbody, '基于每日真实推荐 + K线前向收益 · 自证策略有效性');
     }
 
     /* 时间序列 */

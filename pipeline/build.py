@@ -191,6 +191,48 @@ def build_narrative(data):
     }
 
 
+def compute_money_flow():
+    """主力资金流向 + 北向资金（东财实时，CI 端取数）。失败返回 None 不影响主流程。"""
+    try:
+        # 行业/概念板块主力净流入（f62 主力净流入额/元，f184 净流入率%，f66 超大单，f72 大单）
+        rows, _ = em_api.clist_paged("m:90+t:2", "f12,f14,f62,f184,f66,f72", max_pages=6, fid="f62")
+        boards = []
+        for r in rows:
+            net = r.get("f62")
+            if net is None or not r.get("f14"):
+                continue
+            boards.append({"code": r.get("f12"), "name": r.get("f14"),
+                           "net": round((net or 0) / 1e8, 2),       # 元 -> 亿
+                           "rate": round(r.get("f184") or 0, 2),
+                           "xl": round((r.get("f66") or 0) / 1e8, 2),  # 超大单净流入(亿)
+                           "l": round((r.get("f72") or 0) / 1e8, 2)})  # 大单净流入(亿)
+        boards = [b for b in boards if b["name"]]
+        boards_sorted = sorted(boards, key=lambda x: x["net"], reverse=True)
+        top_in = boards_sorted[:10]
+        top_out = boards_sorted[-5:][::-1]
+        net_in = sum(1 for b in boards if b["net"] > 0)
+        net_out = sum(1 for b in boards if b["net"] < 0)
+        total_net = round(sum(b["net"] for b in boards), 1)
+        # 北向资金（沪深港通）：东财 kamt 口径多次调整，沪股通/深股通 dayNetAmtIn 常为 0 → 不可用则标记 None
+        north = None
+        try:
+            d = em_api.push2_json('/api/qt/kamt/get?fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57,f58&_=1')
+            dd = (d or {}).get("data") or {}
+            sh = (dd.get("hk2sh") or {}).get("dayNetAmtIn")
+            sz = (dd.get("hk2sz") or {}).get("dayNetAmtIn")
+            if sh is not None and sz is not None and (sh != 0 or sz != 0):
+                north = {"sh": round(sh / 1e4, 1), "sz": round(sz / 1e4, 1),  # 万元 -> 亿
+                         "total": round((sh + sz) / 1e4, 1)}
+        except Exception:
+            north = None
+        return {"boards_in": top_in, "boards_out": top_out,
+                "net_in_boards": net_in, "net_out_boards": net_out,
+                "total_main_net": total_net, "north": north}
+    except Exception as e:
+        print("[money] 资金流向获取失败：%r" % e)
+        return None
+
+
 def run(date_override=None, dedup_close=False):
     t0 = time.time()
     con = store.connect()
@@ -219,6 +261,20 @@ def run(date_override=None, dedup_close=False):
     asum = auction.get("summary", {})
     log("  竞价：平均高开 %.2f%% · 一字板 %d · 弱转强 %d · 强转弱 %d"
         % (asum.get("avg_open_pct", 0), asum.get("yizi", 0), asum.get("weak_strong", 0), asum.get("strong_weak", 0)))
+
+    log("主力/北向资金流向 ...")
+    try:
+        money = compute_money_flow()
+        if money:
+            n = money.get("north")
+            log("  主力净流入板块 %d / 净流出 %d；全市场主力净流入约 %.1f 亿；北向=%s"
+                % (money["net_in_boards"], money["net_out_boards"], money["total_main_net"],
+                   ("沪%s/深%s/合计%s亿" % (n["sh"], n["sz"], n["total"])) if n else "数据源不可用"))
+        else:
+            log("  资金流向获取失败，跳过")
+    except Exception as e:
+        log("  资金流向异常（不影响主流程）：%r" % e)
+        money = None
 
     log("板块热力 ...")
     inds, cons = engine.sector_heat(lus, snap, u, date)
@@ -345,6 +401,20 @@ def run(date_override=None, dedup_close=False):
              "float_mv": r["float_mv"],
              "p_continue": next((x["p_continue"] for x in risks if x["code"] == r["code"]), None)})
 
+    # ---- 选股回测（基于历史真实推荐 + K线前向收益，零成本）----
+    try:
+        bt = engine.backtest(u, con)
+        if bt:
+            log("  回测：样本 %d，+1日胜率 %s%% / +3日 %s%% / +5日 %s%%"
+                % (bt["total"], (bt["h1"] or {}).get("win", "-"),
+                   (bt["h3"] or {}).get("win", "-"), (bt["h5"] or {}).get("win", "-")))
+        else:
+            log("  回测样本不足，跳过")
+            bt = None
+    except Exception as e:
+        log("  回测失败（不影响主流程）：%r" % e)
+        bt = None
+
     e_today = next((x for x in series if x["date"] == date), None) or {}
     idx = snap.get("index") or []
     data = {
@@ -387,6 +457,8 @@ def run(date_override=None, dedup_close=False):
         "news": load_news(),
         "micro": micro,
         "sector_trend_hist": sth,
+        "money": money,
+        "backtest": bt,
     }
 
     # ---- 历史连板库落库：先回填前一日推荐的真实结局，再记录当日状态 ----

@@ -588,8 +588,56 @@ def global_index_snapshot(retry=3):
             region, name = meta
             try:
                 price = float(f[3]) if f[3] not in ("", "--") else None
-                pct = float(f[5]) if f[5] not in ("", "--") else None
-            except ValueError:
+                if region == "港股":
+                    # 腾讯港股指数字段顺序与个股不同：f[3]=现价 f[4]=昨收 f[5]=开盘，
+                    # f[5] 不是涨跌幅，需用 (现价-昨收)/昨收 推算。
+                    prev = float(f[4]) if f[4] not in ("", "--") else None
+                    pct = round((price / prev - 1) * 100, 2) if (price and prev) else None
+                else:
+                    pct = float(f[5]) if f[5] not in ("", "--") else None
+            except (ValueError, ZeroDivisionError, TypeError):
+                price = pct = None
+            out.append({"region": region, "code": sym, "name": name,
+                        "price": price, "pct": pct, "chg": None})
+    except Exception:
+        pass
+    # 1.5) 港股指数 + 关键 ETF：腾讯源（与美股同源，解析一致）
+    HK_ETF_TENCENT = [
+        ("港股", "hkHSI", "恒生指数"),
+        ("港股", "hkHSTECH", "恒生科技"),
+        ("ETF", "sh510300", "沪深300ETF"),
+        ("ETF", "sz159915", "创业板ETF"),
+        ("ETF", "sh518880", "黄金ETF"),
+        ("ETF", "sh513100", "纳指ETF"),
+    ]
+    try:
+        raw = fetch_text("qt.gtimg.cn", "/q=" + ",".join(s for _, s, _ in HK_ETF_TENCENT),
+                         retry=retry, referer="https://gu.qq.com/")
+        for line in raw.strip().split("\n"):
+            if not line.strip() or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            val = val.strip().strip('"')
+            if not val:
+                continue
+            f = val.split("~")
+            if len(f) < 6:
+                continue
+            sym = key.replace("v_", "").strip()
+            meta = next(((rg, n) for rg, s, n in HK_ETF_TENCENT if s == sym), None)
+            if not meta:
+                continue
+            region, name = meta
+            try:
+                price = float(f[3]) if f[3] not in ("", "--") else None
+                if region == "港股":
+                    # 腾讯港股指数字段顺序与个股不同：f[3]=现价 f[4]=昨收 f[5]=开盘，
+                    # f[5] 不是涨跌幅，需用 (现价-昨收)/昨收 推算。
+                    prev = float(f[4]) if f[4] not in ("", "--") else None
+                    pct = round((price / prev - 1) * 100, 2) if (price and prev) else None
+                else:
+                    pct = float(f[5]) if f[5] not in ("", "--") else None
+            except (ValueError, ZeroDivisionError, TypeError):
                 price = pct = None
             out.append({"region": region, "code": sym, "name": name,
                         "price": price, "pct": pct, "chg": None})
