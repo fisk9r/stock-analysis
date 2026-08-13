@@ -258,6 +258,17 @@ def run(date_override=None, dedup_close=False):
     auction = engine.auction_profile(u, date, lus)
     ladder_hist = engine.ladder_history(u, date, 5)
     rotation = engine.sector_rotation(u, date, code2boards, 12, 5)
+    # 板块接力 / 主线切换：检测旧主线断板退潮 → 新方向接力（如 2026-03 电力→医药）
+    try:
+        relay = engine.sector_relay(u, date, code2boards, 60)
+        if relay.get("available"):
+            log("  板块接力：%s | 退潮%s | 接力【%s】" % (
+                relay["phase"],
+                relay["broken"]["name"] if relay.get("broken") else "无",
+                "、".join(x["name"] for x in relay.get("relay", []))))
+    except Exception as e:
+        log("  板块接力检测失败（不影响主流程）：%r" % e)
+        relay = {"available": False}
     asum = auction.get("summary", {})
     log("  竞价：平均高开 %.2f%% · 一字板 %d · 弱转强 %d · 强转弱 %d"
         % (asum.get("avg_open_pct", 0), asum.get("yizi", 0), asum.get("weak_strong", 0), asum.get("strong_weak", 0)))
@@ -339,7 +350,7 @@ def run(date_override=None, dedup_close=False):
     demons = engine.demon_scan(u, date, lus, tpls, sec_by_name)
 
     log("生成当日推荐 ...")
-    rec = engine.recommend(lus, risks, demons, inds, sent, cyc, stats, auction["items"], regime)
+    rec = engine.recommend(lus, risks, demons, inds, sent, cyc, stats, auction["items"], regime, relay)
 
     # 趋势向上选股（独立于连板体系，覆盖主升段趋势票）
     try:
@@ -447,6 +458,7 @@ def run(date_override=None, dedup_close=False):
         "auction": auction,
         "ladder_history": ladder_hist,
         "rotation": rotation,
+        "sector_relay": relay,
         "demons": demons[:40],
         "demon_templates": [{"code": t["code"], "name": t["name"], "start": t["start"],
                              "gain": t["gain"], "max_streak": t["max_streak"],

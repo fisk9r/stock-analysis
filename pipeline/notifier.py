@@ -798,6 +798,17 @@ def format_stock_summary(data, url="", mode="close"):
         L.append("**选股回测**（样本 %d）：次日胜率 %s%% / 持有3日 %s%% / 持有5日 %s%%（均收益 %s%% / %s%% / %s%%）"
                  % (bt["total"], h1.get("win", "-"), h3.get("win", "-"), h5.get("win", "-"),
                     h1.get("avg", "-"), h3.get("avg", "-"), h5.get("avg", "-")))
+    # 板块接力 / 主线切换（断板→接力）
+    rl = data.get("sector_relay") or {}
+    if rl.get("available"):
+        if rl.get("broken"):
+            b = rl["broken"]
+            rn = "、".join(x["name"] for x in rl.get("relay", []))
+            L.append("**板块接力**：【%s】断板退潮（峰值 %d→现 %d 只涨停），资金切向【%s】"
+                     % (b["name"], b["peak_zt"], b["latest_zt"], rn or "混沌轮动"))
+        elif rl.get("relay"):
+            rn = "、".join(x["name"] for x in rl.get("relay", []))
+            L.append("**板块接力**：无单一退潮主线，当前资金聚焦【%s】" % rn)
     L.append("")
     if narr.get("bullets"):
         L.append("### 复盘要点")

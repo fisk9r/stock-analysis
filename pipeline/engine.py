@@ -1345,6 +1345,124 @@ def sector_rotation(u, date, code2boards, topn=12, days=5):
     return out
 
 
+# ============================================================== 10.2 板块接力 / 主线切换检测
+def sector_relay(u, date, code2boards, days=60):
+    """检测『主版块断板 → 接力』规律：当一条曾领涨的主线板块涨停家数崩塌（退潮），
+    往往有另一条（或多条）板块从低位崛起承接资金——这是 A 股题材周期的核心切换信号。
+    例：2026-03 电力（华电辽能断板）退潮后，医药（创新药/减肥药）、锂电接力成新主线。
+    返回：退潮旧主线 broken、当前接力方向 relay[]、当前领涨 leader、所处阶段 phase/phase_desc。
+    依赖板块成分库（code2boards）；库为空时返回 available=False。"""
+    if not code2boards:
+        return {"available": False}
+    dates = [d for d in u.dates if d <= date][-days:]
+    if len(dates) < 10:
+        return {"available": False, "note": "交易日不足"}
+    idx = dates.index(date)
+    p7_i = max(0, idx - 7)
+
+    # 行业 -> 成分股集合
+    ind_codes = {}
+    for code, boards in code2boards.items():
+        for _bk, name, kind in boards:
+            if kind == "industry":
+                ind_codes.setdefault(name, set()).add(code)
+
+    # 逐日行业涨停家数矩阵
+    mat = []
+    for d in dates:
+        today = u.zt.get(d, set())
+        row = {ind: sum(1 for c in codes if c in today) for ind, codes in ind_codes.items()}
+        mat.append((d, row))
+
+    last_d, last_row = mat[-1]
+    p7_d, p7_row = mat[p7_i]
+
+    # 当前领涨（涨停家数第一）
+    leader_name, leader_zt = "", 0
+    for ind, c in last_row.items():
+        if c > leader_zt:
+            leader_zt, leader_name = c, ind
+
+    # 每行业序列
+    ser = {ind: [row.get(ind, 0) for _, row in mat] for ind in ind_codes}
+
+    # 退潮旧主线：窗口内曾是强主线（峰值≥5），且最新涨停家数崩塌（≤峰值*0.35 且 ≤2），
+    # 峰值发生在近 ~25 个交易日内（是近期主线，而非远古记忆）。
+    # 一条主线断板后，往往多条前主线同期退潮，故列出跌幅最大的若干条（最多 3 条）。
+    broken_list = []
+    for ind, s in ser.items():
+        peak = max(s); peak_i = s.index(peak)
+        latest = s[-1]
+        if peak < 5:
+            continue
+        if peak_i < len(s) - 25:
+            continue
+        if latest <= max(1, round(peak * 0.35)) and latest <= 2:
+            broken_list.append({
+                "name": ind, "peak_date": dates[peak_i], "peak_zt": peak,
+                "latest_zt": latest, "drop": peak - latest,
+                "drop_ratio": round(latest / peak, 2) if peak else 0,
+            })
+    broken_list.sort(key=lambda x: -x["drop"])
+    broken = broken_list[0] if broken_list else None
+
+    # 接力方向：低位崛起（7日前≤1 且今日≥3）或 加速（7日内净增≥2 且今日≥3），排除退潮主线本身
+    relay = []
+    for ind, s in ser.items():
+        if broken and ind == broken["name"]:
+            continue
+        latest = s[-1]
+        prev7 = p7_row.get(ind, 0)
+        if latest < 3:
+            continue
+        fresh = (prev7 <= 1)
+        rising = (latest - prev7) >= 2
+        if not (fresh or rising):
+            continue
+        relay.append({
+            "name": ind, "latest_zt": latest, "prev7_zt": prev7,
+            "delta": latest - prev7,
+            "kind": "新崛起" if fresh else "加速",
+        })
+    relay.sort(key=lambda x: (-x["latest_zt"], -x["delta"]))
+    relay = relay[:3]
+
+    # 当前领涨是否连续主导（阶段判定用）
+    leader_persist = False
+    if leader_name:
+        top_days = sum(1 for _, row in mat[-7:] if row.get(leader_name, 0) == max(row.values()))
+        leader_persist = top_days >= 4
+
+    if broken and relay:
+        phase = "旧主线断板→接力切换"
+        extra = "（另有%s退潮）" % ("、".join(b["name"] for b in broken_list[1:3])
+                                    if len(broken_list) > 1 else "") if len(broken_list) > 1 else ""
+        phase_desc = "【%s】退潮（峰值 %d→现 %d 只涨停）%s，资金切向接力方向【%s】" % (
+            broken["name"], broken["peak_zt"], broken["latest_zt"], extra,
+            "、".join(r["name"] for r in relay))
+    elif broken and not relay:
+        phase = "主线退潮·混沌轮动"
+        phase_desc = "【%s】退潮（峰值 %d→现 %d 只涨停），暂无明显接力方向，多线快速轮动" % (
+            broken["name"], broken["peak_zt"], broken["latest_zt"])
+    elif leader_persist:
+        phase = "主线延续"
+        phase_desc = "【%s】仍为绝对主线（近 7 日 %d 天领涨），资金抱团未松动" % (leader_name, top_days)
+    else:
+        phase = "多线并行"
+        phase_desc = "无单一退潮主线，【%s】等方向并行轮动" % leader_name
+
+    return {
+        "available": True,
+        "date": date,
+        "broken": broken,
+        "broken_list": broken_list[:3],
+        "relay": relay,
+        "leader": {"name": leader_name, "zt": leader_zt} if leader_name else None,
+        "phase": phase, "phase_desc": phase_desc,
+        "window_days": days,
+    }
+
+
 # ============================================================== 10.5 外围市场定调（美股 / 日股 / 韩股）
 def global_market(indices):
     """根据外围主要指数最新收盘，给出对 A 股次日的定调信号。
@@ -1548,11 +1666,12 @@ def compute_regime(hist_rows, picks_rows, bars_series=None):
             "src": src, "declines": declines}
 
 
-def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=None, hist=None):
+def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=None, hist=None, relay_info=None):
     rmap = {r["code"]: r for r in risks}
     dmap = {d["code"]: d for d in demons}
     smap = {s["name"]: s for s in sectors}
     env_k = clamp((sent["score"] - 25) / 55.0, 0.25, 1.15)
+    relay_secs = {x["name"] for x in (relay_info or {}).get("relay", [])}
     items = []
     for r in limit_ups:
         rk = rmap.get(r["code"]) or {}
@@ -1573,6 +1692,11 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
         # 是否值得购入分值（0-100，越高越值得）：综合续板概率/质量/板块/妖股，扣减历史风险
         worth = clamp(0.46 * pc_adj + 0.20 * r["quality"] + 0.16 * sec.get("strength", 30)
                       + 0.18 * (dm.get("score") or 30) - hf * 55, 0, 100)
+        relay_dir = r["industry"] in relay_secs
+        if relay_dir:
+            # 接力方向：旧主线退潮后资金切入的新抱团，给与加权并打标
+            worth = clamp(worth + 7, 0, 100)
+            score = clamp(score + 4, 0, 100)
         items.append({
             "code": r["code"], "name": r["name"], "streak": r["streak"],
             "industry": r["industry"], "concepts": r["concepts"][:3],
@@ -1580,7 +1704,7 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
             "quality": r["quality"], "p_continue": round(pc_adj, 1),
             "p_break": round(pb_adj, 1), "risk": rk.get("risk"),
             "demon": dm.get("score"), "sector_strength": sec.get("strength"),
-            "sector_tier": sec.get("tier"), "score": round(score, 1),
+            "sector_tier": sec.get("tier"), "relay_dir": relay_dir, "score": round(score, 1),
             "worth_score": round(worth, 1), "hist_factor": round(hf, 3),
             "similar": dm.get("similar", [])[:1],
             "yizi": r["yizi"], "seal_time": r.get("seal_time"), "zb_count": r.get("zb_count"),
@@ -1602,6 +1726,8 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
             rs.append("所属【%s】为当日主线板块（强度 %.0f）" % (it["industry"], it["sector_strength"] or 0))
         elif it["sector_tier"] == "支线":
             rs.append("【%s】板块有合力（强度 %.0f）" % (it["industry"], it["sector_strength"] or 0))
+        if it.get("relay_dir"):
+            rs.append("所属【%s】为当前接力方向（旧主线退潮后的新抱团），资金正切入" % it["industry"])
         if it["quality"] >= 70:
             rs.append("封板质量 %.0f 分，封板结构扎实" % it["quality"])
         if it["yizi"]:
@@ -1708,6 +1834,12 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
     top_secs = [s for s in sectors if s["tier"] in ("主线", "支线")][:4]
     if top_secs:
         strategies.append("重点跟踪板块：" + "、".join("%s(%d涨停)" % (s["name"], s["zt"]) for s in top_secs))
+    if relay_info and relay_info.get("phase") == "旧主线断板→接力切换":
+        b = relay_info.get("broken")
+        rn = "、".join(x["name"] for x in relay_info.get("relay", []))
+        if b:
+            strategies.append("旧主线【%s】断板退潮，跟随接力方向【%s】的前排，回避退潮主线后排跟风"
+                              % (b["name"], rn))
     hi = [r for r in risks if r["streak"] >= 4]
     if hi:
         strategies.append("空间板 %s 是市场高度标杆，其走势决定次日整体接力意愿"

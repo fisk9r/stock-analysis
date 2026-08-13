@@ -178,6 +178,12 @@
     return '';
   }
 
+  /* 接力方向打标：个股所属板块正处于“旧主线退潮后的新抱团”接力方向 */
+  function relayBadge(it) {
+    if (it && it.relay_dir) return '<span class="bd" style="border-color:' + C.up + ';color:' + C.up + ';font-size:11px;padding:0 5px;margin-left:4px">🔗接力方向</span>';
+    return '';
+  }
+
   function qualityCard() {
     var q = D.data_quality;
     if (!q) return '';
@@ -804,6 +810,25 @@
         '持续主线=近 ' + nd + ' 日有 ≥2 只涨停的天数 ≥3；新题材=此前无涨停、今日首次爆发。决定题材的容错与仓位。</div>',
         '判断主线是升温接力 / 降温兑现 / 一日游');
     }
+
+    /* 板块接力 · 主线切换（断板→接力检测） */
+    var RL = D.sector_relay;
+    if (RL && RL.available) {
+      var phColor = RL.phase.indexOf('接力切换') >= 0 ? C.up : (RL.phase.indexOf('退潮') >= 0 ? C.down : C.gold);
+      var brk = (RL.broken_list || []).map(function (b) {
+        return '<span class="bd danger" title="峰值 ' + b.peak_zt + ' 只@' + b.peak_date + ' → 现 ' + b.latest_zt + ' 只涨停">' + E(b.name) + ' 退潮</span>';
+      }).join(' ');
+      var rly = (RL.relay || []).map(function (x) {
+        var kc = x.kind === '新崛起' ? C.up : C.gold;
+        return '<div class="kv" style="margin:5px 0"><span class="bd" style="border-color:' + kc + ';color:' + kc + ';font-size:11px;padding:0 6px">' + E(x.kind) + '</span> <b>' + E(x.name) + '</b> · 今日 ' + x.latest_zt + ' 只涨停（7日前 ' + x.prev7_zt + '，+' + x.delta + '）</div>';
+      }).join('');
+      var rlBody = '<div style="margin-bottom:8px"><span class="bd" style="background:' + phColor + '22;color:' + phColor + ';border-color:' + phColor + '">' + E(RL.phase) + '</span></div>' +
+        (brk ? '<div style="margin:6px 0"><b style="color:var(--muted)">退潮旧主线：</b>' + brk + '</div>' : '') +
+        (rly ? '<div style="margin:6px 0"><b style="color:var(--muted)">接力方向：</b>' + rly + '</div>' : '<div class="note">暂无明确接力方向，市场处于混沌轮动</div>') +
+        (RL.leader ? '<div class="note" style="margin-top:8px">当前领涨板块：<b>' + E(RL.leader.name) + '</b>（' + RL.leader.zt + ' 只涨停）</div>' : '');
+      h += card('🔗 板块接力 · 主线切换（近 ' + RL.window_days + ' 日）', rlBody,
+        '旧主线涨停家数崩塌（断板退潮）后，往往有另一条板块从低位崛起承接——经典“断板→接力”规律（例：2026-03 电力断板后医药接力）');
+    }
     return h;
   }
 
@@ -1003,7 +1028,7 @@
             + '</div>';
         return '<div class="rec ' + cls + '"><div class="rh">' +
           '<span class="nm">' + stk(it.code, it.name) + '</span><span class="code faint">' + E(it.code) + '</span>' +
-          lbBadge(it.streak) + tierBadge(it.sector_tier) + mlBadge(it) + vaBadge + hcBadge +
+          lbBadge(it.streak) + tierBadge(it.sector_tier) + mlBadge(it) + relayBadge(it) + vaBadge + hcBadge +
           '<span class="sc" style="color:' + scol + '">' + f(it.score, 1) + '</span></div>' +
           '<div class="rb">' + kvHtml +
           '<ul>' + (it.reasons || []).map(function (r) { return '<li>' + E(r) + '</li>'; }).join('') + '</ul>' +
@@ -1068,7 +1093,7 @@
     var rows = (R.all || []).map(function (it, i) {
       var wcol = it.worth_score >= 60 ? C.up : it.worth_score >= 45 ? C.gold : C.gray;
       return '<tr><td class="faint">' + (i + 1) + '</td><td class="code">' + E(it.code) + '</td>' +
-        '<td class="name">' + stk(it.code, it.name) + qBadge(it) + mlBadge(it) + '</td><td class="c">' + lbBadge(it.streak) + '</td>' +
+        '<td class="name">' + stk(it.code, it.name) + qBadge(it) + mlBadge(it) + relayBadge(it) + '</td><td class="c">' + lbBadge(it.streak) + '</td>' +
         '<td class="muted">' + E(it.industry || '—') + '</td><td class="c">' + tierBadge(it.sector_tier) + '</td>' +
         '<td class="r num">' + f(it.quality, 0) + '</td><td class="r num">' + f(it.p_continue, 0) + '%</td>' +
         '<td class="r num">' + f(it.demon, 0) + '</td>' +
