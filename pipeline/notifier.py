@@ -497,10 +497,14 @@ def push(summary, dry_run=False, mode="close"):
         ("email", send_email, cfg.get("email")),
     ]
     if mode == "anomaly":
-        # 盘中异动只走 PushPlus（200 条/天，几乎不限），不占 ServerChan 的 5 条/天免费额度。
+        # 盘中异动优先 PushPlus（200 条/天，几乎不限），不占 ServerChan 的 5 条/天免费额度。
         # 「盘中收不到」的根因是 GitHub 定时会跳过盘中 cron，已用 watchdog.yml 兜底触发解决，
         # 而非改通道——否则 5 条/天的 ServerChan 额度会被盘中 5 次推送耗尽，反而挤掉盘前/收盘。
-        _prefer = ["wechat_pushplus", "wecom", "telegram", "email"]
+        # 但实战中发现：anomaly 若「只挂 PushPlus 一条通道」，PushPlus 偶发失败或微信折叠时，
+        # 盘中通知会彻底静默（用户感知=「又没了」）。故加 ServerChan 作兜底通道：
+        # 正常情况下仍是 PushPlus 扛（不耗 ServerChan 额度），仅当 PushPlus 失败才降级到
+        # ServerChan 保送达——把单点失败风险降到最低，又不常态挤占关键节点额度。
+        _prefer = ["wechat_pushplus", "wechat_serverchan", "wecom", "telegram", "email"]
     else:
         _prefer = ["wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"]
     dispatchers = [(n, fn, c) for (n, fn, c) in _all if n in _prefer and c]
