@@ -497,14 +497,19 @@ def push(summary, dry_run=False, mode="close"):
         ("email", send_email, cfg.get("email")),
     ]
     if mode == "anomaly":
-        # 盘中异动优先 PushPlus（200 条/天，几乎不限），不占 ServerChan 的 5 条/天免费额度。
-        # 「盘中收不到」的根因是 GitHub 定时会跳过盘中 cron，已用 watchdog.yml 兜底触发解决，
-        # 而非改通道——否则 5 条/天的 ServerChan 额度会被盘中 5 次推送耗尽，反而挤掉盘前/收盘。
-        # 但实战中发现：anomaly 若「只挂 PushPlus 一条通道」，PushPlus 偶发失败或微信折叠时，
-        # 盘中通知会彻底静默（用户感知=「又没了」）。故加 ServerChan 作兜底通道：
-        # 正常情况下仍是 PushPlus 扛（不耗 ServerChan 额度），仅当 PushPlus 失败才降级到
-        # ServerChan 保送达——把单点失败风险降到最低，又不常态挤占关键节点额度。
-        _prefer = ["wechat_pushplus", "wechat_serverchan", "wecom", "telegram", "email"]
+        # 盘中异动改为 ServerChan 首选（与盘前/收盘同一可靠通道），PushPlus 仅作冗余/兜底。
+        # 根因：用户盘前/收盘都能稳定收到 ServerChan，但盘中异动（原只走 PushPlus）经常收不到——
+        # 极可能是 PushPlus「返回成功却未真正触达微信」（绑定过期/服务通知折叠）。此时旧逻辑的
+        # “PushPlus 硬失败才降级 ServerChan”永不触发，盘中通知彻底静默（用户感知=「又没了」）。
+        # 翻转为 ServerChan 首选后：只要当日 ServerChan 额度(单 key 5条/天)未耗尽，盘中异动必走
+        # 可靠通道；额度被盘前+收盘+前几笔异动占满后，再降级 PushPlus 承载溢出，避免彻底失联。
+        # 注意 push() 会向 _prefer 中所有已配置通道各发一次，故 anomaly 同时占用 ServerChan 与
+        # PushPlus——ServerChan 保证「可靠触达」，PushPlus 作冗余/溢出，最大化“用户真收到”的概率。
+        _prefer = ["wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"]
+    elif mode == "auction":
+        # 竞价提醒次要，主动让出 ServerChan 额度给盘中异动：优先 PushPlus，不占用 ServerChan。
+        # （仅当 PushPlus 未配置时，_all 里没有 wechat_pushplus，循环自然落到 ServerChan 兜底，不丢）
+        _prefer = ["wechat_pushplus", "wecom", "telegram", "email"]
     else:
         _prefer = ["wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"]
     dispatchers = [(n, fn, c) for (n, fn, c) in _all if n in _prefer and c]
@@ -533,10 +538,16 @@ def push(summary, dry_run=False, mode="close"):
                      for r in results)
     if delivered:
         try:
+            # 记录实际成功送达的通道（不含“失败”项），便于事后核查某条推送到底走了哪个通道，
+            # 例如定位“盘中异动收不到”究竟是 PushPlus 静默还是 ServerChan 兜底生效。
+            _ch = [r.split(":", 1)[0] for r in results
+                   if r.startswith(("wechat_serverchan", "wechat_pushplus", "wecom",
+                                    "telegram", "email")) and "失败" not in r]
             logp = os.path.join(DIST, "push_log.jsonl")
             with open(logp, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps({"ts": _ts, "mode": mode, "title": title,
-                                     "text": text}, ensure_ascii=False) + "\n")
+                                     "text": text, "channels": _ch},
+                                    ensure_ascii=False) + "\n")
         except Exception as e:
             print("[notifier] 去重账本写入失败（不影响已送达）：%r" % e)
         _rotate_push_log()
