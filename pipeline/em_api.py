@@ -465,8 +465,55 @@ def _pool(name, sort="fbt%3Aasc", date=None):
     return out
 
 
+def _pct_limit_up(code, pct):
+    """粗略涨停判定（仅用于 push2ex 不可达时的兜底推导）。
+    北交所 30% / 科创·创业板 20% / 主板·ST 10%（取 9.8 阈值，ST 5% 会漏但兜底可接受）。"""
+    c0 = code[0] if code else "0"
+    if code.startswith("688") or c0 in ("3", "8"):
+        return pct >= 19.8
+    if c0 == "4":
+        return pct >= 29.8
+    return pct >= 9.8
+
+
+def _pct_limit_down(code, pct):
+    """粗略跌停判定（兜底推导用，阈值同 _pct_limit_up 取反）。"""
+    c0 = code[0] if code else "0"
+    if code.startswith("688") or c0 in ("3", "8"):
+        return pct <= -19.8
+    if c0 == "4":
+        return pct <= -29.8
+    return pct <= -9.8
+
+
+def _pool_derived(limit_fn, pages=5):
+    """push2ex 不可达时的兜底：从全市场涨幅榜(clist 走 push2→push2delay 降级，境外可用)
+    按涨幅降序取前 N 页，挑选触及涨停/跌停的标的。元数据(连板/封板时间/炸板)缺失，仅降级呈现。"""
+    try:
+        rows, _ = clist_paged("m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
+                              "f12,f14,f3,f100", max_pages=pages)
+    except Exception:
+        return []
+    out = []
+    for r in rows:
+        code = str(r.get("f12") or "")
+        pct = _num(r, "f3")
+        if not code or pct is None or not limit_fn(code, pct):
+            continue
+        out.append({"c": code, "n": r.get("f14") or "",
+                    "lbc": 1, "fbt": "", "zbc": 0,
+                    "hybk": (r.get("f100") or "—"),
+                    "derived": True, "pct": pct})
+    return out
+
+
 def zt_pool(date=None):
-    return _pool("getTopicZTPool", "fbt%3Aasc", date)
+    rows = _pool("getTopicZTPool", "fbt%3Aasc", date)
+    if rows:
+        return rows
+    # push2ex 不可达（境外 CI 偶发 RST）→ 用涨幅榜推导兜底，
+    # 保证盘中异动与每日复盘的涨停数据不空（降级呈现，缺连板/封板时间）。
+    return _pool_derived(_pct_limit_up)
 
 
 def zb_pool(date=None):
@@ -478,7 +525,11 @@ def qs_pool(date=None):
 
 
 def dt_pool(date=None):
-    return _pool("getTopicDTPool", "fund%3Aasc", date)
+    rows = _pool("getTopicDTPool", "fund%3Aasc", date)
+    if rows:
+        return rows
+    # 跌停池同理兜底（恐慌检测依赖跌停家数）
+    return _pool_derived(_pct_limit_down)
 
 
 # ---------------------------------------------------------------- 板块

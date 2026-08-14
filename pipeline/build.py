@@ -795,6 +795,16 @@ def _anomaly_focused(s, new_codes, url):
             main_s = ("主力净流入 %.1f亿" % (main / 1e8)) if abs(main) >= 1e7 else "主力净流出 %.1f亿" % (abs(main) / 1e8)
             L.append("- **%s**(/%s) +%.2f%% ｜ 换手%.1f%% ｜ %s" % (name, code, pct, hs, main_s))
         L.append("")
+    # 题材联动：本轮新增涨停按行业聚合，≥3 只同板块即视为题材爆发
+    from collections import Counter
+    sec = Counter((it.get("hybk") or "—") for it in n_zt
+                  if it.get("hybk") and it.get("hybk") != "—")
+    hot = [b for b, c in sec.most_common() if c >= 3]
+    if hot:
+        L.append("")
+        L.append("### 🔥 题材联动（本轮新增涨停）")
+        for b in hot:
+            L.append("- %s：%d 只涨停" % (b, sec[b]))
     zt_all = s.get("zt") or []
     mv_all = s.get("movers") or []
     L.append("### 📊 当前盘面")
@@ -913,7 +923,7 @@ def _live_anomaly_summary(url):
     mv = []
     try:
         mv, _ = em_api.clist_paged("m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
-                                   "f12,f14,f2,f3,f62,f184", max_pages=2)
+                                   "f12,f14,f2,f3,f62,f184", max_pages=3)
     except Exception as e:
         L.append("> 涨幅榜实时拉取暂不可用：%s" % str(e)[:40])
     movers = [m for m in (mv or []) if 6 <= (m.get("f3") or 0) < 9.8]
