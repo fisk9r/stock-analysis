@@ -439,6 +439,31 @@ def _anomaly_recently_pushed(cooldown_min=12):
     return False
 
 
+def reported_anomaly_codes_today():
+    """返回今天（北京时间）已推送过的盘中异动标的代码集合，用于内容去重：
+    同一标的当天只首次提示，避免 15 分钟巡查把已报过的票反复刷屏。"""
+    try:
+        logp = os.path.join(DIST, "push_log.jsonl")
+        if not os.path.exists(logp):
+            return set()
+        today = _bj_now().strftime("%Y-%m-%d")
+        out = set()
+        with open(logp, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    p = json.loads(line)
+                except Exception:
+                    continue
+                if p.get("mode") != "anomaly":
+                    continue
+                if str(p.get("ts", "")).startswith(today):
+                    for c in (p.get("codes") or []):
+                        out.add(str(c))
+        return out
+    except Exception:
+        return set()
+
+
 def _recently_pushed(mode, cooldown_min):
     """通用冷却去重：最近 N 分钟内已推送过指定 mode 则跳过（用于 panic 等日内多次推送）。"""
     try:
@@ -468,7 +493,7 @@ def _recently_pushed(mode, cooldown_min):
     return False
 
 
-def push(summary, dry_run=False, mode="close"):
+def push(summary, dry_run=False, mode="close", codes=None):
     """summary: {"title": str, "text": str}。返回已送达通道列表。
     mode 取值与去重（同一 mode 当天只发一次）对应：
       - "preauction"  盘前预判（08:50）
@@ -604,7 +629,8 @@ def push(summary, dry_run=False, mode="close"):
             logp = os.path.join(DIST, "push_log.jsonl")
             with open(logp, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps({"ts": _ts, "mode": mode, "title": title,
-                                     "text": text, "channels": _ch},
+                                     "text": text, "channels": _ch,
+                                     "codes": list(codes) if codes else []},
                                     ensure_ascii=False) + "\n")
         except Exception as e:
             print("[notifier] 去重账本写入失败（不影响已送达）：%r" % e)

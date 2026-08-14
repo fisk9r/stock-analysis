@@ -40,14 +40,24 @@ API = "https://api.cron-job.org/jobs"
 
 def cron_to_schedule(cron):
     """'M H DOM MON DOW' → cron-job.org 的 schedule 数组结构。
-    -1 表示『所有/每』；wdays 0=周日..6=周六（与标准 cron 一致）。"""
+    -1 表示『所有/每』；wdays 0=周日..6=周六（与标准 cron 一致）。
+    支持 step 语法：*/N（每 N 单位）、a-b/N（区间每 N 步）。"""
     p = cron.split()
+    # 各字段合法取值上限（cron-job.org schedule 数组上限）
+    limits = {"minutes": 59, "hours": 23, "mdays": 31, "months": 12, "wdays": 6}
 
-    def field(f):
+    def field(f, name):
         if f == "*":
             return [-1]
+        # step：*/N 或 a-b/N
+        if f.startswith("*/"):
+            n = int(f[2:])
+            return list(range(0, limits[name] + 1, n))
         if "-" in f:
             a, b = f.split("-")
+            if "/" in b:  # a-b/N
+                b, step = b.split("/")
+                return list(range(int(a), int(b) + 1, int(step)))
             return list(range(int(a), int(b) + 1))
         if "," in f:
             return [int(x) for x in f.split(",")]
@@ -56,11 +66,11 @@ def cron_to_schedule(cron):
     return {
         "timezone": "Asia/Shanghai",
         "expiresAt": 0,
-        "minutes": field(p[0]),
-        "hours": field(p[1]),
-        "mdays": field(p[2]),
-        "months": field(p[3]),
-        "wdays": field(p[4]),
+        "minutes": field(p[0], "minutes"),
+        "hours": field(p[1], "hours"),
+        "mdays": field(p[2], "mdays"),
+        "months": field(p[3], "months"),
+        "wdays": field(p[4], "wdays"),
     }
 
 
@@ -127,15 +137,17 @@ def main():
         data = json.dumps(body).encode("utf-8")
         eid = existing.get(job["title"])
         if eid:
-            url, action = "%s/%s" % (API, eid), "更新"
-        else:
-            url, action = API, "创建"
-        # ⚠ 创建/更新都用 PUT（不是 POST）
-        st, resp = _api(key, url, data, method="PUT")
-        new_id = resp.get("jobId") or eid
+            # ⚠ cron-job.org 不支持 PUT /jobs/{id} 原地更新（实测返回 404），
+            # 故采用「先删旧 + 再建新」保证脚本可重复运行而不累积重复任务。
+            d_st, _ = _api(key, "%s/%s" % (API, eid), method="DELETE")
+            if d_st != 200:
+                print("⚠️ 旧任务删除未成功(HTTP %s)，仍尝试新建：%s" % (d_st, job["title"]))
+        # ⚠ 创建用 PUT（POST 会 404），统一走创建端点
+        st, resp = _api(key, API, data, method="PUT")
+        new_id = resp.get("jobId")
         if st in (200, 201) and new_id:
-            print("✅ 已%s: %s  (cron=%s, task=%s, jobId=%s)"
-                  % (action, job["title"], job["cron"], job["task"], new_id))
+            print("✅ 已注册/更新: %s  (cron=%s, task=%s, jobId=%s)"
+                  % (job["title"], job["cron"], job["task"], new_id))
             ok += 1
         else:
             print("❌ 失败: %s  HTTP %s  %s" % (job["title"], st, str(resp)[:200]))

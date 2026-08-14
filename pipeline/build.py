@@ -727,9 +727,9 @@ def push_auction():
 
 
 def push_anomaly():
-    """盘中异动捕捉：优先用东方财富实时行情生成『异动提醒』（随时捕捉），
-    失败则回退到最近一次已分析数据。归档走 ServerChan（与盘前/收盘同一可靠通道），
-    PushPlus 仅作冗余/溢出兜底（ServerChan 单 key 5 条/天额度用尽后自动降级）。
+    """盘中异动：外部定时器每 15 分钟巡查一次，但只在新标的『首次出现』时推送，
+    已报过的票当天不再重复刷屏（内容去重，依据 push_log 中记录的 codes）。
+    实时抓取失败时绝不回退昨日 data.js（那会被误读为"迟到信息"），直接跳过。
 
     ⚠ 交易时段闸：仅在北京时间 09:15–15:00（且为交易日）才真正推送；其余时段
     （凌晨 / 休市）即使被外部定时器或看门狗误点火，也直接跳过，绝不发出『盘中异动』
@@ -741,12 +741,72 @@ def push_anomaly():
     # 1) 实时异动（最优）：盘中随时捕捉涨停/急拉/板块异动
     try:
         s = _live_anomaly_summary(_deploy_url())
-        if s and s.get("text"):
-            return notifier.push(s, mode="anomaly")
     except Exception as e:
-        print("[anomaly] 实时异动抓取失败，回退已分析数据：%r" % e)
-    # 2) 回退：最近一次已分析数据中的竞价量能异动 / 高位断板风险
-    return _push_with_store("anomaly")
+        # 实时抓取失败：绝不回退到昨日 data.js（会被误读为"迟到信息"），直接跳过
+        print("[anomaly] 实时异动抓取失败，跳过（不回退旧快照）：%r" % e)
+        return ["skipped:live-fetch-failed"]
+    if not (s and s.get("text")):
+        return ["skipped:empty"]
+    if not s.get("has_signal"):
+        print("[anomaly] 实时无显著异动（涨停池/涨幅榜均空），跳过空推送")
+        return ["skipped:no-signal"]
+    # 2) 内容去重：只推送"今天尚未报过"的新标的，已报过的当天不再重复刷屏
+    reported = notifier.reported_anomaly_codes_today()
+    new_codes = [c for c in s.get("codes", []) if c and c not in reported]
+    if not new_codes:
+        print("[anomaly] 本轮异动标的均为已报过的票，跳过（避免重复刷屏）")
+        return ["skipped:no-new"]
+    return notifier.push(_anomaly_focused(s, new_codes, _deploy_url()),
+                         mode="anomaly", codes=new_codes)
+
+
+def _anomaly_focused(s, new_codes, url):
+    """把本轮『新增』异动标的提炼成一条聚焦消息（已报过的不重复列出）。"""
+    now = time.strftime("%Y-%m-%d %H:%M")
+    newset = set(new_codes)
+    n_zt = [it for it in (s.get("zt") or []) if str(it.get("c")) in newset]
+    n_mv = [m for m in (s.get("movers") or []) if str(m.get("f12")) in newset]
+    L = []
+    L.append("## 🆕 A股盘中新增异动 · %s（%d 只）" % (now, len(new_codes)))
+    L.append("")
+    L.append("> 实时行情来自东方财富公开接口；以下为本次巡查**新出现**的异动标的（已报过的不重复）。")
+    L.append("")
+    if n_zt:
+        L.append("### 🔥 新封板（%d）" % len(n_zt))
+        for it in n_zt[:15]:
+            name = it.get("n", "?"); code = it.get("c", "")
+            lbc = it.get("lbc") or 1
+            hy = it.get("hybk") or "—"
+            fbt = str(it.get("fbt") or "")
+            fbt = ("000000" + fbt)[-6:] if fbt.isdigit() else ""
+            fbt_s = (fbt[:2] + ":" + fbt[2:4]) if fbt else "—"
+            zbc = it.get("zbc") or 0
+            tag = ("%d板" % lbc) if lbc and lbc > 1 else "首板"
+            warn = " ⚠炸板%d次" % zbc if zbc else ""
+            L.append("- **%s**(/%s) %s · %s · 封板%s%s" % (name, code, tag, hy, fbt_s, warn))
+        L.append("")
+    if n_mv:
+        L.append("### ⚡ 新急拉/强势（%d）" % len(n_mv))
+        for m in n_mv[:12]:
+            name = m.get("f14", "?"); code = m.get("f12", "")
+            pct = m.get("f3") or 0
+            main = m.get("f62") or 0
+            hs = m.get("f184") or 0
+            main_s = ("主力净流入 %.1f亿" % (main / 1e8)) if abs(main) >= 1e7 else "主力净流出 %.1f亿" % (abs(main) / 1e8)
+            L.append("- **%s**(/%s) +%.2f%% ｜ 换手%.1f%% ｜ %s" % (name, code, pct, hs, main_s))
+        L.append("")
+    zt_all = s.get("zt") or []
+    mv_all = s.get("movers") or []
+    L.append("### 📊 当前盘面")
+    L.append("- 涨停池：**%d 只**（本轮新增 %d）" % (len(zt_all), len(n_zt)))
+    L.append("- 涨幅异动(≥6%%)：**%d 只**（本轮新增 %d）" % (len(mv_all), len(n_mv)))
+    trig, md = _crash_section()
+    if trig:
+        L.append(""); L.append(md)
+    if url:
+        L.append("---"); L.append("完整数据看板：%s" % url)
+    return {"title": "A股盘中新增异动 %s（%d只）" % (now, len(new_codes)),
+            "text": "\n".join(L)}
 
 
 def push_open_anomaly():
@@ -856,7 +916,7 @@ def _live_anomaly_summary(url):
                                    "f12,f14,f2,f3,f62,f184", max_pages=2)
     except Exception as e:
         L.append("> 涨幅榜实时拉取暂不可用：%s" % str(e)[:40])
-    movers = [m for m in (mv or []) if (m.get("f3") or 0) < 9.8 and (m.get("f3") or 0) > 0]
+    movers = [m for m in (mv or []) if 6 <= (m.get("f3") or 0) < 9.8]
     movers.sort(key=lambda x: -(x.get("f3") or 0))
     L.append("### ⚡ 涨幅异动（急拉 / 强势，前 12）")
     if movers:
@@ -879,7 +939,11 @@ def _live_anomaly_summary(url):
     if url:
         L.append("---")
         L.append("完整数据看板：%s" % url)
-    return {"title": "A股盘中异动提醒 %s" % now, "text": "\n".join(L)}
+    return {"title": "A股盘中异动提醒 %s" % now, "text": "\n".join(L),
+            "zt": zt_sorted, "movers": movers,
+            "codes": [str(it.get("c")) for it in zt_sorted]
+                      + [str(m.get("f12")) for m in movers],
+            "has_signal": bool(zt_sorted) or bool(movers)}
 
 
 def _deploy_url():
