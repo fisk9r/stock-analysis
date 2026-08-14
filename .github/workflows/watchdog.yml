@@ -41,7 +41,7 @@ on:
         required: false
         default: ''
         type: choice
-        options: ['', preauction, auction, anomaly, build, close_again, weekend]
+        options: ['', preauction, auction, open_anomaly, anomaly, build, close_again, weekend]
 
 permissions:
   actions: write   # 用于代为触发 stock.yml 的 workflow_dispatch
@@ -124,6 +124,10 @@ jobs:
           # 盘中异动（10:30~15:30 各检查点；15:40 后交给收盘窗口，避免串窗）
           if [ "$BHM" -ge 1000 ] && [ "$BHM" -le 1540 ]; then
             fire_if_missing anomaly
+          fi
+          # 竞价后开盘前异动（09:26~10:00 兜底，避免早于竞价 09:25 推送；与主 09:26 错峰）
+          if [ "$BHM" -ge 926 ] && [ "$BHM" -le 1000 ]; then
+            fire_if_missing open_anomaly
           fi
           # 收盘完整分析（15:52、16:00、16:30 兜底）→ mode=close，派发 task=build
           if [ "$BHM" -ge 1550 ] && [ "$BHM" -le 1759 ]; then

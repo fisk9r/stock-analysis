@@ -10,6 +10,7 @@
   "jobs": [
     { "title": "stock-preauction",   "cron": "45 8 * * 1-5",  "task": "preauction" },
     { "title": "stock-auction",      "cron": "20 9 * * 1-5",  "task": "auction" },
+    { "title": "stock-open-anomaly", "cron": "26 9 * * 1-5",  "task": "open_anomaly" },
     { "title": "stock-anomaly-0950", "cron": "50 9 * * 1-5",  "task": "anomaly" },
     { "title": "stock-anomaly-1007", "cron": "7 10 * * 1-5",  "task": "anomaly" },
     { "title": "stock-anomaly-1107", "cron": "7 11 * * 1-5",  "task": "anomaly" },

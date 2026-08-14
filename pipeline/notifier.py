@@ -382,7 +382,7 @@ def send_email(cfg, title, text):
 # 外部定时器）时由本去重保证不重复轰炸。盘中异动(anomaly)刻意多次推送，不在此列。
 # close 与 close_again 必须分开：15:20 收盘用 "close"，20:00 复盘用 "close_again"。
 # 若共用 "close"，复盘会被 once-per-day 当成“今日已推送”直接吞掉（已复现：run 58 复盘静默）。
-_ONCE_PER_DAY = {"preauction", "auction", "close", "close_again", "weekend"}
+_ONCE_PER_DAY = {"preauction", "auction", "open_anomaly", "close", "close_again", "weekend"}
 
 
 def _already_pushed_today(mode):
@@ -439,6 +439,35 @@ def _anomaly_recently_pushed(cooldown_min=12):
     return False
 
 
+def _recently_pushed(mode, cooldown_min):
+    """通用冷却去重：最近 N 分钟内已推送过指定 mode 则跳过（用于 panic 等日内多次推送）。"""
+    try:
+        logp = os.path.join(DIST, "push_log.jsonl")
+        if not os.path.exists(logp):
+            return False
+        now = _bj_now()
+        with open(logp, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    p = json.loads(line)
+                except Exception:
+                    continue
+                if p.get("mode") != mode:
+                    continue
+                ts = p.get("ts")
+                if not ts:
+                    continue
+                try:
+                    dt = datetime.datetime.strptime(str(ts), "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    continue
+                if (now - dt).total_seconds() < cooldown_min * 60:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def push(summary, dry_run=False, mode="close"):
     """summary: {"title": str, "text": str}。返回已送达通道列表。
     mode 取值与去重（同一 mode 当天只发一次）对应：
@@ -448,6 +477,8 @@ def push(summary, dry_run=False, mode="close"):
       - "close_again" 复盘补发（20:00，与 close 独立，不可共用否则被去重吞掉）
       - "weekend"     周末发酵/周一前瞻（周日/周一）
       - "anomaly"     盘中异动（随时，走 PushPlus 冷却去重，不占 ServerChan 额度）
+      - "open_anomaly" 竞价后开盘前异动（09:26，ServerChan 固定四条之一 + PushPlus 冗余兜底）
+      - "panic"       盘中恐慌/崩盘预警（突发快速下杀，走 PushPlus 随时推送，不占 ServerChan 额度）
     无论是否配置通道，都会把推送内容落地为可见文件（last_push_<mode>.md），避免『啥都看不到』。
     注意：去重账本 push_log.jsonl 仅在『至少一条通道真实送达』后才写，失败不污染去重。"""
     # 非交易日拦截：cron 写的是「周一至周五」，法定节假日（春节/国庆等）照样点火。
@@ -479,6 +510,14 @@ def push(summary, dry_run=False, mode="close"):
     if not dry_run and mode == "anomaly" and _anomaly_recently_pushed(12):
         print("[notifier][anomaly] 12分钟内已推送盘中异动，跳过（防外部定时器与GitHub同窗口重复）")
         return ["skipped:dup-anomaly"]
+    if not dry_run and mode == "panic":
+        if not _in_anomaly_window():
+            print("[notifier][panic] 当前非交易时段（北京 %s），跳过盘中恐慌推送"
+                  % _bj_now().strftime("%H:%M"))
+            return ["skipped:off-hours"]
+        if _recently_pushed("panic", 15):
+            print("[notifier][panic] 15分钟内已推送恐慌预警，跳过（防重复）")
+            return ["skipped:dup-panic"]
     # 输出兜底：避免 print 带 emoji 在非 UTF-8 控制台（如 GBK）抛 UnicodeEncodeError
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -508,9 +547,10 @@ def push(summary, dry_run=False, mode="close"):
         print("[notifier] 文件痕迹写入失败：%r" % e)
 
     # 2) 通道推送（按 mode 路由）：
-    #    关键节点（preauction/close/close_again/weekend）= ServerChan 为主（每日仅 3 条，远低于 5 条上限），
-    #    其余已配置通道（PushPlus 等）兜底冗余；
-    #    盘中异动（anomaly）与竞价（auction）= 全部走 PushPlus 系（绝不占 ServerChan 额度）。
+    #    ServerChan 固定 4 条/工作日 = 盘前(preauction) + 竞价后开盘前异动(open_anomaly) +
+    #    收盘(close) + 复盘(close_again)，均为关键节点，占 ServerChan 单 key 5 条/天额度中的 4 条；
+    #    PushPlus 随时推送（200 条/天几乎不限）：盘中异动(anomaly)、竞价(auction)、周末发酵(weekend)
+    #    以及 open_anomaly 的冗余兜底，绝不挤占 ServerChan 的固定 4 条名额。
     _all = [
         ("wechat_serverchan", send_wechat_serverchan, cfg.get("wechat_serverchan")),
         ("wechat_pushplus", send_wechat_pushplus, cfg.get("wechat_pushplus")),
@@ -518,18 +558,17 @@ def push(summary, dry_run=False, mode="close"):
         ("telegram", send_telegram, cfg.get("telegram")),
         ("email", send_email, cfg.get("email")),
     ]
-    if mode == "anomaly":
-        # 盘中异动：全部走 PushPlus 系通道（PushPlus 200 条/天几乎不限），绝不再占 ServerChan 的
-        # 5 条/天额度。理由：关键节点（盘前/收盘/复盘=3 条）已占满 ServerChan 的 3/5，若异动也走
-        # ServerChan，6 笔异动会立刻把额度挤爆 → 后半段推送集体静默（正是“盘中收不到”的另一根因）。
-        # 故异动只走 PushPlus（及 wecom/Telegram/邮件等「不消耗 ServerChan 额度」的冗余通道，
-        # 仅在你已配置时生效），既保证触达、又不挤占关键节点的 ServerChan 名额。
-        _prefer = ["wechat_pushplus", "wecom", "telegram", "email"]
-    elif mode == "auction":
-        # 竞价提醒次要，主动让出 ServerChan 额度给盘中异动：优先 PushPlus，不占用 ServerChan。
-        # （仅当 PushPlus 未配置时，_all 里没有 wechat_pushplus，循环自然落到 ServerChan 兜底，不丢）
+    if mode == "open_anomaly":
+        # 竞价后开盘前异动：ServerChan 固定四条之一（与盘前/收盘/复盘并列的关键节点），
+        # 同时 PushPlus 随时冗余推送（不冲突：ServerChan 仅占 1/4 额度，其余走 PushPlus）。
+        _prefer = ["wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"]
+    elif mode in ("anomaly", "auction", "weekend", "panic"):
+        # 盘中异动 / 竞价确认 / 周末发酵：全部走 PushPlus 系（200 条/天几乎不限），
+        # 绝不占 ServerChan 的固定 4 条额度。竞价确认主动让出 ServerChan 给关键节点。
         _prefer = ["wechat_pushplus", "wecom", "telegram", "email"]
     else:
+        # 盘前 / 收盘 / 复盘：ServerChan 为主（固定三条，加 open_anomaly 共四条），
+        # PushPlus 冗余兜底。
         _prefer = ["wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"]
     dispatchers = [(n, fn, c) for (n, fn, c) in _all if n in _prefer and c]
     for name, fn, c in dispatchers:
@@ -854,6 +893,14 @@ def format_stock_summary(data, url="", mode="close"):
             rn = "、".join(x["name"] for x in rl.get("relay", []))
             L.append("**板块接力**：无单一退潮主线，当前资金聚焦【%s】" % rn)
     L.append("")
+
+    # 恐慌 / 崩盘扫描
+    pn = data.get("panic") or {}
+    if pn.get("level") in ("升温", "恐慌"):
+        L.append("**⚠️ 恐慌扫描**：%s（跌停 %d 家｜ 大面 %d 只｜ 昨涨停收绿 %.0f%%）"
+                 % (pn.get("level"), pn.get("dt_count", 0), pn.get("bigface_count", 0),
+                    pn.get("yest_green") or 0))
+
     if narr.get("bullets"):
         L.append("### 复盘要点")
         for b in narr["bullets"][:4]:
@@ -1026,6 +1073,99 @@ def format_anomaly_summary(data, url="", con=None):
         L.append("---")
         L.append("完整数据看板：%s" % url)
     return {"title": "A股盘中异动提醒 %s" % date, "text": "\n".join(L)}
+
+
+def format_open_anomaly_summary(data, url="", con=None):
+    """竞价后开盘前异动（9:26，开盘前最后提醒）：聚焦竞价异动标的——
+    一字板/弱转强（开盘强势信号）+ 爆量派发/强转弱（回避信号）+ 高位断板风险，
+    给开盘前 3 分钟的最终操作清单（Markdown 分区）。"""
+    m = data.get("meta", {})
+    date = m.get("date", "")
+    aitems = (data.get("auction") or {}).get("items") or {}
+    risks = data.get("break_risk") or []
+    L = []
+    L.append("## 🔗 竞价后开盘前异动 · %s" % date)
+    L.append("")
+    L.append("> 开盘前最后 3 分钟异动清单：竞价强势=开盘可关注，竞价派发/强转弱=回避。")
+    L.append("")
+
+    # 开盘强势（一字板 / 弱转强 / 高开高走）
+    strong = []
+    for code, aq in aitems.items():
+        pat = aq.get("pattern")
+        if aq.get("yizi") or pat in ("一字板", "弱转强", "高开高走", "换手板"):
+            strong.append((aq, pat))
+    L.append("### 🔥 开盘强势（竞价一字/弱转强，可关注）")
+    if strong:
+        for aq, pat in strong[:8]:
+            va = aq.get("vol_anomaly") or {}
+            ratio = (" 量能%s(%.1f倍)" % (va.get("flag"), va.get("ratio", 1))) if va.get("flag") not in (None, "正常") else ""
+            L.append("- **%s**(%s) 竞价=%s%s" % (aq.get("name"), _board(aq), pat, ratio))
+    else:
+        L.append("（竞价强势标的较少）")
+    L.append("")
+
+    # 竞价异动预警（爆量派发 / 强转弱）→ 回避
+    warn = []
+    for code, aq in aitems.items():
+        va = aq.get("vol_anomaly") or {}
+        if va.get("warn") or aq.get("pattern") == "强转弱":
+            warn.append((aq, va))
+    L.append("### ⚠ 竞价异动预警（爆量派发 / 强转弱，回避）")
+    if warn:
+        for aq, va in warn[:8]:
+            extra = (" 量能%s(%.1f倍)" % (va.get("flag"), va.get("ratio", 1))) if va.get("flag") not in (None, "正常") else ""
+            action = " → 疑似派发，回避" if va.get("warn") else " → 谨慎"
+            L.append("- **%s**(%s) 竞价%s%s%s" % (aq.get("name"), _board(aq), aq.get("pattern", "-"), extra, action))
+    else:
+        L.append("（竞价量能整体平稳，未见明显派发信号）")
+    L.append("")
+
+    # 高位断板风险（开盘冲高回落预警）
+    hi = [r for r in risks if (r.get("p_break") or 0) >= 78]
+    L.append("### 📉 高位断板风险")
+    if hi:
+        for r in hi[:5]:
+            L.append("- **%s**(%s) 模型测算断板概率%.0f%%" % (r.get("name"), _board(r), r.get("p_break", 0)))
+    else:
+        L.append("（高位断板概率整体可控）")
+    L.append("")
+
+    if url:
+        L.append("---")
+        L.append("完整数据看板：%s" % url)
+    return {"title": "竞价后开盘前异动 %s" % date, "text": "\n".join(L)}
+
+
+def format_panic_summary(data, url="", con=None):
+    """盘中/盘后恐慌专送（PushPlus）：聚焦崩盘信号——跌停潮、大面榜(天地板/墓碑线)、
+    亏钱效应、炸板率、广度。"""
+    p = data.get("panic") or {}
+    m = data.get("meta", {})
+    date = m.get("date", "")
+    if not p:
+        return {"title": "盘面恐慌扫描 %s" % date, "text": "（今日无恐慌分析数据）"}
+    L = []
+    L.append("## ⚠️ 盘面恐慌 / 崩盘扫描 · %s" % date)
+    L.append("")
+    L.append("**综合等级**：%s（评分 %d）" % (p.get("level"), p.get("score", 0)))
+    L.append("> %s" % p.get("hint", ""))
+    L.append("")
+    L.append("**核心指标**：跌停 %d 家（基线 %.0f，z=%.1f）｜ 昨日涨停收绿 %.0f%% ｜ 炸板率 %.0f%% ｜ 涨跌比下跌 %.0f%%"
+             % (p.get("dt_count", 0), p.get("dt_base", 0), p.get("dt_z", 0),
+                p.get("yest_green") or 0, p.get("zb_rate", 0), p.get("down_ratio", 0)))
+    bf = p.get("bigface") or []
+    if bf:
+        L.append("")
+        L.append("### 🔻 大面榜（冲高回落 / 天地板 / 墓碑线）Top%d" % min(8, len(bf)))
+        for x in bf[:8]:
+            L.append("- **%s** 收 %.2f%%（开盘 %.2f%%／最高 %.2f%%）· %s · 较高点回落 %.1f%%"
+                     % (x.get("name"), x.get("pct", 0), x.get("open_pct", 0),
+                        x.get("high_pct", 0), x.get("kind"), x.get("drop_from_high", 0)))
+    if url:
+        L.append("")
+        L.append("完整数据看板：%s" % url)
+    return {"title": "⚠️ 盘面恐慌扫描 %s" % date, "text": "\n".join(L)}
 
 
 def format_weekend_summary(data, url="", news_items=None):

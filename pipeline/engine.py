@@ -1386,6 +1386,14 @@ def sector_relay(u, date, code2boards, days=60):
     # 每行业序列
     ser = {ind: [row.get(ind, 0) for _, row in mat] for ind in ind_codes}
 
+    # 各行业近期持续性（近7日有≥2只涨停的天数）与今日最高连板（主副线分类用）
+    _persist = {}
+    _maxlb = {}
+    for ind, codes in ind_codes.items():
+        s = ser.get(ind, [])
+        _persist[ind] = sum(1 for x in s[-7:] if x >= 2) >= 3
+        _maxlb[ind] = max([u.streak.get(c, {}).get(date, 0) for c in codes] or [0])
+
     # 退潮旧主线：窗口内曾是强主线（峰值≥5），且最新涨停家数崩塌（≤峰值*0.35 且 ≤2），
     # 峰值发生在近 ~25 个交易日内（是近期主线，而非远古记忆）。
     # 一条主线断板后，往往多条前主线同期退潮，故列出跌幅最大的若干条（最多 3 条）。
@@ -1419,13 +1427,46 @@ def sector_relay(u, date, code2boards, days=60):
         rising = (latest - prev7) >= 2
         if not (fresh or rising):
             continue
+        persistent = _persist.get(ind, False)
+        # 晋级确定性：持续(40) + 加速/新崛起(25/18) + 高度(20/12)，封顶 100
+        cer = 0
+        cer += 40 if persistent else 0
+        cer += 25 if rising else (18 if fresh else 0)
+        cer += 20 if latest >= 4 else (12 if latest >= 3 else 0)
+        cer = min(100, cer)
         relay.append({
             "name": ind, "latest_zt": latest, "prev7_zt": prev7,
             "delta": latest - prev7,
             "kind": "新崛起" if fresh else "加速",
+            "persistent": persistent, "max_lb": _maxlb.get(ind, 0),
+            "certainty": cer, "toward_main": (latest >= 4 and persistent),
         })
-    relay.sort(key=lambda x: (-x["latest_zt"], -x["delta"]))
+    relay.sort(key=lambda x: (-x["latest_zt"], -x["certainty"]))
     relay = relay[:3]
+
+    # ---- 主副线分类：主线 = 持续且高度够；支线 = 升温中的次级方向 ----
+    mainline, sublines = [], []
+    for ind, s in ser.items():
+        latest = s[-1]
+        if latest < 2:
+            continue
+        persistent = _persist.get(ind, False)
+        first = s[max(0, len(s) - 7)] if len(s) >= 7 else s[0]
+        if latest > first:
+            trend = "升温"
+        elif latest < first:
+            trend = "降温"
+        else:
+            trend = "持平"
+        rec = {"name": ind, "zt": latest, "max_lb": _maxlb.get(ind, 0),
+               "persistent": persistent, "trend": trend}
+        if latest >= 5 and persistent:
+            mainline.append(rec)
+        elif latest >= 3 or (latest >= 2 and (latest - p7_row.get(ind, 0)) >= 1):
+            sublines.append(rec)
+    mainline.sort(key=lambda x: (-x["zt"], -x["max_lb"]))
+    sublines.sort(key=lambda x: (-x["zt"], -x["max_lb"]))
+    relay_cer = round(mean([r["certainty"] for r in relay]), 0) if relay else 0
 
     # 当前领涨是否连续主导（阶段判定用）
     leader_persist = False
@@ -1451,15 +1492,114 @@ def sector_relay(u, date, code2boards, days=60):
         phase = "多线并行"
         phase_desc = "无单一退潮主线，【%s】等方向并行轮动" % leader_name
 
+    if relay:
+        phase_desc += "（接力确定性 %d%%）" % relay_cer
+
     return {
         "available": True,
         "date": date,
         "broken": broken,
         "broken_list": broken_list[:3],
         "relay": relay,
+        "relay_cer": relay_cer,
+        "mainline": mainline,
+        "sublines": sublines,
         "leader": {"name": leader_name, "zt": leader_zt} if leader_name else None,
         "phase": phase, "phase_desc": phase_desc,
         "window_days": days,
+    }
+
+
+# ============================================================== 10.3 恐慌 / 崩盘检测
+def panic_scan(u, date, code2boards=None, lookback=20):
+    """盘后恐慌/崩盘检测：跌停潮(z-score vs 近 lookback 日基线) + 大面榜(天地板/墓碑线/冲高回落)
+    + 亏钱效应(昨日涨停收绿率) + 炸板率 + 涨跌广度。输出分级信号 level∈{安全,可控,升温,恐慌}
+    与典型样本，供收盘报告『风险/恐慌』板块及按需 PushPlus 推送。"""
+    # ---- 跌停潮：今日跌停家数 vs 近 lookback 日基线 ----
+    dates = [d for d in u.dates if d <= date][-(lookback + 1):]
+    base = [len(u.dt.get(d, ())) for d in dates[:-1]]
+    today_dt = len(u.dt.get(date, ()))
+    m = mean(base) if base else 0.0
+    var = mean([(x - m) ** 2 for x in base]) if base else 0.0
+    sd = var ** 0.5
+    z = (today_dt - m) / (sd + 1e-9)
+
+    # ---- 大面榜：盘中大幅冲高回落 / 天地板 / 墓碑线 ----
+    bigface = []
+    for code, b in u.by_date.get(date, []):
+        lim = u.lim.get(code)
+        if lim is None:
+            continue
+        amt = b.get("amt") or 0
+        if amt < 5e7:                       # 忽略成交额 < 5000 万的极小票，降低噪声
+            continue
+        c, o, h, l, pct, chg = b["c"], b["o"], b["h"], b["l"], b["pct"], b.get("chg")
+        if not c or chg is None:
+            continue
+        pre = c - chg                       # 昨收
+        if pre <= 0:
+            continue
+        open_pct = (o / pre - 1) * 100
+        high_pct = (h / pre - 1) * 100
+        drop_from_high = (h - c) / h * 100 if h > 0 else 0
+        if open_pct >= lim * 0.9 and pct <= -lim * 0.9:
+            kind = "天地板"
+        elif high_pct >= 5 and drop_from_high >= 9 and pct < 5:
+            kind = "墓碑线" if (c - l) / (l if l > 0 else 1) < 0.03 else "冲高回落"
+        else:
+            continue
+        bigface.append({"code": code, "name": u.stocks.get(code, {}).get("name", ""),
+                        "pct": round(pct, 2), "open_pct": round(open_pct, 2),
+                        "high_pct": round(high_pct, 2),
+                        "drop_from_high": round(drop_from_high, 1), "kind": kind})
+    bigface.sort(key=lambda x: (-x["drop_from_high"], 0 if x["kind"] == "天地板" else 1))
+    bigface = bigface[:10]
+
+    # ---- 亏钱效应 / 炸板率 / 广度 ----
+    e = daily_emotion(u, date)
+    yest_green = e.get("yest_green")            # 昨日涨停今日收绿占比（越高越亏钱）
+    zb = e.get("zb", 0); zt = e.get("zt", 0)
+    zb_rate = round(zb / (zb + zt) * 100, 1) if (zb + zt) > 0 else 0
+    br = market_breadth(u, date)
+    total = br["up"] + br["down"] + br["flat"]
+    down_ratio = round(br["down"] / total * 100, 1) if total else 0.0
+
+    # ---- 综合分级 ----
+    score = 0
+    if z >= 2: score += 2
+    elif z >= 1: score += 1
+    if today_dt >= 30: score += 1
+    if (yest_green or 0) >= 55: score += 1
+    if zb_rate >= 35: score += 1
+    if down_ratio >= 70: score += 1
+    if bigface and bigface[0]["drop_from_high"] >= 15: score += 1
+    if today_dt >= 60: score += 1
+    if today_dt == 0 and not bigface and down_ratio < 40 and (yest_green or 0) < 40:
+        level = "安全"
+    else:
+        level = "恐慌" if score >= 5 else ("升温" if score >= 2 else "可控")
+
+    # ---- 文本提示 ----
+    hints = []
+    if today_dt >= 10:
+        hints.append("跌停 %d 家（近 %d 日均值 %.0f，z=%.1f）" % (today_dt, lookback, m, z))
+    if bigface:
+        hints.append("大面 %d 只（最惨 %s·%s，较高点回落 %.0f%%）"
+                     % (len(bigface), bigface[0]["name"], bigface[0]["kind"], bigface[0]["drop_from_high"]))
+    if (yest_green or 0) >= 55:
+        hints.append("昨日涨停今日 %.0f%% 收绿（打板亏钱效应重）" % yest_green)
+    if zb_rate >= 35:
+        hints.append("炸板率 %.0f%%（封板意愿弱、分歧大）" % zb_rate)
+    if down_ratio >= 70:
+        hints.append("涨跌比 %.0f%% 下跌（盘面普跌）" % down_ratio)
+    hint = "；".join(hints) if hints else "盘面未现明显恐慌信号"
+
+    return {
+        "date": date, "level": level, "score": score,
+        "dt_count": today_dt, "dt_base": round(m, 1), "dt_z": round(z, 2),
+        "bigface": bigface, "bigface_count": len(bigface),
+        "yest_green": yest_green, "zb_rate": zb_rate, "down_ratio": down_ratio,
+        "hint": hint,
     }
 
 

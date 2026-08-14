@@ -269,6 +269,15 @@ def run(date_override=None, dedup_close=False):
     except Exception as e:
         log("  板块接力检测失败（不影响主流程）：%r" % e)
         relay = {"available": False}
+
+    # 恐慌 / 崩盘检测
+    try:
+        panic = engine.panic_scan(u, date, code2boards)
+        log("  恐慌检测：%s（跌停 %d / 大面 %d / 昨日涨停收绿 %.0f%%）" % (
+            panic["level"], panic["dt_count"], panic["bigface_count"], panic["yest_green"] or 0))
+    except Exception as e:
+        log("  恐慌检测失败（不影响主流程）：%r" % e)
+        panic = None
     asum = auction.get("summary", {})
     log("  竞价：平均高开 %.2f%% · 一字板 %d · 弱转强 %d · 强转弱 %d"
         % (asum.get("avg_open_pct", 0), asum.get("yizi", 0), asum.get("weak_strong", 0), asum.get("strong_weak", 0)))
@@ -476,6 +485,7 @@ def run(date_override=None, dedup_close=False):
         "ladder_history": ladder_hist,
         "rotation": rotation,
         "sector_relay": relay,
+        "panic": panic,
         "viz": viz,
         "preopen_plan": plan,
         "demons": demons[:40],
@@ -739,6 +749,71 @@ def push_anomaly():
     return _push_with_store("anomaly")
 
 
+def push_open_anomaly():
+    """竞价后开盘前异动（9:26，开盘前最后提醒）：聚焦竞价异动标的（一字板/弱转强/爆量派发/强转弱），
+    经 ServerChan 推送（固定四条之一），PushPlus 冗余兜底。
+
+    ⚠ 交易时段闸：仅在北京时间 09:15–15:00（且为交易日）才推送；其余时段（如凌晨误点火）
+    直接跳过，杜绝非交易时段误推。开盘前 09:26 落在交易时段内，正常放行。"""
+    if not notifier._in_anomaly_window():
+        print("[open_anomaly] 当前非交易时段（北京 %s），跳过" % notifier._bj_now().strftime("%H:%M"))
+        return ["skipped:off-hours"]
+    data = load_existing_data()
+    if not data:
+        print("[open_anomaly] 未找到 dist/data.js，无法推送")
+        return None
+    deploy_url = _deploy_url()
+    summary = notifier.format_open_anomaly_summary(data, deploy_url)
+    return notifier.push(summary, mode="open_anomaly")
+
+
+def push_panic():
+    """盘中恐慌 / 崩盘预警（突发快速下杀时）。优先实时跌停池+指数下杀监控；
+    未触发实时阈值时，回退到当日已分析的恐慌结论（仅升温/恐慌级才推）。
+    经 PushPlus 随时推送，不占 ServerChan 固定 4 条额度；非交易时段/冷却期内跳过。"""
+    if not notifier._in_anomaly_window():
+        print("[panic] 当前非交易时段（北京 %s），跳过" % notifier._bj_now().strftime("%H:%M"))
+        return None
+    trig, md = _crash_section()
+    if trig:
+        now = time.strftime("%Y-%m-%d %H:%M")
+        text = ("## ⚠️ A股突发快速下杀 / 崩盘预警 · %s\n\n%s\n\n"
+                "> 实时行情来自东方财富公开接口；跌停池与各指数快速下杀已触发阈值。"
+                % (now, md))
+        return notifier.push({"title": "⚠️ 崩盘预警 %s" % now, "text": text}, mode="panic")
+    data = load_existing_data()
+    panic = (data or {}).get("panic") if data else None
+    if panic and panic.get("level") in ("升温", "恐慌"):
+        summary = notifier.format_panic_summary(data, _deploy_url())
+        return notifier.push(summary, mode="panic")
+    print("[panic] 未触发实时崩盘阈值，且当日恐慌等级=%s，跳过推送"
+          % (panic.get("level") if panic else "无"))
+    return None
+
+
+def _crash_section():
+    """实时崩盘 / 恐慌监控：跌停池 + 主要指数快速下杀。返回 (triggered, md)。
+    各数据源独立容错；全部失败也不影响主流程。"""
+    try:
+        import em_api
+        idx = em_api.index_snapshot() or []
+        dtp = em_api.dt_pool() or []
+        dt_count = len(dtp)
+        idx_line = "、".join("%s %s%%" % (x.get("name"), x.get("pct"))
+                             for x in idx[:4] if x.get("pct") is not None)
+        crash = any((x.get("pct") or 0) <= -2.5 for x in idx)
+        if crash or dt_count >= 15:
+            L = []
+            L.append("### ⚠️ 盘面恐慌 / 快速下杀")
+            L.append("- 主要指数：%s" % (idx_line or "—"))
+            L.append("- 跌停池：%d 只（实时）" % dt_count)
+            L.append("- 信号：%s" % ("指数快速下杀 ⚠" if crash else "跌停潮涌动 ⚠"))
+            return True, "\n".join(L)
+        return False, ""
+    except Exception as e:
+        return False, "> 盘面恐慌监控暂不可用：%s" % str(e)[:40]
+
+
 def _live_anomaly_summary(url):
     """实时异动：涨停池 + 涨幅榜急拉，生成 Markdown。
     各数据源独立容错：某一路失败仅跳过该段，其余仍实时呈现；全部失败才上抛。"""
@@ -796,6 +871,11 @@ def _live_anomaly_summary(url):
     else:
         L.append("（当前无显著涨幅异动）")
     L.append("")
+    # 崩盘 / 恐慌实时监控（突然快速下杀）
+    trig, md = _crash_section()
+    if trig:
+        L.append("")
+        L.append(md)
     if url:
         L.append("---")
         L.append("完整数据看板：%s" % url)
@@ -891,6 +971,10 @@ if __name__ == "__main__":
             action = "auction"
         elif a == "--anomaly-push":
             action = "anomaly"
+        elif a == "--open-anomaly":
+            action = "open_anomaly"
+        elif a == "--panic-push":
+            action = "panic"
         elif a in ("--push-close", "--close-push"):
             action = "close_again"
         elif a == "--weekend-push":
@@ -901,6 +985,10 @@ if __name__ == "__main__":
         push_auction()
     elif action == "anomaly":
         push_anomaly()
+    elif action == "open_anomaly":
+        push_open_anomaly()
+    elif action == "panic":
+        push_panic()
     elif action == "close_again":
         push_close_again()
     elif action == "weekend":

@@ -243,6 +243,21 @@
         '上涨占比 ' + pct(em.up / Math.max(1, (em.up || 0) + (em.down || 0)) * 100)) +
       '</div>';
 
+    /* 恐慌 / 崩盘扫描 */
+    var PN = D.panic;
+    if (PN && PN.level) {
+      var pcol = PN.level === '恐慌' ? C.down : (PN.level === '升温' ? C.warn : (PN.level === '安全' ? C.up : C.blue));
+      var bf = (PN.bigface || []).slice(0, 5).map(function (x) {
+        return '<div class="kv" style="margin:4px 0"><b>' + E(x.name) + '</b> 收 ' + f(x.pct, 2) + '% · ' + E(x.kind) +
+          ' · 较高点回落 ' + x.drop_from_high + '%</div>';
+      }).join('');
+      var pBody = '<div style="margin-bottom:8px"><span class="bd" style="background:' + pcol + '22;color:' + pcol + ';border-color:' + pcol + '">综合等级：' + E(PN.level) + '（评分 ' + PN.score + '）</span></div>' +
+        '<div class="note" style="margin-bottom:8px">' + E(PN.hint) + '</div>' +
+        '<div class="kv" style="margin-bottom:6px"><b>跌停</b> ' + n2(PN.dt_count) + ' 家（基线 ' + f(PN.dt_base, 0) + '，z=' + f(PN.dt_z, 1) + '）｜ <b>昨涨停收绿</b> ' + f(PN.yest_green, 0) + '% ｜ <b>炸板率</b> ' + f(PN.zb_rate, 0) + '% ｜ <b>涨跌比下跌</b> ' + f(PN.down_ratio, 0) + '%</div>' +
+        (bf ? '<div style="margin-top:6px"><b style="color:var(--muted)">大面榜（冲高回落 / 天地板 / 墓碑线）</b>' + bf + '</div>' : '');
+      h += card('⚠️ 盘面恐慌 / 崩盘扫描', pBody, '跌停潮 + 大面榜(天地板/墓碑线) + 亏钱效应 + 炸板率 + 广度，综合判定盘面恐慌等级');
+    }
+
     /* 市场可视化：温度走势(双线) + 板块涨停 TOP10 */
     var VZ = D.viz;
     if (VZ && VZ.temp && VZ.temp.length) {
@@ -858,7 +873,7 @@
         '判断主线是升温接力 / 降温兑现 / 一日游');
     }
 
-    /* 板块接力 · 主线切换（断板→接力检测） */
+    /* 板块接力 · 主副线切换（断板→接力检测）+ 主副线分类 */
     var RL = D.sector_relay;
     if (RL && RL.available) {
       var phColor = RL.phase.indexOf('接力切换') >= 0 ? C.up : (RL.phase.indexOf('退潮') >= 0 ? C.down : C.gold);
@@ -867,14 +882,26 @@
       }).join(' ');
       var rly = (RL.relay || []).map(function (x) {
         var kc = x.kind === '新崛起' ? C.up : C.gold;
-        return '<div class="kv" style="margin:5px 0"><span class="bd" style="border-color:' + kc + ';color:' + kc + ';font-size:11px;padding:0 6px">' + E(x.kind) + '</span> <b>' + E(x.name) + '</b> · 今日 ' + x.latest_zt + ' 只涨停（7日前 ' + x.prev7_zt + '，+' + x.delta + '）</div>';
+        var cer = x.certainty != null ? x.certainty : 0;
+        var tag = (x.toward_main ? ' <span class="bd" style="border-color:' + C.purple + ';color:' + C.purple + ';font-size:10px;padding:0 4px">⬆晋级主线</span>' : '') +
+                  (x.persistent ? ' <span class="bd" style="border-color:' + C.gold + ';color:' + C.gold + ';font-size:10px;padding:0 4px">持续</span>' : '');
+        return '<div class="kv" style="margin:5px 0"><span class="bd" style="border-color:' + kc + ';color:' + kc + ';font-size:11px;padding:0 6px">' + E(x.kind) + '</span> <b>' + E(x.name) + '</b> · 今日 ' + x.latest_zt + ' 只涨停（7日前 ' + x.prev7_zt + '，+' + x.delta + '）' + tag +
+          '<span class="note" style="margin-left:6px">接力确定性 ' + cer + '%</span></div>';
       }).join('');
-      var rlBody = '<div style="margin-bottom:8px"><span class="bd" style="background:' + phColor + '22;color:' + phColor + ';border-color:' + phColor + '">' + E(RL.phase) + '</span></div>' +
+      var ml = (RL.mainline || []).slice(0, 4).map(function (x) {
+        return '<span class="bd" style="border-color:' + C.up + ';color:' + C.up + ';font-size:11px;padding:0 6px">主线</span> <b>' + E(x.name) + '</b>（' + x.zt + '板·' + x.max_lb + '连板·' + x.trend + '）';
+      }).join(' ｜ ');
+      var sl = (RL.sublines || []).slice(0, 4).map(function (x) {
+        return '<span class="bd" style="border-color:' + C.gold + ';color:' + C.gold + ';font-size:11px;padding:0 6px">支线</span> <b>' + E(x.name) + '</b>（' + x.zt + '板·' + x.trend + '）';
+      }).join(' ｜ ');
+      var rlBody = '<div style="margin-bottom:8px"><span class="bd" style="background:' + phColor + '22;color:' + phColor + ';border-color:' + phColor + '">' + E(RL.phase) + (RL.relay_cer ? ' · 接力确定性 ' + RL.relay_cer + '%' : '') + '</span></div>' +
         (brk ? '<div style="margin:6px 0"><b style="color:var(--muted)">退潮旧主线：</b>' + brk + '</div>' : '') +
         (rly ? '<div style="margin:6px 0"><b style="color:var(--muted)">接力方向：</b>' + rly + '</div>' : '<div class="note">暂无明确接力方向，市场处于混沌轮动</div>') +
+        (ml ? '<div style="margin:6px 0"><b style="color:var(--muted)">当前主线：</b>' + ml + '</div>' : '') +
+        (sl ? '<div style="margin:6px 0"><b style="color:var(--muted)">支线轮动：</b>' + sl + '</div>' : '') +
         (RL.leader ? '<div class="note" style="margin-top:8px">当前领涨板块：<b>' + E(RL.leader.name) + '</b>（' + RL.leader.zt + ' 只涨停）</div>' : '');
-      h += card('🔗 板块接力 · 主线切换（近 ' + RL.window_days + ' 日）', rlBody,
-        '旧主线涨停家数崩塌（断板退潮）后，往往有另一条板块从低位崛起承接——经典“断板→接力”规律（例：2026-03 电力断板后医药接力）');
+      h += card('🔗 板块接力 · 主副线切换（近 ' + RL.window_days + ' 日）', rlBody,
+        '旧主线涨停家数崩塌（断板退潮）后，往往有另一条板块从低位崛起承接——经典“断板→接力”规律（例：2026-03 电力断板后医药接力）；接力确定性越高，新方向越可信');
     }
     return h;
   }
