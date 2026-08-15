@@ -1046,11 +1046,11 @@
     var conceptS = (y.concept_top && y.concept_top.length)
       ? y.concept_top.slice(0, 6).map(function (c) { return c.name + '(' + c.up + ')'; }).join('、')
       : '—';
-    h += card('⚡ 妖股潜力榜（实时涨停池 · 按潜力分降序）',
-      '<div class="note">当日涨停 <b>' + y.count + '</b> 只 ｜ 连板梯隊：' + E(ladderS) + '</div>' +
+    h += card('⚡ 妖股潜力榜（涨停池 · 按潜力分降序）',
+      '<div class="note">数据日期：<b>' + E(y.date || '—') + '</b>（上一交易日 / 最近有完整涨停数据的交易日）｜ 当日涨停 <b>' + y.count + '</b> 只 ｜ 连板梯隊：' + E(ladderS) + '</div>' +
       '<div class="note">今日最强题材：' + E(conceptS) + '</div>' +
       '<div class="note faint">生成于 ' + E(genAt) +
-      ' ｜ 评分 = 板块联动 + 连板位置 + 封单强度 + 流通盘 + 换手 + 封板质量（0~100）｜ 与「妖股基因」(K线形态)互补</div>');
+      ' ｜ 评分 = 板块联动20 + 连板位置18 + 封单强度18 + 流通盘10 + 换手8 + 封板质量16 + 题材启动10（0~100）｜ 与「妖股基因」(K线形态)互补</div>');
 
     /* Top3 卡片：潜力分 + 核心指标 + 因子理由 */
     h += '<div class="grid g3">' + ranked.slice(0, 3).map(function (it, idx) {
