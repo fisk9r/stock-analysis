@@ -32,7 +32,7 @@ on:
         required: true
         default: 'build'
         type: choice
-        options: [build, preauction, auction, open_anomaly, anomaly, close_again, weekend]
+        options: [build, preauction, auction, open_anomaly, anomaly, close_again, weekend, yaogu]
 
   schedule:
     - cron: '50 0 * * 1-5'   # 北京 08:50 周一至周五 —— 盘前预判（前移：原 09:02，尽量早到）
@@ -45,6 +45,7 @@ on:
     - cron: '7 6 * * 1-5'    # 北京 14:07 —— 盘中异动
     - cron: '7 7 * * 1-5'    # 北京 15:07 —— 盘中异动
     - cron: '20 7 * * 1-5'   # 北京 15:20 周一至周五 —— 收盘完整分析（前移：原 16:10）
+    - cron: '40 7 * * 1-5'   # 北京 15:40 周一至周五 —— 妖股潜力榜（盘后，PushPlus 不限量）
     - cron: '0 12 * * 1-5'   # 北京 20:00 周一至周五 —— 复盘补发
     - cron: '0 12 * * 0'     # 北京 20:00 周日 —— 周末发酵（有则发，无则跳过）
     - cron: '0 0 * * 1'      # 北京 08:00 周一 —— 周末发酵（有则发，无则跳过）
@@ -94,6 +95,7 @@ jobs:
               '25 1 * * 1-5')  TASK=auction     ;;
               '26 1 * * 1-5')  TASK=open_anomaly ;;
               '20 7 * * 1-5')  TASK=build       ;;
+              '40 7 * * 1-5')  TASK=yaogu       ;;
               '0 12 * * 1-5')  TASK=close_again ;;
               '0 12 * * 0')    TASK=weekend     ;;
               '0 0 * * 1')     TASK=weekend     ;;
@@ -148,8 +150,9 @@ jobs:
           fi
 
       - name: 缺少 data.js 时中止纯推送任务
-        # 盘前/竞价/周末推送都要读最近一次分析结果，没有就只能空转
-        if: steps.task.outputs.need_fetch == 'false'
+        # 盘前/竞价/周末推送都要读最近一次分析结果，没有就只能空转。
+        # 妖股潜力榜(yaogu)只用实时涨停池、不读 data.js，故豁免此闸。
+        if: steps.task.outputs.need_fetch == 'false' && steps.task.outputs.task != 'yaogu'
         run: |
           if [ ! -f dist/data.js ]; then
             echo "::error::dist/data.js 不存在。请先手动运行一次 task=build 生成分析结果。"
@@ -200,6 +203,7 @@ jobs:
             anomaly)     python pipeline/build.py --anomaly-push ;;
             close_again) python pipeline/build.py --push-close ;;
             weekend)     python pipeline/build.py --weekend-push ;;
+            yaogu)       python pipeline/build.py --yaogu-push ;;
           esac
 
       # ---------- 5.5 加密数据（口令门禁） ----------

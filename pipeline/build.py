@@ -14,6 +14,7 @@ import store
 import em_api
 import ai_judge
 import notifier
+import yaogu
 
 ROOT = store.ROOT
 DIST = os.path.join(ROOT, "dist")
@@ -454,6 +455,13 @@ def run(date_override=None, dedup_close=False):
                       for s in sorted(inds, key=lambda x: -(x.get("zt") or 0))[:10]],
     }
 
+    # 妖股潜力榜（实时涨停池驱动，与 demon_scan 的 K线基因互补）：写入 data 供登录看板展示
+    yaogu_data = None
+    try:
+        yaogu_data = yaogu.live_report()
+    except Exception as e:
+        log("  妖股潜力榜生成失败（不影响主流程）：%r" % e)
+
     data = {
         "meta": {
             "date": date, "prev_date": prev,
@@ -500,6 +508,7 @@ def run(date_override=None, dedup_close=False):
         "sector_trend_hist": sth,
         "money": money,
         "backtest": bt,
+        "yaogu": yaogu_data,
     }
 
     # ---- 历史连板库落库：先回填前一日推荐的真实结局，再记录当日状态 ----
@@ -574,11 +583,12 @@ def run(date_override=None, dedup_close=False):
                 # （已复现：run 58 复盘跑成功却零发送，用户收不到复盘）。
                 # 复盘必须保证送达：仅由 once-per-day 挡住多重定时器的重复触发，
                 # 不再做“内容相同则跳过”——避免用户再次收不到复盘。
+                # 去重按『分析日(adate)』判定，避免前一日补发在零点后运行吞掉当日名额。
                 summary = dict(summary)
                 summary["title"] = summary["title"].replace("盘后复盘", "复盘补发")
-                notifier.push(summary, mode="close_again")
+                notifier.push(summary, mode="close_again", analysis_date=date)
             else:
-                notifier.push(summary, mode="close")
+                notifier.push(summary, mode="close", analysis_date=date)
         except Exception as e:
             log("  通知推送失败（不影响主流程）：%r" % e)
 
@@ -805,6 +815,27 @@ def _anomaly_focused(s, new_codes, url):
         L.append("### 🔥 题材联动（本轮新增涨停）")
         for b in hot:
             L.append("- %s：%d 只涨停" % (b, sec[b]))
+    # ⚡ 妖股潜力（实时资金维度）：对新增首板/早板打分，挑高分标的点出，盘中及时发现
+    sec_all = Counter((it.get("hybk") or "—") for it in (s.get("zt") or []))
+    yaogu_items = []
+    for it in n_zt:
+        try:
+            sc, _reasons, meta = yaogu.yaogu_score(
+                it, sec_all.get(it.get("hybk") or "—", 1))
+        except Exception:
+            continue
+        if sc >= 55:
+            yaogu_items.append((sc, it, meta))
+    yaogu_items.sort(key=lambda x: -x[0])
+    if yaogu_items:
+        L.append("")
+        L.append("### ⚡ 妖股潜力（本轮新增 · 实时资金维度）")
+        for sc, it, meta in yaogu_items[:5]:
+            tag = ("%d板" % meta["lbc"]) if meta["lbc"] > 1 else "首板"
+            warn = (" ⚠炸板%d次" % meta["zbc"]) if meta["zbc"] else ""
+            L.append("- **%s**(/%s) 潜力分%d · %s · 封单%.2f亿(流通盘%.2f%%) · %s封板%s"
+                     % (it.get("n"), it.get("c"), sc, tag, meta["fund_yi"],
+                        meta["ratio"], meta["fbt"], warn))
     zt_all = s.get("zt") or []
     mv_all = s.get("movers") or []
     L.append("### 📊 当前盘面")
@@ -859,6 +890,27 @@ def push_panic():
     print("[panic] 未触发实时崩盘阈值，且当日恐慌等级=%s，跳过推送"
           % (panic.get("level") if panic else "无"))
     return None
+
+
+def push_yaogu():
+    """妖股潜力榜（盘后）：基于实时涨停池做『妖股潜力分』，PushPlus 推送。
+    与 engine.demon_scan（K线形态『妖股基因』）互补——本函数抓『实时资金+题材』维度，
+    可盘后出榜、盘中经异动标签及时发现。无信号/抓取失败则跳过，不回退旧快照。"""
+    try:
+        rep = yaogu.live_report()
+    except Exception as e:
+        print("[yaogu] 实时涨停池抓取失败，跳过：%r" % e)
+        return ["skipped:live-fetch-failed"]
+    if not rep:
+        print("[yaogu] 涨停池为空（可能已收盘无数据或节假日），跳过")
+        return ["skipped:empty"]
+    md = yaogu.format_markdown(rep)
+    if not md:
+        return ["skipped:empty"]
+    now = _bj_now().strftime("%Y-%m-%d %H:%M")
+    title = "🔥 妖股潜力榜 %s（涨停%d只·Top%d）" % (
+        rep["date"], rep["count"], len(rep["ranked"]))
+    return notifier.push({"title": title, "text": md}, mode="yaogu")
 
 
 def _crash_section():
@@ -1053,6 +1105,8 @@ if __name__ == "__main__":
             action = "close_again"
         elif a == "--weekend-push":
             action = "weekend"
+        elif a == "--yaogu-push":
+            action = "yaogu"
     if action == "preauction":
         push_preauction()
     elif action == "auction":
@@ -1067,5 +1121,7 @@ if __name__ == "__main__":
         push_close_again()
     elif action == "weekend":
         push_weekend()
+    elif action == "yaogu":
+        push_yaogu()
     else:
         run(d)

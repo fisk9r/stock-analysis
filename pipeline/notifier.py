@@ -385,8 +385,14 @@ def send_email(cfg, title, text):
 _ONCE_PER_DAY = {"preauction", "auction", "open_anomaly", "close", "close_again", "weekend"}
 
 
-def _already_pushed_today(mode):
-    """同一 mode 当天是否已推送过（读 push_log.jsonl 判定）。"""
+def _already_pushed_today(mode, analysis_date=None):
+    """同一 mode 当天是否已推送过（读 push_log.jsonl 判定）。
+
+    close / close_again 按『分析日(adate)』去重，而非自然日——
+    否则前一日复盘补发若在次日零点后运行，会吃掉当日补发的去重名额，
+    致使用户在 16:10 主推送失败时收不到 20:00 安全网（已复现）。
+    其余 mode（preauction/auction/open_anomaly/weekend）仍按自然日去重。
+    """
     if mode not in _ONCE_PER_DAY:
         return False
     try:
@@ -398,10 +404,24 @@ def _already_pushed_today(mode):
             for line in fh:
                 try:
                     p = json.loads(line)
-                    if p.get("mode") == mode and str(p.get("ts", "")).startswith(today):
-                        return True
                 except Exception:
-                    pass
+                    continue
+                if p.get("mode") != mode:
+                    continue
+                if mode in ("close", "close_again"):
+                    # 按分析日去重（修复跨自然日污染）
+                    if analysis_date:
+                        if p.get("adate") == analysis_date:
+                            return True
+                        # 无 adate 的历史遗留记录按自然日兜底；修复后不再产生此类记录
+                        if p.get("adate") is None and str(p.get("ts", "")).startswith(today):
+                            return True
+                    else:
+                        if str(p.get("ts", "")).startswith(today):
+                            return True
+                else:
+                    if str(p.get("ts", "")).startswith(today):
+                        return True
         return False
     except Exception:
         return False
@@ -493,7 +513,7 @@ def _recently_pushed(mode, cooldown_min):
     return False
 
 
-def push(summary, dry_run=False, mode="close", codes=None):
+def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None):
     """summary: {"title": str, "text": str}。返回已送达通道列表。
     mode 取值与去重（同一 mode 当天只发一次）对应：
       - "preauction"  盘前预判（08:50）
@@ -520,7 +540,7 @@ def push(summary, dry_run=False, mode="close", codes=None):
     # 幂等去重：同一 mode 当天已推送过则跳过通道发送，避免多路触发重复轰炸
     # （GitHub 自带 schedule 常被丢弃，故叠加了看门狗/备份订阅/外部定时器多重触发，
     #  这里统一兜底：先到先发，后到静默）。
-    if not dry_run and _already_pushed_today(mode):
+    if not dry_run and _already_pushed_today(mode, analysis_date):
         print("[notifier][%s] 今日已推送，跳过通道发送（防重复触发）" % mode)
         return ["skipped:dup"]
     # 交易时段闸：盘中异动(anomaly)只有在 09:15–15:00 北京时间（且为交易日）才允许推送。
@@ -587,7 +607,7 @@ def push(summary, dry_run=False, mode="close", codes=None):
         # 竞价后开盘前异动：ServerChan 固定四条之一（与盘前/收盘/复盘并列的关键节点），
         # 同时 PushPlus 随时冗余推送（不冲突：ServerChan 仅占 1/4 额度，其余走 PushPlus）。
         _prefer = ["wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"]
-    elif mode in ("anomaly", "auction", "weekend", "panic"):
+    elif mode in ("anomaly", "auction", "weekend", "panic", "yaogu"):
         # 盘中异动 / 竞价确认 / 周末发酵：全部走 PushPlus 系（200 条/天几乎不限），
         # 绝不占 ServerChan 的固定 4 条额度。竞价确认主动让出 ServerChan 给关键节点。
         _prefer = ["wechat_pushplus", "wecom", "telegram", "email"]
@@ -630,7 +650,8 @@ def push(summary, dry_run=False, mode="close", codes=None):
             with open(logp, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps({"ts": _ts, "mode": mode, "title": title,
                                      "text": text, "channels": _ch,
-                                     "codes": list(codes) if codes else []},
+                                     "codes": list(codes) if codes else [],
+                                     "adate": analysis_date if mode in ("close", "close_again") else None},
                                     ensure_ascii=False) + "\n")
         except Exception as e:
             print("[notifier] 去重账本写入失败（不影响已送达）：%r" % e)
