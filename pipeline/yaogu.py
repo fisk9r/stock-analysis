@@ -252,6 +252,44 @@ def yaogu_score(row, sector_count, yest_lbc=None, yest_sector=None):
     return min(100, round(score, 1)), reasons, meta
 
 
+def lhb_factor(info):
+    """龙虎榜·游资合力因子（基于东方财富免费日榜，无需密钥）。返回 (bonus, reasons)。
+
+    免费源拿不到营业部名称（东财席位明细 report 已下架、新浪 LHB 服务已下线），
+    故以『净买入额 + 买方席位数 + 连板上榜特征』刻画游资合力——这正是妖股最强确认信号：
+      - 上龙虎榜本身 = 高关注/高波动（妖股必经之路）
+      - 净买入为正且大 = 资金净抢筹
+      - 上榜原因含『连续三个交易日内涨幅偏离值达20%』= 连板妖股特征
+      - 买方席位数多 = 多路资金合力抢筹
+    """
+    if not info:
+        return 0, []
+    reasons = []
+    sc = 4
+    reasons.append(("龙虎榜", "上榜龙虎榜（高关注高波动，妖股必经之路）", 4))
+    net = info.get("net_amt") or 0
+    if net > 0:
+        sc += 3
+        reasons.append(("龙虎榜", "龙虎榜净买入%.2f亿·资金净抢筹" % (net / 1e8), 3))
+        if net >= 1e8:
+            sc += 3
+            reasons.append(("龙虎榜", "净买入超1亿·强抢筹（游资合力确认）", 3))
+    else:
+        reasons.append(("龙虎榜", "龙虎榜净卖出%.2f亿·资金出逃" % (-net / 1e8), 0))
+    expl = info.get("explanation") or ""
+    if "连续三个交易日内涨幅偏离值达20%" in expl or "连续三个交易日" in expl:
+        sc += 3
+        reasons.append(("龙虎榜", "上榜原因含『连续涨幅偏离·连板』——妖股特征", 3))
+    buy_seat = info.get("buy_seat") or 0
+    if buy_seat >= 5:
+        sc += 4
+        reasons.append(("龙虎榜", "买方%d家席位合力抢筹（游资合力强）" % buy_seat, 4))
+    elif buy_seat >= 3:
+        sc += 2
+        reasons.append(("龙虎榜", "买方%d家席位参与" % buy_seat, 2))
+    return min(14, sc), reasons
+
+
 def _board_tag(n):
     return "首板" if n <= 1 else ("%d板" % n)
 
@@ -290,6 +328,25 @@ def live_report(date=None, topn=12, with_yesterday=True):
             "boards": meta["lbc"], "reasons": reasons, "meta": meta,
             "pct": r.get("zdp"),
         })
+    ranked.sort(key=lambda x: -x["score"])
+
+    # 龙虎榜·游资合力（免费日榜：净买入/上榜原因/买方席位数）；失败则优雅跳过，不影响主流程
+    lhb_map = {}
+    try:
+        lhb_map = em_api.lhb_day_list(base)
+    except Exception:
+        lhb_map = {}
+    for it in ranked:
+        info = lhb_map.get(it["code"])
+        if info:
+            bonus, lreasons = lhb_factor(info)
+            it["lhb"] = info
+            it["lhb_bonus"] = bonus
+            it["reasons"].extend(lreasons)
+            it["score"] = min(100, it["score"] + bonus)
+        else:
+            it["lhb"] = None
+            it["lhb_bonus"] = 0
     ranked.sort(key=lambda x: -x["score"])
 
     # 连板梯隊
@@ -331,9 +388,9 @@ def format_markdown(rep):
     L.append("## 🔥 妖股潜力榜（涨停池 · 封单/板块/连板/题材启动 多维）")
     L.append("")
     L.append("> **数据日期：%s（上一交易日/最近有完整涨停数据的交易日）**" % rep.get("date"))
-    L.append("> **以下按妖股潜力分（0~100）降序推荐**，分越高=站在风口+早板强封单+适中流通盘+题材启动，妖股早期特征越明显。")
-    L.append("> 评分 = 板块联动20 + 连板位置18 + 封单强度18 + 流通盘10 + 换手8 + 封板质量16 + 题材启动10（0~100）。")
-    L.append("> 与「妖股基因(K线形态)」互补：本榜抓**实时资金+题材**维度，盘中/盘后双用。")
+    L.append("> **以下按妖股潜力分（0~100）降序推荐**，分越高=站在风口+早板强封单+适中流通盘+题材启动+龙虎榜游资合力，妖股早期特征越明显。")
+    L.append("> 评分 = 板块联动20 + 连板位置18 + 封单强度18 + 流通盘10 + 换手8 + 封板质量16 + 题材启动10，+ 龙虎榜·游资合力(净买入/买方席位/连板上榜，最高+14)（0~100）。")
+    L.append("> 与「妖股基因(K线形态)」互补：本榜抓**实时资金+题材+龙虎榜**维度，盘中/盘后双用。")
     L.append("")
     if rep.get("concept_top"):
         cs = "、".join("%s(%d)" % (c.get("name", "?"), c.get("up") or 0)
@@ -368,6 +425,12 @@ def format_markdown(rep):
                      it["sector"], m["sector_count"], m["ltsz_yi"], m["hs"],
                      m["fund_yi"], m["ratio"], m["fbt"],
                      (" ⚠炸板%d次" % m["zbc"]) if m["zbc"] else ""))
+        lh = it.get("lhb")
+        if lh:
+            net = lh.get("net_amt") or 0
+            lh_s = ("龙虎榜净买%.2f亿" % (net / 1e8)) if net > 0 else ("龙虎榜净卖%.2f亿" % (-net / 1e8))
+            L.append("- 龙虎榜：%s ｜ 买方%d家席位 ｜ 上榜原因：%s" % (
+                lh_s, lh.get("buy_seat", 0), lh.get("explanation", "")))
         for _, r, _ in sorted(it["reasons"], key=lambda x: -x[2])[:3]:
             L.append("  - %s" % r)
     if rep.get("fresh_boards"):
@@ -376,4 +439,24 @@ def format_markdown(rep):
         L.append("、".join(x["name"] for x in rep["fresh_boards"][:20]))
     L.append("")
     L.append("> ⚠️ 妖股波动极大、风险极高，本榜仅作「规律量化+线索挖掘」参考，非投资建议。")
+    return "\n".join(L)
+
+
+def top3_block(rep):
+    """妖股潜力 Top3 紧凑块（供 ServerChan 收盘主推送，字数克制）。无数据返回空串。"""
+    if not rep or not rep.get("ranked"):
+        return ""
+    L = []
+    for i, it in enumerate(rep["ranked"][:3], 1):
+        m = it["meta"]
+        lh = it.get("lhb") or {}
+        lh_s = ""
+        if lh:
+            net = lh.get("net_amt") or 0
+            lh_s = (" ｜ 龙虎榜净买%.2f亿" % (net / 1e8)) if net > 0 else (" ｜ 龙虎榜净卖%.2f亿" % (-net / 1e8))
+        top_r = "、".join(r[1].split(" · ")[0].split("（")[0]
+                          for r in sorted(it["reasons"], key=lambda x: -x[2])[:2])
+        L.append("%d. **%s**(/%s) 潜力分%d · %s ｜ %s(%d只涨停)%s ｜ %s"
+                 % (i, it["name"], it["code"], it["score"], _board_tag(it["boards"]),
+                    it["sector"], m["sector_count"], lh_s, top_r))
     return "\n".join(L)

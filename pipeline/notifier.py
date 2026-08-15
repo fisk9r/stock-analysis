@@ -990,6 +990,20 @@ def format_stock_summary(data, url="", mode="close"):
             if rs:
                 L.append("   简因：%s" % "、".join(rs[:2]))
         L.append("")
+    # 妖股潜力 Top3（收盘主推送内联，按潜力分降序；数据来自上一交易日涨停池，永不空推）
+    if mode in ("close", "close_again"):
+        try:
+            import yaogu as _yg
+            yg = data.get("yaogu")
+            if yg and yg.get("ranked"):
+                L.append("### ⚡ 妖股潜力 Top3（上一交易日 · 按潜力分降序）")
+                blk = _yg.top3_block(yg)
+                if blk:
+                    L.append(blk)
+                    L.append("> 完整妖股潜力榜（含龙虎榜游资合力/板块联动解读）见 PushPlus 推送与站点「妖股潜力」页签。")
+                L.append("")
+        except Exception:
+            pass
     if url:
         L.append("---")
         L.append("完整数据看板：%s" % url)

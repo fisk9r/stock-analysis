@@ -533,6 +533,63 @@ def dt_pool(date=None):
 
 
 # ---------------------------------------------------------------- 板块
+def lhb_day_list(date):
+    """东方财富龙虎榜日榜（免费公开接口，无需密钥）。
+
+    返回 {code: {...}}，字段含：
+      net_amt      龙虎榜净买入额(元，正=净抢筹)
+      explanation  上榜原因（含『连续三个交易日内涨幅偏离值达20%』=连板妖股特征）
+      buy_seat     买方席位数（多家席位合力抢筹=游资合力）
+      sell_seat    卖方席位数
+      change_rate  涨跌幅%
+      turnover     换手率%
+      free_cap     流通市值(元)
+      name         名称
+    用于妖股潜力『龙虎榜·游资合力』因子（净买入+买方席位数+连板上榜特征）。
+    注意：date 需为 'YYYY-MM-DD' 格式；失败返回 {}（优雅降级，不影响主流程）。"""
+    if not date:
+        return {}
+    # 支持 20260814 / 2026-08-14 两种写法
+    d = str(date).replace("-", "")
+    hyp = "%s-%s-%s" % (d[:4], d[4:6], d[6:8]) if len(d) == 8 else str(date)
+    host = "datacenter-web.eastmoney.com"
+    cols = ("SECURITY_CODE,SECURITY_NAME_ABBR,TRADE_DATE,CHANGE_RATE,BILLBOARD_NET_AMT,"
+            "TURNOVERRATE,EXPLANATION,BUY_SEAT,SELL_SEAT,FREE_MARKET_CAP")
+    url = ("https://%s/api/data/v1/get?reportName=RPT_DAILYBILLBOARD_DETAILS"
+           "&columns=%s&filter=(TRADE_DATE%%3D%%27%s%%27)"
+           "&sortColumns=BILLBOARD_NET_AMT&sortTypes=-1&pageSize=300&source=WEB&client=WEB"
+           ) % (host, cols, hyp)
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": UA, "Referer": "https://data.eastmoney.com/lhb/"})
+        d_json = json.loads(urllib.request.urlopen(req, timeout=15).read())
+        rows = (d_json.get("result") or {}).get("data") or []
+        out = {}
+        for r in rows:
+            code = str(r.get("SECURITY_CODE") or "").strip()
+            if not code:
+                continue
+            out[code] = {
+                "name": r.get("SECURITY_NAME_ABBR"),
+                "net_amt": float(r.get("BILLBOARD_NET_AMT") or 0),
+                "change_rate": float(r.get("CHANGE_RATE") or 0),
+                "turnover": float(r.get("TURNOVERRATE") or 0),
+                "explanation": r.get("EXPLANATION") or "",
+                # BUY_SEAT 是 5 位编码（每位 1=该买方席位有披露），真实买方席位数 = 编码中「1」的个数
+                # （如 11111=5席、13333=1席）；<1000 视为原始整数（兼容旧格式）。
+                "buy_seat": (str(int(r.get("BUY_SEAT") or 0)).count("1")
+                             if int(r.get("BUY_SEAT") or 0) >= 1000
+                             else int(r.get("BUY_SEAT") or 0)),
+                "sell_seat": (str(int(r.get("SELL_SEAT") or 0)).count("1")
+                              if int(r.get("SELL_SEAT") or 0) >= 1000
+                              else int(r.get("SELL_SEAT") or 0)),
+                "free_cap": float(r.get("FREE_MARKET_CAP") or 0),
+            }
+        return out
+    except Exception:
+        return {}
+
+
 def board_list(kind="industry"):
     """kind: industry(m:90 t:2) / concept(m:90 t:3)"""
     fs = "m:90+t:2+f:!50" if kind == "industry" else "m:90+t:3+f:!50"

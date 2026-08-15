@@ -1064,6 +1064,7 @@
         '<div class="note">连板 <b>' + (m.lbc || 1) + '</b>板 ｜ 板块 <b>' + E(it.sector) + '</b>（同板块 ' + (m.sector_count || 1) + ' 只涨停）</div>' +
         '<div class="note">流通市值 <b>' + f(m.ltsz_yi || 0, 0) + '</b> 亿 ｜ 封单 <b>' + f(m.fund_yi || 0, 2) + '</b> 亿（流通盘 ' + f(m.ratio || 0, 2) + '%）</div>' +
         '<div class="note">换手 <b>' + f(m.hs || 0, 1) + '%</b> ｜ 封板 <b>' + E(m.fbt || '—') + '</b>' + ((m.zbc || 0) ? ' ｜ ⚠ 炸板 ' + m.zbc + ' 次' : '') + '</div>' +
+        ((it.lhb) ? '<div class="note">🐉 龙虎榜：' + ((it.lhb.net_amt > 0) ? '净买' : '净卖') + f(Math.abs(it.lhb.net_amt || 0) / 1e8, 2) + '亿 ｜ 买方 ' + (it.lhb.buy_seat || 0) + ' 席' + (((it.lhb.explanation || '').indexOf('连续三个交易日') >= 0) ? ' ｜ 连板妖股特征' : '') + '</div>' : '') +
         '<div class="note" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border)"><b>核心因子</b></div>' +
         reasons + '</div></div>';
     }).join('') + '</div>';
@@ -1082,14 +1083,15 @@
         '<td class="r num">' + f(m.ltsz_yi || 0, 0) + '</td>' +
         '<td class="r num">' + f(m.fund_yi || 0, 2) + '<span class="faint">/' + f(m.ratio || 0, 2) + '%</span></td>' +
         '<td class="c">' + E(m.fbt || '—') + ((m.zbc || 0) ? '<span class="faint"> ⚠' + m.zbc + '</span>' : '') + '</td>' +
+        '<td class="c muted">' + ((it.lhb) ? ((it.lhb.net_amt > 0 ? '净买' : '净卖') + f(Math.abs(it.lhb.net_amt || 0) / 1e8, 2) + '亿·买' + (it.lhb.buy_seat || 0) + '席') : '<span class="faint">—</span>') + '</td>' +
         '<td class="muted" style="white-space:normal;min-width:230px">' + E(topReason ? topReason[1] : '—') + '</td></tr>';
     });
     h += card('🏆 妖股潜力榜 Top ' + ranked.length + '（按潜力分降序）', table([
       { t: '#', a: 'c' }, { t: '代码' }, { t: '名称' }, { t: '潜力分', a: 'r' },
       { t: '连板', a: 'c' }, { t: '板块（同板块涨停数）', a: 'l' }, { t: '流通亿', a: 'r' },
-      { t: '封单亿(/流通)', a: 'r' }, { t: '封板', a: 'c' }, { t: '核心因子' }
+      { t: '封单亿(/流通)', a: 'r' }, { t: '封板', a: 'c' }, { t: '龙虎榜', a: 'c' }, { t: '核心因子' }
     ], rows, { scroll: true }),
-      '潜力分 = 板块联动25 + 连板位置20 + 封单强度20 + 流通盘12 + 换手10 + 封板质量13。⚡ 高分=站风口+早板强封单+适中流通盘，妖股早期特征最明显');
+      '潜力分 = 板块联动20 + 连板位置18 + 封单强度18 + 流通盘10 + 换手8 + 封板质量16 + 题材启动10，+ 龙虎榜·游资合力（最高+14），0~100。⚡ 高分=站风口+早板强封单+适中流通盘+题材启动+游资合力，妖股早期特征最明显');
 
     /* 新晋首板 */
     if (y.fresh_boards && y.fresh_boards.length) {
