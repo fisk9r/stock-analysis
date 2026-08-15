@@ -1030,6 +1030,92 @@
     return h;
   }
 
+  /* ============ 视图 5.5：妖股潜力 ============ */
+  function viewYaogu() {
+    var y = D.yaogu;
+    if (!y || !y.ranked || !y.ranked.length)
+      return card('⚡ 妖股潜力', '<div class="empty">当日实时涨停池数据缺失（可能休市或非交易时段）</div>');
+
+    var ranked = y.ranked, h = '';
+    var genAt = y.generated_at || '';
+
+    /* 顶部概览卡 */
+    var ladderS = (y.ladder && Object.keys(y.ladder).length)
+      ? Object.keys(y.ladder).map(function (k) { return k + '板×' + y.ladder[k].length; }).join('  ')
+      : '—';
+    var conceptS = (y.concept_top && y.concept_top.length)
+      ? y.concept_top.slice(0, 6).map(function (c) { return c.name + '(' + c.up + ')'; }).join('、')
+      : '—';
+    h += card('⚡ 妖股潜力榜（实时涨停池 · 按潜力分降序）',
+      '<div class="note">当日涨停 <b>' + y.count + '</b> 只 ｜ 连板梯隊：' + E(ladderS) + '</div>' +
+      '<div class="note">今日最强题材：' + E(conceptS) + '</div>' +
+      '<div class="note faint">生成于 ' + E(genAt) +
+      ' ｜ 评分 = 板块联动 + 连板位置 + 封单强度 + 流通盘 + 换手 + 封板质量（0~100）｜ 与「妖股基因」(K线形态)互补</div>');
+
+    /* Top3 卡片：潜力分 + 核心指标 + 因子理由 */
+    h += '<div class="grid g3">' + ranked.slice(0, 3).map(function (it, idx) {
+      var m = it.meta || {};
+      var col = it.score >= 75 ? C.up : (it.score >= 60 ? C.blue : C.gray);
+      var reasons = (it.reasons || []).slice().sort(function (a, b) { return b[2] - a[2]; })
+        .slice(0, 4).map(function (r) { return '<div class="note">· ' + E(r[0]) + '：' + E(r[1]) + '</div>'; }).join('');
+      return '<div class="card"><h3>#' + (idx + 1) + ' ' + stk(it.code, it.name) +
+        ' <span class="hint">潜力 ' + f(it.score, 0) + '</span></h3><div class="body">' +
+        qBar(it.score, col) +
+        '<div class="note">连板 <b>' + (m.lbc || 1) + '</b>板 ｜ 板块 <b>' + E(it.sector) + '</b>（同板块 ' + (m.sector_count || 1) + ' 只涨停）</div>' +
+        '<div class="note">流通市值 <b>' + f(m.ltsz_yi || 0, 0) + '</b> 亿 ｜ 封单 <b>' + f(m.fund_yi || 0, 2) + '</b> 亿（流通盘 ' + f(m.ratio || 0, 2) + '%）</div>' +
+        '<div class="note">换手 <b>' + f(m.hs || 0, 1) + '%</b> ｜ 封板 <b>' + E(m.fbt || '—') + '</b>' + ((m.zbc || 0) ? ' ｜ ⚠ 炸板 ' + m.zbc + ' 次' : '') + '</div>' +
+        '<div class="note" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border)"><b>核心因子</b></div>' +
+        reasons + '</div></div>';
+    }).join('') + '</div>';
+
+    /* 潜力榜表格（严格按评分降序） */
+    var rows = ranked.map(function (it, idx) {
+      var m = it.meta || {};
+      var col = it.score >= 75 ? C.up : (it.score >= 60 ? C.blue : C.gray);
+      var topReason = (it.reasons || []).slice().sort(function (a, b) { return b[2] - a[2]; })[0];
+      return '<tr><td class="c rank">' + (idx + 1) + '</td>' +
+        '<td class="code">' + E(it.code) + '</td>' +
+        '<td class="name">' + stk(it.code, it.name) + '</td>' +
+        '<td class="r num">' + qBar(it.score, col) + ' <b>' + f(it.score, 0) + '</b></td>' +
+        '<td class="c">' + lbBadge(m.lbc || 1) + '</td>' +
+        '<td class="muted">板块 <b>' + E(it.sector) + '</b><span class="faint">（同板块 ' + (m.sector_count || 1) + ' 只）</span></td>' +
+        '<td class="r num">' + f(m.ltsz_yi || 0, 0) + '</td>' +
+        '<td class="r num">' + f(m.fund_yi || 0, 2) + '<span class="faint">/' + f(m.ratio || 0, 2) + '%</span></td>' +
+        '<td class="c">' + E(m.fbt || '—') + ((m.zbc || 0) ? '<span class="faint"> ⚠' + m.zbc + '</span>' : '') + '</td>' +
+        '<td class="muted" style="white-space:normal;min-width:230px">' + E(topReason ? topReason[1] : '—') + '</td></tr>';
+    });
+    h += card('🏆 妖股潜力榜 Top ' + ranked.length + '（按潜力分降序）', table([
+      { t: '#', a: 'c' }, { t: '代码' }, { t: '名称' }, { t: '潜力分', a: 'r' },
+      { t: '连板', a: 'c' }, { t: '板块（同板块涨停数）', a: 'l' }, { t: '流通亿', a: 'r' },
+      { t: '封单亿(/流通)', a: 'r' }, { t: '封板', a: 'c' }, { t: '核心因子' }
+    ], rows, { scroll: true }),
+      '潜力分 = 板块联动25 + 连板位置20 + 封单强度20 + 流通盘12 + 换手10 + 封板质量13。⚡ 高分=站风口+早板强封单+适中流通盘，妖股早期特征最明显');
+
+    /* 新晋首板 */
+    if (y.fresh_boards && y.fresh_boards.length) {
+      var fb = y.fresh_boards.slice(0, 24).map(function (x) {
+        return '<span class="chip">' + stk(x.code, x.name) + '<span class="faint"> ' + E(x.sector || '') + '</span></span>';
+      }).join(' ');
+      h += card('🆕 新晋首板（' + y.fresh_boards.length + ' 只 · 明日观察能否晋级二板）',
+        '<div style="line-height:2">' + fb + '</div>',
+        '首板是妖股起点。明日若能晋级二板且仍站风口，潜力分将跳升——重点关注同板块有≥2只涨停者');
+    }
+
+    /* 涨停行业强度热力 */
+    if (y.sector_top && y.sector_top.length) {
+      var sr = y.sector_top.slice(0, 12).map(function (s) {
+        return '<tr><td class="name">' + E(s.sector) + '</td><td class="r num">' +
+          qBar(s.count, C.blue) + ' <b>' + s.count + '</b></td></tr>';
+      }).join('');
+      h += card('📊 涨停行业强度 Top ' + Math.min(12, y.sector_top.length), table([
+        { t: '行业' }, { t: '涨停数', a: 'r' }
+      ], sr, { scroll: true }), '行业涨停越多=题材风口越强，妖股多诞生于最强风口');
+    }
+
+    h += '<div class="card"><div class="body"><div class="note faint">⚠️ 妖股波动极大、风险极高，本榜仅作「规律量化 + 线索挖掘」参考，非投资建议。评分维度来自涨停池单接口，与「妖股基因」(K线形态相似度)互补。</div></div></div>';
+    return h;
+  }
+
   /* ============ 视图 6：当日推荐 ============ */
   function viewRec() {
     var R = D.recommend || {}, st = (D.market || {}).sentiment || {}, cy = (D.market || {}).cycle || {};
@@ -2053,7 +2139,7 @@
     }
     initBackdrop();
     startFreshnessWatch();
-    var views = { overview: viewOverview, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, rec: viewRec, auction: viewAuction };
+    var views = { overview: viewOverview, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, rec: viewRec, auction: viewAuction };
     var done = {};
     function show(k) {
       if (!done[k]) {
