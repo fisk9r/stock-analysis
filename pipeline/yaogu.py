@@ -24,6 +24,7 @@
   lbt=末封时间 fund=封单额(元) zbc=炸板次数 hybk=行业 zttj={days,ct}
 """
 import datetime
+import math
 import time
 
 try:
@@ -459,4 +460,55 @@ def top3_block(rep):
         L.append("%d. **%s**(/%s) 潜力分%d · %s ｜ %s(%d只涨停)%s ｜ %s"
                  % (i, it["name"], it["code"], it["score"], _board_tag(it["boards"]),
                     it["sector"], m["sector_count"], lh_s, top_r))
+    return "\n".join(L)
+
+
+# ── 妖股双确认（基因 ∩ 潜力 交集）──────────────────────────────────────
+# 妖股基因(demon_scan) 抓『历史K线形态』，妖股潜力(yaogu) 抓『实时资金+题材』；
+# 两者同时命中同一只票 = 资金与形态共振，早期妖股确认度最高。
+# 确认度用几何平均 √(基因分 × 潜力分)：任一侧塌方确认度骤降，只有共振才高分。
+# 与前端 dist/app.js 的 viewOverlap 用同一公式（√(gene*pot) / ⭐双高=基因≥65且潜力≥60），
+# 后端(push)与前端(看板)保持一致。
+
+def overlap_list(demons, yaogu_ranked, top=None):
+    """把 妖股基因(demons) 与 妖股潜力(yaogu_ranked) 取交集，按确认度降序返回。
+    任一侧不在对方榜单里的票被排除（只有共振才计入）。无交集返回 []。"""
+    yg = {str(it.get("code")): it for it in (yaogu_ranked or [])}
+    out = []
+    for d in (demons or []):
+        c = str(d.get("code"))
+        if not c:
+            continue
+        y = yg.get(c)
+        if not y:
+            continue
+        gene = float(d.get("score") or 0)
+        pot = float(y.get("score") or 0)
+        confirm = math.sqrt(max(0.0, gene * pot))
+        out.append({
+            "code": c,
+            "name": d.get("name") or y.get("name"),
+            "gene": round(gene, 1),
+            "pot": round(pot, 1),
+            "confirm": round(confirm, 1),
+            "double_high": gene >= 65 and pot >= 60,
+            "demon": d,
+            "yaogu": y,
+        })
+    out.sort(key=lambda x: -x["confirm"])
+    return out[:top] if top else out
+
+
+def overlap_top3_block(demons, yaogu_ranked):
+    """妖股双确认 Top3 紧凑块（供 ServerChan 收盘主推送，字数克制）。无交集返回空串。"""
+    items = overlap_list(demons, yaogu_ranked, top=3)
+    if not items:
+        return ""
+    L = []
+    for i, it in enumerate(items, 1):
+        y = it["yaogu"]
+        star = "⭐" if it["double_high"] else ""
+        L.append("%d. %s**%s**(/%s) 确认度**%.0f** ｜ 基因%.0f·潜力%.0f ｜ %s"
+                 % (i, star, it["name"], it["code"], it["confirm"],
+                    it["gene"], it["pot"], _board_tag(y.get("boards"))))
     return "\n".join(L)

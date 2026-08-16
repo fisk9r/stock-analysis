@@ -1002,6 +1002,16 @@ def format_stock_summary(data, url="", mode="close"):
                     L.append(blk)
                     L.append("> 完整妖股潜力榜（含龙虎榜游资合力/板块联动解读）见 PushPlus 推送与站点「妖股潜力」页签。")
                 L.append("")
+            # 妖股双确认（基因∩潜力 交集，确认度=√(基因×潜力)）：资金+形态共振 =
+            # 早期妖股确认度最高的票；两者任一塌方则被排除。无交集不展示，绝不空推。
+            dms = data.get("demons")
+            if yg and yg.get("ranked") and dms:
+                oblk = _yg.overlap_top3_block(dms, yg.get("ranked"))
+                if oblk:
+                    L.append("### 🔗 妖股双确认 Top3（基因∩潜力 · 确认度=√(基因×潜力)）")
+                    L.append(oblk)
+                    L.append("> 资金+形态共振的最强早期妖股信号；完整双确认榜见站点「妖股交集」页签。")
+                    L.append("")
         except Exception:
             pass
     if url:

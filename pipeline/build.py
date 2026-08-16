@@ -760,18 +760,30 @@ def push_anomaly():
     if not s.get("has_signal"):
         print("[anomaly] 实时无显著异动（涨停池/涨幅榜均空），跳过空推送")
         return ["skipped:no-signal"]
+    # 妖股基因观察池（最近一次分析结果里的 demons）：用于盘中双确认（历史形态基因 ∩ 今日实时封板）。
+    # 盘中 CI 运行时 dist/data.js 已由 state.tar.gz 恢复，load_existing_data 可读到；
+    # 若缺失/解析失败则观察池为空，双确认段自动跳过，不影响主流程。
+    demon_map = {}
+    try:
+        _ed = load_existing_data()
+        if _ed:
+            demon_map = {str(d.get("code")): d for d in (_ed.get("demons") or [])
+                         if d.get("code")}
+    except Exception:
+        demon_map = {}
     # 2) 内容去重：只推送"今天尚未报过"的新标的，已报过的当天不再重复刷屏
     reported = notifier.reported_anomaly_codes_today()
     new_codes = [c for c in s.get("codes", []) if c and c not in reported]
     if not new_codes:
         print("[anomaly] 本轮异动标的均为已报过的票，跳过（避免重复刷屏）")
         return ["skipped:no-new"]
-    return notifier.push(_anomaly_focused(s, new_codes, _deploy_url()),
+    return notifier.push(_anomaly_focused(s, new_codes, _deploy_url(), demon_map),
                          mode="anomaly", codes=new_codes)
 
 
-def _anomaly_focused(s, new_codes, url):
-    """把本轮『新增』异动标的提炼成一条聚焦消息（已报过的不重复列出）。"""
+def _anomaly_focused(s, new_codes, url, demon_map=None):
+    """把本轮『新增』异动标的提炼成一条聚焦消息（已报过的不重复列出）。
+    demon_map：妖股基因观察池 {code: demon}（来自最近一次分析结果），用于盘中双确认高亮。"""
     now = time.strftime("%Y-%m-%d %H:%M")
     newset = set(new_codes)
     n_zt = [it for it in (s.get("zt") or []) if str(it.get("c")) in newset]
@@ -836,6 +848,22 @@ def _anomaly_focused(s, new_codes, url):
             L.append("- **%s**(/%s) 潜力分%d · %s · 封单%.2f亿(流通盘%.2f%%) · %s封板%s"
                      % (it.get("n"), it.get("c"), sc, tag, meta["fund_yi"],
                         meta["ratio"], meta["fbt"], warn))
+    # ⭐ 妖股双确认（盘中 · 历史形态基因 ∩ 今日实时封板）：观察池里具妖股基因的票今日共振封板，
+    # 是盘中最早出现的强信号之一。只取本轮【新增封板】(new_codes)，天然按日去重、不刷屏。
+    if demon_map:
+        dc = [it for it in n_zt if str(it.get("c")) in demon_map]
+        if dc:
+            L.append("")
+            L.append("### ⭐ 妖股双确认（盘中 · 历史形态基因 + 今日封板）")
+            for it in dc[:8]:
+                code = str(it.get("c")); d = demon_map[code]
+                name = it.get("n") or d.get("name")
+                lbc = it.get("lbc") or 1
+                tag = ("%d板" % lbc) if lbc and lbc > 1 else "首板"
+                sim = (d.get("similar") or [])
+                sim_s = ("（神似历史妖股：%s）" % sim[0].get("name")) if sim else ""
+                L.append("- **%s**(/%s) %s · %s%s"
+                         % (name, code, tag, (it.get("hybk") or "—"), sim_s))
     zt_all = s.get("zt") or []
     mv_all = s.get("movers") or []
     L.append("### 📊 当前盘面")
