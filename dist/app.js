@@ -69,6 +69,8 @@
     return h + '</tbody></table></div>';
   }
   function seg(v, lo, hi) { return Math.max(0, Math.min(100, (v - lo) / (hi - lo) * 100)); }
+  /* 股票代码归一化（去除 sh/sz 前缀与非数字字符），用于跨数据源 JOIN */
+  function normCode(c) { return String(c == null ? '' : c).replace(/\D/g, ''); }
 
   /* ---------------- 数字滚动动画（仅在浏览器生效；无头环境安全跳过） ---------------- */
   function initCountUp(root) {
@@ -1119,6 +1121,161 @@
   }
 
   /* ============ 视图 6：当日推荐 ============ */
+  /* ============ 视图 5.8：妖股双确认（妖股潜力 ∩ 妖股基因 交集筛选） ============ */
+  var OVERLAP_DATA = null;
+  var OVERLAP_STATE = { f: 'all', s: 'confirm' };
+  function viewOverlap() {
+    var dem = (D.demons || []).slice();
+    var y = D.yaogu;
+    var yRank = (y && y.ranked) || [];
+    var ymap = {};
+    yRank.forEach(function (it) { ymap[normCode(it.code)] = it; });
+    var dmap = {};
+    dem.forEach(function (d) { dmap[normCode(d.code)] = d; });
+
+    /* 交集：同时出现在「妖股基因」与「妖股潜力」两榜的标的 */
+    var inter = [];
+    Object.keys(dmap).forEach(function (code) {
+      var d = dmap[code];
+      var yit = ymap[code];
+      if (!yit) return;
+      var ds = d.score || 0, ys = yit.score || 0;
+      var confirm = Math.sqrt(Math.max(0, ds) * Math.max(0, ys)); /* 几何平均，奖励两者皆高 */
+      inter.push({
+        code: code,
+        name: d.name || yit.name,
+        streak: d.streak || (yit.meta && yit.meta.lbc) || 1,
+        industry: d.industry || yit.sector || '—',
+        demon: ds, yaogu: ys, confirm: confirm,
+        dbl: (ds >= 65 && ys >= 60),
+        ditem: d, yitem: yit,
+        similar: d.similar || [],
+        lhb: yit.lhb,
+        reasons: yit.reasons || [],
+        meta: yit.meta || {}
+      });
+    });
+    OVERLAP_DATA = inter;
+
+    if (!inter.length)
+      return card('⚡🧬 妖股双确认', '<div class="empty">当日无同时登上「妖股基因」与「妖股潜力」两榜的标的（可能休市、非交易时段或两榜无重叠）</div>');
+
+    var dblN = inter.filter(function (x) { return x.dbl; }).length;
+    var h = '';
+    h += card('⚡🧬 妖股双确认（交集筛选）',
+      '<div class="note">🧬 妖股基因榜 <b>' + dem.length + '</b> 只 ｜ ⚡ 妖股潜力榜 <b>' + yRank.length +
+      '</b> 只 ｜ 同时登上两榜的「双确认」标的 <b style="color:var(--up)">' + inter.length + '</b> 只（其中 ⭐双高 ' + dblN + ' 只）</div>' +
+      '<div class="note faint">⚡ 妖股潜力=实时资金+题材（涨停池单接口） ｜ 🧬 妖股基因=历史K线形态相似度（本地K线库）。两者【同时高分】= 资金与形态共振，早期妖股确认度最高。</div>',
+      '确认度 = √(基因分 × 潜力分) 的几何平均：任一维度塌方则确认度骤降，只有「资金+形态」共振才给高分');
+
+    /* 筛选 / 排序工具栏 */
+    h += '<div class="toolbar" id="ov-bar">' +
+      '<span class="muted" style="font-weight:600">筛选：</span>' +
+      ovChip('all', '全部交集', 'f') +
+      ovChip('dbl', '⭐ 双高(基因≥65 & 潜力≥60)', 'f') +
+      ovChip('yhi', '潜力≥75', 'f') +
+      ovChip('dhi', '基因≥70', 'f') +
+      '<span class="muted" style="font-weight:600;margin-left:10px">排序：</span>' +
+      ovChip('confirm', '确认度', 's') +
+      ovChip('y', '潜力分', 's') +
+      ovChip('d', '基因分', 's') +
+      '</div>';
+
+    h += '<div id="ov-body">' + renderOverlapBody(inter, OVERLAP_STATE) + '</div>';
+    return h;
+  }
+
+  function ovChip(v, label, kind) {
+    var active = (kind === 'f' && OVERLAP_STATE.f === v) || (kind === 's' && OVERLAP_STATE.s === v);
+    var st = active
+      ? 'border-color:var(--accent);color:var(--accent);box-shadow:var(--glow-soft);background:var(--accent-bg);font-weight:700'
+      : '';
+    return '<button type="button" class="pat-chip ov-chip" data-kind="' + kind + '" data-v="' + E(v) +
+      '" style="' + st + '">' + E(label) + '</button>';
+  }
+
+  function renderOverlapBody(inter, state) {
+    var rows = inter.slice();
+    if (state.f === 'dbl') rows = rows.filter(function (x) { return x.dbl; });
+    else if (state.f === 'yhi') rows = rows.filter(function (x) { return x.yaogu >= 75; });
+    else if (state.f === 'dhi') rows = rows.filter(function (x) { return x.demon >= 70; });
+    rows.sort(function (a, b) {
+      if (state.s === 'y') return b.yaogu - a.yaogu;
+      if (state.s === 'd') return b.demon - a.demon;
+      return b.confirm - a.confirm;
+    });
+    if (!rows.length) return '<div class="empty">当前筛选条件下无符合条件的双确认标的</div>';
+
+    var flabel = state.f === 'dbl' ? '⭐ 双高' : state.f === 'yhi' ? '潜力≥75' : state.f === 'dhi' ? '基因≥70' : '全部交集';
+    var sobj = state.s === 'y' ? '潜力分' : state.s === 'd' ? '基因分' : '确认度';
+
+    /* Top3 双确认卡片 */
+    var top = rows.slice(0, 3);
+    var cards = '<div class="grid g3">' + top.map(function (x, idx) {
+      var ccol = x.confirm >= 70 ? C.up : x.confirm >= 55 ? C.gold : C.gray;
+      var dcol = x.demon >= 65 ? C.up : C.blue;
+      var ycol = x.yaogu >= 75 ? C.up : (x.yaogu >= 60 ? C.blue : C.gray);
+      var sim = (x.similar || [])[0] || {};
+      var badge = x.dbl ? '<span class="bd lb4" style="margin-left:4px">⭐双高</span>' : '';
+      var reasons = (x.reasons || []).slice().sort(function (a, b) { return b[2] - a[2]; }).slice(0, 3)
+        .map(function (r) { return '<div class="note">· ' + E(r[0]) + '：' + E(r[1]) + '</div>'; }).join('');
+      return '<div class="card"><h3>#' + (idx + 1) + ' ' + stk(x.code, x.name) + badge +
+        ' <span class="hint">确认 ' + f(x.confirm, 0) + '</span></h3><div class="body">' +
+        '<div class="kv" style="margin-bottom:6px">' +
+        '<span>🧬 基因 <b style="color:' + dcol + '">' + f(x.demon, 0) + '</b></span>' +
+        '<span>⚡ 潜力 <b style="color:' + ycol + '">' + f(x.yaogu, 0) + '</b></span>' +
+        '<span>连板 <b>' + (x.streak || 1) + '</b>板</span>' +
+        '</div>' +
+        qBar(x.confirm, ccol) +
+        '<div class="note">行业 <b>' + E(x.industry) + '</b></div>' +
+        (sim.name ? '<div class="note" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border)">形态最像 <b>' + E(sim.name) + '</b>（相似 ' + f(sim.sim, 0) + '% · 当时 +' + f(sim.gain, 0) + '%）</div>' : '') +
+        (x.lhb ? '<div class="note">🐉 龙虎榜：' + ((x.lhb.net_amt > 0) ? '净买' : '净卖') + f(Math.abs(x.lhb.net_amt || 0) / 1e8, 2) + '亿·买' + (x.lhb.buy_seat || 0) + '席</div>' : '') +
+        (reasons ? '<div class="note" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border)"><b>核心因子</b></div>' + reasons : '') +
+        '</div></div>';
+    }).join('') + '</div>';
+
+    /* 全量双确认表 */
+    var trs = rows.map(function (x, i) {
+      var ccol = x.confirm >= 70 ? C.up : x.confirm >= 55 ? C.gold : C.gray;
+      var sim = (x.similar || [])[0] || {};
+      var topReason = (x.reasons || []).slice().sort(function (a, b) { return b[2] - a[2]; })[0];
+      return '<tr><td class="c rank">' + (i + 1) + '</td>' +
+        '<td class="code">' + E(x.code) + '</td>' +
+        '<td class="name">' + stk(x.code, x.name) + (x.dbl ? ' <span class="bd lb4" style="font-size:10px">⭐双高</span>' : '') + '</td>' +
+        '<td class="c">' + lbBadge(x.streak || 1) + '</td>' +
+        '<td class="muted">' + E(x.industry) + '</td>' +
+        '<td class="r num">' + qBar(x.demon, x.demon >= 65 ? C.up : C.blue) + ' <b>' + f(x.demon, 0) + '</b></td>' +
+        '<td class="r num">' + qBar(x.yaogu, x.yaogu >= 75 ? C.up : (x.yaogu >= 60 ? C.blue : C.gray)) + ' <b>' + f(x.yaogu, 0) + '</b></td>' +
+        '<td class="r num">' + qBar(x.confirm, ccol) + ' <b style="color:' + ccol + '">' + f(x.confirm, 0) + '</b></td>' +
+        '<td class="c">' + (x.lhb ? ((x.lhb.net_amt > 0 ? '净买' : '净卖') + f(Math.abs(x.lhb.net_amt || 0) / 1e8, 2) + '亿·买' + (x.lhb.buy_seat || 0) + '席') : '<span class="faint">—</span>') + '</td>' +
+        '<td class="muted" style="white-space:normal;min-width:200px">' + (sim.name ? ('形态最像 <b>' + E(sim.name) + '</b> ' + f(sim.sim, 0) + '%') : '—') + '</td>' +
+        '<td class="muted" style="white-space:normal;min-width:200px">' + E(topReason ? topReason[1] : '—') + '</td></tr>';
+    });
+    return cards + card('⚡🧬 双确认榜（' + rows.length + ' 只 · ' + flabel + ' · 按' + sobj + '降序）',
+      table([
+        { t: '#', a: 'c' }, { t: '代码' }, { t: '名称' }, { t: '连板', a: 'c' }, { t: '行业' },
+        { t: '🧬 基因', a: 'r' }, { t: '⚡ 潜力', a: 'r' }, { t: '确认度', a: 'r' },
+        { t: '龙虎榜', a: 'c' }, { t: '形态最像', a: 'l' }, { t: '核心因子', a: 'l' }
+      ], trs, { scroll: true }),
+      '确认度 = √(基因分 × 潜力分)。⭐双高 = 基因≥65 且 潜力≥60，是「资金+形态」共振的最强早期妖股信号');
+  }
+
+  function applyOverlapFilter(kind, v) {
+    if (kind === 'f') OVERLAP_STATE.f = v; else if (kind === 's') OVERLAP_STATE.s = v;
+    var body = document.getElementById('ov-body');
+    if (body && OVERLAP_DATA) body.innerHTML = renderOverlapBody(OVERLAP_DATA, OVERLAP_STATE);
+    var bar = document.getElementById('ov-bar');
+    if (bar) [].forEach.call(bar.querySelectorAll('.ov-chip'), function (b) {
+      var on = (b.dataset.kind === kind && b.dataset.v === v);
+      b.style.borderColor = on ? 'var(--accent)' : '';
+      b.style.color = on ? 'var(--accent)' : '';
+      b.style.boxShadow = on ? 'var(--glow-soft)' : '';
+      b.style.background = on ? 'var(--accent-bg)' : '';
+      b.style.fontWeight = on ? '700' : '';
+    });
+    if (body) initCountUp(body);
+  }
+
   function viewRec() {
     var R = D.recommend || {}, st = (D.market || {}).sentiment || {}, cy = (D.market || {}).cycle || {};
     var ML = R.mainline_map || {};
@@ -2141,7 +2298,7 @@
     }
     initBackdrop();
     startFreshnessWatch();
-    var views = { overview: viewOverview, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, rec: viewRec, auction: viewAuction };
+    var views = { overview: viewOverview, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction };
     var done = {};
     function show(k) {
       if (!done[k]) {
@@ -2167,6 +2324,8 @@
       var t = e.target; if (!t || !t.closest) return;
       var st = t.closest('.stk');
       if (st && st.dataset && st.dataset.code) { e.preventDefault(); openKline(st.dataset.code, st.dataset.name); return; }
+      var oc = t.closest('.ov-chip');
+      if (oc && oc.dataset && oc.dataset.kind) { applyOverlapFilter(oc.dataset.kind, oc.dataset.v); return; }
       var pc = t.closest('.pat-chip');
       if (pc && pc.dataset && pc.dataset.p) { openPatternList(pc.dataset.p); return; }
     });
