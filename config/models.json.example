@@ -1,18 +1,17 @@
 {
-  "_说明": "复制本文件为 models.json。全部字段可选；不填则仅由宿主 Hy3 引擎驱动（基于真实数字撰写复盘）。填入 api_key 后，对应模型会并行参与『次日方向 + 关键标的 + 风险』判断，并与其他模型形成共识。三者均为 OpenAI 兼容接口。",
-  "deepseek": {
-    "base_url": "https://api.deepseek.com/v1",
-    "api_key": "sk-xxxxxxxxxxxxxxxx",
-    "model": "deepseek-chat"
-  },
-  "kimi": {
-    "base_url": "https://api.moonshot.cn/v1",
-    "api_key": "sk-xxxxxxxxxxxxxxxx",
-    "model": "moonshot-v1-8k"
-  },
-  "qwen": {
-    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "api_key": "sk-xxxxxxxxxxxxxxxx",
-    "model": "qwen-max"
-  }
+  "_说明": "复制本文件为 models.json（已被 .gitignore 忽略，密钥绝不入库）。全部字段可选；不填则仅由宿主 Hy3 引擎驱动（基于真实数字撰写复盘）。给任意接口填 api_key 后，它会在每日分析中并行参与『次日方向 + 关键标的 + 风险』判断，并与其他模型形成共识。若 Hy3 不可用，只要有一个外部接口可用，共识照常产出——这就是『换模型』的兜底。",
+  "_密钥来源二选一": "① 直接填下面 api_key；② 用环境变量 AI_<NAME>_KEY（如 AI_OPENAI_KEY），适合 GitHub Actions 用 Secrets 注入，连 models.json 都不用建。api_key 也可写成 \"${ENV:OPENAI_API_KEY}\" 从环境变量读。",
+  "_协议": "openai=OpenAI 兼容 /chat/completions；anthropic=原生 Messages；gemini=原生 generateContent。除 openai 外另两种由代码自动适配，无需你关心。",
+
+  "openai":    { "base_url": "https://api.openai.com/v1",                                  "api_key": "sk-xxxxxxxx",        "model": "gpt-5.1" },
+  "deepseek":  { "base_url": "https://api.deepseek.com/v1",                                 "api_key": "sk-xxxxxxxx",        "model": "deepseek-chat" },
+  "kimi":      { "base_url": "https://api.moonshot.cn/v1",                                  "api_key": "sk-xxxxxxxx",        "model": "kimi-k2" },
+  "qwen":      { "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",          "api_key": "sk-xxxxxxxx",        "model": "qwen-max" },
+  "zhipu":     { "base_url": "https://open.bigmodel.cn/api/paas/v4",                        "api_key": "xxxxxxxx",           "model": "glm-4-plus" },
+  "doubao":    { "base_url": "https://ark.cn-beijing.volces.com/api/v3",                   "api_key": "xxxxxxxx",           "model": "doubao-seed-1-6-250615" },
+  "hunyuan":   { "base_url": "https://api.hunyuan.cloud.tencent.com/v1",                   "api_key": "xxxxxxxx",           "model": "hunyuan-turbo" },
+  "yi":        { "base_url": "https://api.lingyiwanwu.com/v1",                             "api_key": "xxxxxxxx",           "model": "yi-large" },
+  "grok":      { "base_url": "https://api.x.ai/v1",                                        "api_key": "xai-xxxxxxxx",       "model": "grok-4" },
+  "anthropic": { "kind": "anthropic", "base_url": "https://api.anthropic.com/v1",          "api_key": "sk-ant-xxxxxxxx",    "model": "claude-sonnet-4-6" },
+  "gemini":    { "kind": "gemini",   "base_url": "https://generativelanguage.googleapis.com/v1beta", "api_key": "xxxxxxxx", "model": "gemini-2.5-pro" }
 }

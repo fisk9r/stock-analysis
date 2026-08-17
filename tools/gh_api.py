@@ -64,7 +64,13 @@ def api(method, path, data=None, binary=None, base=API, timeout=120):
             r = urllib.request.urlopen(req, timeout=timeout)
             return r.status, r.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
-            return e.code, e.read().decode("utf-8", "replace")
+            code = e.code
+            # 5xx 为服务端瞬时故障（如 GitHub 503 No server available），应重试而非立即失败
+            if code in (500, 502, 503, 504) and _attempt < 2:
+                last_err = e
+                time.sleep(2 * (_attempt + 1))
+                continue
+            return code, e.read().decode("utf-8", "replace")
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             last_err = e
             if _attempt < 2:
