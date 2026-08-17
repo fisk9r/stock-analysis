@@ -20,6 +20,9 @@
     即并行征询其对次日 A 股方向 / 重点标的 / 风险的判断，并与其他模型形成共识。
   · 无密钥 / 调用失败 → 优雅跳过，不影响主流程；多模型共识降级为可用部分，全无则回退模板。
   · 换脑兜底：若 Hy3 不可用，只要任一外部接口可用，共识照常产出——这就是"换模型"的兜底。
+  · 叙事备用（HY3 缺席时）：若 dist/ai_narrative.json 不存在/日期不符（即 HY3 未撰写），
+    自动用首选备用模型（默认 kimi，可在 config/models.json 的 narrative_backup 指定）生成
+    同格式叙事（headline/bullets/outlook），避免退回冷模板。
 
 密钥来源（二选一，均不入库）：
   1) config/models.json（已被 .gitignore 忽略，本地保存）；
@@ -319,6 +322,75 @@ def judge(data):
         "n_models": len(verdicts),
     }
     return consensus
+
+
+# ----------------------- 叙事备用（HY3 缺席时） -----------------------
+
+def _build_narrative_prompt(data):
+    """在共识 prompt 基础上，要求模型输出与 Hy3 同格式的盘后综述。"""
+    base = _build_prompt(data)
+    return base + (
+        "\n请撰写盘后综述，严格只输出JSON："
+        '{"headline":"一句话标题","bullets":["3-5条要点"],"outlook":"次日展望一句话"}'
+    )
+
+
+def _norm_narrative(v, label):
+    if not isinstance(v, dict):
+        return None
+    headline = (v.get("headline") or "").strip()
+    bullets = v.get("bullets") or []
+    if isinstance(bullets, str):
+        bullets = [b.strip() for b in bullets.replace("。", "\n").split("\n") if b.strip()]
+    bullets = [str(b).strip(" 。") for b in bullets if str(b).strip()][:6]
+    outlook = (v.get("outlook") or v.get("comment") or "").strip()
+    if not (headline or bullets):
+        return None
+    return {
+        "headline": headline,
+        "bullets": bullets,
+        "outlook": outlook,
+        "generated_by": "%s（HY3 备用）" % label,
+        "ai_generated": True,
+        "source": "model-backup",
+    }
+
+
+def generate_narrative_backup(data, preferred=None):
+    """HY3 叙事文件不可用时，用外部模型生成同格式叙事。
+
+    优先级：preferred（默认 kimi，或在 config/models.json 的 narrative_backup 列表指定）
+    置顶，其余按预设顺序逐个尝试；首个成功即返回，全部失败返回 None（调用方保留模板）。
+
+    返回结构含 headline/bullets/outlook/generated_by/ai_generated/source。
+    """
+    cfg = load_model_config()
+    if preferred is None:
+        nb = cfg.get("narrative_backup")
+        pref_list = nb if isinstance(nb, list) and nb else ["kimi"]
+    elif isinstance(preferred, str):
+        pref_list = [preferred]
+    else:
+        pref_list = list(preferred)
+    providers = get_active_providers()
+    if not providers:
+        return None
+    order = []
+    for n in list(pref_list) + list(PROVIDER_PRESETS.keys()):
+        if n in providers and n not in order:
+            order.append(n)
+    prompt = _build_narrative_prompt(data)
+    system = "你是专业的A股复盘分析师，负责撰写盘后综述。严格只输出JSON，不要解释。"
+    for name in order:
+        try:
+            raw = _chat_once(name, providers[name], prompt, system=system, timeout=45)
+            nv = _norm_narrative(raw, providers[name].get("label", name))
+            if nv:
+                print("[ai_judge] HY3 不可用，已用备用模型 %s 生成叙事" % name)
+                return nv
+        except Exception as e:
+            print("[ai_judge] 备用叙事 %s 失败，尝试下一接口：%r" % (name, e))
+    return None
 
 
 # ----------------------- CLI：接口自检 -----------------------

@@ -558,12 +558,28 @@ def run(date_override=None, dedup_close=False):
                 data["narrative"]["ai_generated"] = True
                 data["narrative"]["generated_by"] = ai.get("generated_by", "Hy3 引擎")
                 data["narrative"]["generated_at"] = ai.get("generated_at", "")
+                data["narrative"]["hy3_applied"] = True
                 log("  采用 Hy3 引擎叙事（%s，%s）" % (ai.get("generated_by", "Hy3"), ai.get("date")))
             else:
                 log("  ai_narrative.json 日期(%s)与本次(%s)不符，使用引擎模板叙事" %
                     (ai.get("date"), data["meta"].get("date")))
         except Exception as e:
-            log("  ai_narrative.json 读取失败，回退模板叙事：%s" % e)
+                log("  ai_narrative.json 读取失败，回退模板叙事：%s" % e)
+    # HY3 引擎叙事未采用（脚本环境无宿主撰写文件 / 日期不符）→ 启用备用模型生成叙事
+    if not data["narrative"].get("hy3_applied"):
+        try:
+            backup = ai_judge.generate_narrative_backup(data, preferred="kimi")
+            if backup:
+                data["narrative"]["headline"] = backup["headline"]
+                data["narrative"]["bullets"] = backup["bullets"]
+                data["narrative"]["outlook"] = backup.get("outlook", data["narrative"].get("outlook", ""))
+                data["narrative"]["ai_generated"] = True
+                data["narrative"]["generated_by"] = backup["generated_by"]
+                data["narrative"]["generated_at"] = time.strftime("%Y-%m-%d %H:%M")
+                data["narrative"]["hy3_backup"] = True
+                log("  备用模型叙事已生成（%s）" % backup["generated_by"])
+        except Exception as e:
+            log("  备用模型叙事失败，保留模板叙事：%r" % e)
     data["meta"]["build_seconds"] = round(time.time() - t0, 1)
 
     # ---- 信息推送（微信/Telegram/邮件），失败不影响主流程 ----
