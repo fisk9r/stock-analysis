@@ -54,7 +54,7 @@ PROVIDER_PRESETS = {
     "deepseek":  {"kind": "openai",   "base_url": "https://api.deepseek.com/v1",
                   "model": "deepseek-chat", "label": "DeepSeek"},
     "kimi":      {"kind": "openai",   "base_url": "https://api.moonshot.cn/v1",
-                  "model": "kimi-k2", "label": "Moonshot Kimi"},
+                  "model": "kimi-k2.6", "temperature": 1, "label": "Moonshot Kimi"},
     "qwen":      {"kind": "openai",   "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
                   "model": "qwen-max", "label": "阿里通义 Qwen"},
     "zhipu":     {"kind": "openai",   "base_url": "https://open.bigmodel.cn/api/paas/v4",
@@ -108,13 +108,15 @@ def _extract_json(text):
         return None
 
 
-def _openai_chat(base_url, api_key, model, prompt, system, timeout):
+def _openai_chat(base_url, api_key, model, prompt, system, timeout, temperature=0.3, max_tokens=None):
     url = base_url.rstrip("/") + "/chat/completions"
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": prompt}]
 
     def _do(use_rf):
-        payload = {"model": model, "temperature": 0.3, "messages": messages}
+        payload = {"model": model, "temperature": temperature, "messages": messages}
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
         if use_rf:
             payload["response_format"] = {"type": "json_object"}
         req = urllib.request.Request(
@@ -126,11 +128,27 @@ def _openai_chat(base_url, api_key, model, prompt, system, timeout):
             d = json.loads(r.read().decode("utf-8", "ignore"))
         return d["choices"][0]["message"]["content"]
 
-    try:
-        return _do(True)
-    except urllib.error.HTTPError:
-        # 部分国产兼容接口不支持 response_format，去掉再试一次
-        return _do(False)
+    # 速率限制(429)退避重试：国产模型账号 RPM 常很低（如 Moonshot 免费档仅 3/min），
+    # 一次 429 不应直接判失败——退避 3s/6s/9s 后重试，显著提升"HY3 备用叙事"可用性。
+    # 交替尝试 response_format（部分国产接口不支持该字段，需去掉再试）。
+    last = None
+    for attempt in range(4):
+        use_rf = (attempt % 2 == 0)
+        try:
+            return _do(use_rf)
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code == 429 and attempt < 3:
+                time.sleep(3 * (attempt + 1))
+                continue
+            # 非 429：按原语义去掉 response_format 再试最后一次
+            if attempt == 0:
+                try:
+                    return _do(False)
+                except urllib.error.HTTPError as e2:
+                    last = e2
+            break
+    raise last
 
 
 def _anthropic_chat(base_url, api_key, model, prompt, system, timeout):
@@ -184,7 +202,7 @@ def get_active_providers():
     return out
 
 
-def _chat_once(name, cfg, prompt, system=None, timeout=40):
+def _chat_once(name, cfg, prompt, system=None, timeout=40, max_tokens=None):
     kind = cfg.get("kind") or "openai"
     base = cfg.get("base_url")
     model = cfg.get("model")
@@ -192,12 +210,14 @@ def _chat_once(name, cfg, prompt, system=None, timeout=40):
     system = system or _SYSTEM
     if not (base and model and key):
         raise RuntimeError("接口 %s 缺少 base_url / model / api_key" % name)
+    temperature = cfg.get("temperature", 0.3)
     if kind == "anthropic":
         raw = _anthropic_chat(base, key, model, prompt, system, timeout)
     elif kind == "gemini":
         raw = _gemini_chat(base, key, model, prompt, system, timeout)
     else:
-        raw = _openai_chat(base, key, model, prompt, system, timeout)
+        raw = _openai_chat(base, key, model, prompt, system, timeout,
+                           temperature=temperature, max_tokens=max_tokens)
     return _extract_json(raw)
 
 
@@ -327,11 +347,29 @@ def judge(data):
 # ----------------------- 叙事备用（HY3 缺席时） -----------------------
 
 def _build_narrative_prompt(data):
-    """在共识 prompt 基础上，要求模型输出与 Hy3 同格式的盘后综述。"""
-    base = _build_prompt(data)
-    return base + (
+    """精简、只问 headline/bullets/outlook 的叙事 prompt。
+
+    不复用共识(方向判断)长模板——曾因要求模型同时输出『方向/置信/标的/风险』+
+    『标题/要点/展望』超长组合 JSON，导致 kimi-k2.6 在 45s 内生成不完而超时；
+    且 _norm_narrative 只读 headline/bullets/outlook，组合 schema 下这些字段常缺失→静默返回 None。
+    改为简短数据摘要 + 单一叙事 schema，输出短、不易超时、字段齐全。"""
+    m = data.get("meta", {}) or {}
+    date = m.get("date", "")
+    sent = data.get("market", {}).get("sentiment", {}) or {}
+    cyc = data.get("market", {}).get("cycle", {}) or {}
+    lus = data.get("limit_ups", []) or []
+    rec = data.get("recommend", {}) or {}
+    core = rec.get("core") or []
+    top = "、".join("%s(%d板)" % (r.get("name"), r.get("streak", 0) or 0)
+                     for r in core[:5]) or "无"
+    hi = max([r.get("streak", 0) for r in lus], default=0)
+    summary = ("【%s A股盘后】情绪温度计%.1f(%s)，周期%s；涨停%d只，最高%d连板；"
+               "核心候选：%s。" % (
+                   date, sent.get("score", 0), sent.get("label", ""),
+                   cyc.get("phase", ""), len(lus), hi, top))
+    return summary + (
         "\n请撰写盘后综述，严格只输出JSON："
-        '{"headline":"一句话标题","bullets":["3-5条要点"],"outlook":"次日展望一句话"}'
+        '{"headline":"一句话标题","bullets":["要点1","要点2","要点3"],"outlook":"次日展望一句话"}'
     )
 
 
@@ -382,14 +420,22 @@ def generate_narrative_backup(data, preferred=None):
     prompt = _build_narrative_prompt(data)
     system = "你是专业的A股复盘分析师，负责撰写盘后综述。严格只输出JSON，不要解释。"
     for name in order:
-        try:
-            raw = _chat_once(name, providers[name], prompt, system=system, timeout=45)
+        nv = None
+        # 内重试：Kimi 等国产模型的 json_mode 偶发抽风（返回非 JSON / 截断），
+        # 首次拿到响应但解析为 None 时，再试一次往往成功；真正抛异常（429/超时）才跳下一接口。
+        for _try in range(2):
+            try:
+                raw = _chat_once(name, providers[name], prompt, system=system,
+                                timeout=90, max_tokens=700)
+            except Exception as e:
+                print("[ai_judge] 备用叙事 %s 失败，尝试下一接口：%r" % (name, e))
+                break
             nv = _norm_narrative(raw, providers[name].get("label", name))
             if nv:
-                print("[ai_judge] HY3 不可用，已用备用模型 %s 生成叙事" % name)
-                return nv
-        except Exception as e:
-            print("[ai_judge] 备用叙事 %s 失败，尝试下一接口：%r" % (name, e))
+                break
+        if nv:
+            print("[ai_judge] HY3 不可用，已用备用模型 %s 生成叙事" % name)
+            return nv
     return None
 
 

@@ -5,7 +5,7 @@
 
   "openai":    { "base_url": "https://api.openai.com/v1",                                  "api_key": "sk-xxxxxxxx",        "model": "gpt-5.1" },
   "deepseek":  { "base_url": "https://api.deepseek.com/v1",                                 "api_key": "sk-xxxxxxxx",        "model": "deepseek-chat" },
-  "kimi":      { "base_url": "https://api.moonshot.cn/v1",                                  "api_key": "sk-xxxxxxxx",        "model": "kimi-k2" },
+  "kimi":      { "base_url": "https://api.moonshot.cn/v1",                                  "api_key": "sk-xxxxxxxx",        "model": "kimi-k2.6", "temperature": 1 },
   "qwen":      { "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",          "api_key": "sk-xxxxxxxx",        "model": "qwen-max" },
   "zhipu":     { "base_url": "https://open.bigmodel.cn/api/paas/v4",                        "api_key": "xxxxxxxx",           "model": "glm-4-plus" },
   "doubao":    { "base_url": "https://ark.cn-beijing.volces.com/api/v3",                   "api_key": "xxxxxxxx",           "model": "doubao-seed-1-6-250615" },
