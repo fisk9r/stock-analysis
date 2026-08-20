@@ -2258,6 +2258,230 @@
       '<div class="kl-hint">点击任意个股名称，查看其日 K 线。</div></div>';
   }
 
+  /* ---------------- 牛股雷达 ---------------- */
+  function sigBadge(s) {
+    var m = {
+      '阶段新高突破': 't-main', '平台突破': 't-main', '二波启动': 't-main', '趋势加速': 't-main',
+      '反包': 't-sub', '均线发散': 't-sub', '深水拉板': 't-sub', '低位首板': 't-min',
+      'N字回调': 't-min', '缺口不补': 't-min'
+    };
+    return '<span class="bd ' + (m[s] || 't-min') + '">' + E(s) + '</span>';
+  }
+  function viewBull() {
+    var rep = D.bull || [];
+    var h = '';
+    var multi = rep.filter(function (x) { return x.multi >= 2; }).length;
+    var best = rep[0] || {};
+    h += '<div class="grid g4" style="margin-bottom:16px">' +
+      kpi('雷达命中', n2(rep.length), '多维度独立探测器共振', rep.length ? 'up' : '') +
+      kpi('多信号共振', n2(multi), '≥2 维信号同时命中', multi ? 'up' : '') +
+      kpi('最强标的', best.name ? E(best.name) : '—', best.signals ? best.signals.join('+') : '暂无') +
+      kpi('最高评分', f(best.score), '信号强度加权', '') +
+      '</div>';
+    var desc = '10 类独立牛股探测器：阶段新高突破 · 平台突破 · 二波启动 · 反包 · 均线发散 · 深水拉板 · 低位首板 · N字回调 · 缺口不补 · 趋势加速。多维度共振越多，确定性越高。';
+    if (!rep.length) {
+      h += card('🐂 牛股雷达', '<div class="empty">今日无明确牛股信号（市场偏冷或风格混沌，建议控仓等待）</div>', desc);
+      return h;
+    }
+    var rows = rep.map(function (it) {
+      var sig = (it.signals || []).map(function (s) { return sigBadge(s); }).join(' ');
+      return '<tr>' +
+        '<td>' + stk(it.code, it.name) + '</td>' +
+        '<td>' + sig + '</td>' +
+        '<td class="num">' + f(it.score) + '</td>' +
+        '<td class="num">' + (it.price != null ? f(it.price) : '—') + '</td>' +
+        '<td class="num ' + ((it.pct || 0) >= 0 ? 'up' : 'down') + '">' + (it.pct != null ? sign(it.pct) : '—') + '</td>' +
+        '<td class="num">' + (it.vol_ratio ? f(it.vol_ratio, 1) : '—') + '</td>' +
+        '<td>' + E(it.ind || '') + '</td>' +
+        '<td class="muted">' + E(it.tags || '') + '</td>' +
+        '</tr>';
+    }).join('');
+    var cols = [
+      { t: '个股' }, { t: '信号' }, { t: '评分', a: 'num' }, { t: '现价', a: 'num' },
+      { t: '涨跌幅', a: 'num' }, { t: '量比', a: 'num' }, { t: '行业' }, { t: '说明' }
+    ];
+    h += card('🐂 牛股雷达 · Top' + rep.length, table(cols, rows), desc);
+    return h;
+  }
+
+  /* ---------------- 持股监测 ---------------- */
+  function gradeBadge(g) {
+    var m = { A: '#22c55e', B: '#3b82f6', C: '#f59e0b', D: '#ef4444' };
+    var lbl = { A: 'A 继续持有', B: 'B 持有观察', C: 'C 减仓/止盈', D: 'D 止损离场' };
+    var c = m[g] || '#64748b';
+    return '<span style="display:inline-flex;align-items:center;padding:3px 10px;border-radius:10px;font-weight:700;color:#fff;background:' + c + '">' + (lbl[g] || E(g)) + '</span>';
+  }
+  function viewHoldings() {
+    var H = D.holdings;
+    var h = '';
+    var desc = '预测未来涨跌概率 + 持续跟踪：每日自动给出评级（A继续/B观察/C减仓/D止损）、目标位/止损位、次日上涨概率，并在评级恶化时预警。';
+    if (!H || !H.enabled) {
+      h += card('📡 持股监测', '<div class="empty">未配置持仓。点击「✎ 编辑持仓」添加你关注的股票（可纯观察、可不填成本）。</div>', desc);
+      h += '<div class="sa-mgmt-actions" style="margin-top:12px"><button class="mbtn mbtn-p he-edit-btn">✎ 编辑持仓</button>' +
+        '<span class="muted">次日上涨概率来自历史同状态实测，非预测承诺</span></div>';
+      return h;
+    }
+    h += '<div class="grid g4" style="margin-bottom:14px">' +
+      kpi('持仓', n2(H.n_held) + ' 只', (H.n_watch ? ('+关注 ' + H.n_watch) : '纯持仓'), '') +
+      kpi('加权浮动', (H.pnl_pct_weighted != null ? sign(H.pnl_pct_weighted) : '—'), '组合整体浮盈', '') +
+      kpi('浮动盈亏', (H.total_pnl != null ? ((H.total_pnl >= 0 ? '+' : '') + Math.round(H.total_pnl)) : '—'), '按持股金额加权', '') +
+      kpi('需关注', n2((H.need_action || []).length), '评级 C/D 的标的', ((H.need_action || []).length ? 'down' : '')) +
+      '</div>';
+    if (H.alerts && H.alerts.length) {
+      h += card('🔔 评级异动预警', '<div class="note" style="color:' + C.danger + '">' + H.alerts.map(E).join('<br>') + '</div>', '相较上一交易日评级下降即触发');
+    }
+    var items = H.items || [];
+    var cards = items.map(function (d) {
+      if (!d.ok) return '<div class="card"><div class="body"><b>' + stk(d.code, d.name) + '</b>：' + E(d.msg || '无数据') + '</div></div>';
+      var pred = (d.p_up1 != null) ? ('次日上涨概率 <b style="color:' + (d.p_up1 >= 0.5 ? C.up : C.down) + '">' + Math.round(d.p_up1 * 100) + '%</b>（平均' + (d.r1 >= 0 ? '+' : '') + f(d.r1) + '%）') : '';
+      var tgt = (d.target != null) ? ('目标 ' + f(d.target) + '（' + (d.target_pct >= 0 ? '+' : '') + f(d.target_pct) + '%）') : '';
+      var stp = (d.stop != null) ? ('止损 ' + f(d.stop) + '（' + (d.stop_pct >= 0 ? '+' : '') + f(d.stop_pct) + '%）') : '';
+      var risks = (d.risks && d.risks.length) ? d.risks.map(function (r) { return '<span class="bd" style="border-color:' + C.danger + ';color:' + C.danger + '">' + E(r) + '</span>'; }).join(' ') : '<span class="muted">无</span>';
+      var plus = (d.plus && d.plus.length) ? d.plus.map(function (r) { return '<span class="bd" style="border-color:' + C.up + ';color:' + C.up + '">' + E(r) + '</span>'; }).join(' ') : '';
+      var pnl = (d.pnl_pct != null) ? ('<span class="' + (d.pnl_pct >= 0 ? 'up' : 'down') + '">' + (d.pnl_pct >= 0 ? '+' : '') + f(d.pnl_pct) + '%</span>') : '<span class="muted">观察仓</span>';
+      return '<div class="card"><div class="body">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+        '<div>' + stk(d.code, d.name) + (d.watch ? ' <span class="tag">观察</span>' : '') + '</div>' + gradeBadge(d.grade) +
+        '</div>' +
+        '<div class="chips" style="margin-bottom:8px">' +
+        '<span class="chip">现价 ' + f(d.price) + '</span>' +
+        '<span class="chip" style="border-color:' + (d.pct >= 0 ? C.up : C.down) + ';color:' + (d.pct >= 0 ? C.up : C.down) + '">今 ' + (d.pct >= 0 ? '+' : '') + f(d.pct) + '%</span>' +
+        '<span class="chip">浮盈 ' + pnl + '</span>' +
+        '<span class="chip">趋势 ' + E(d.trend) + '</span>' +
+        '</div>' +
+        (pred ? '<div class="kv" style="margin:4px 0">' + pred + '</div>' : '') +
+        '<div class="kv" style="margin:4px 0">' + tgt + ' ｜ ' + stp + '</div>' +
+        '<div style="margin:6px 0"><b style="color:var(--muted);font-size:12px">风险</b> ' + risks + '</div>' +
+        (plus ? '<div style="margin:6px 0"><b style="color:var(--muted);font-size:12px">亮点</b> ' + plus + '</div>' : '') +
+        '<div class="note" style="margin-top:6px">动作：<b>' + E(d.action) + '</b> · ' + E(d.why || '') + '</div>' +
+        '</div></div>';
+    }).join('');
+    h += cards;
+    h += '<div class="sa-mgmt-actions" style="margin-top:12px"><button class="mbtn mbtn-p he-edit-btn">✎ 编辑持仓</button>' +
+      '<span class="muted">次日上涨概率来自历史同状态实测，非预测承诺</span></div>';
+    return h;
+  }
+
+  /* ---------------- 持仓编辑器：写回 HOLDINGS_JSON 密钥 ---------------- */
+  var HE_POS = [];
+  function heNote(m, t) { var n = document.getElementById('heNote'); if (n) { n.textContent = m; n.className = 'sa-mgmt-note ' + (t || ''); } }
+  function openHoldingsEditor() {
+    ensureMgmtStyle();
+    var cur = (D.holdings && D.holdings.items) ? D.holdings.items : [];
+    HE_POS = cur.map(function (d) {
+      return { code: d.code, name: d.name, cost: (d.cost != null ? d.cost : ''),
+        shares: (d.shares != null ? d.shares : ''), watch: !!d.watch, note: (d.note || '') };
+    });
+    if (!HE_POS.length) {
+      HE_POS.push({ code: '', name: '', cost: '', shares: '', watch: true, note: '' });
+    }
+    var ov = document.createElement('div'); ov.className = 'sa-mgmt-ov'; ov.id = 'heOv';
+    ov.innerHTML = '<div class="sa-mgmt"><div class="sa-mgmt-h"><span>✎ 编辑持仓（预测 + 持续监测）</span>' +
+      '<span class="sa-mgmt-x" onclick="var o=this.closest(\'.sa-mgmt-ov\');if(o)o.remove()">✕</span></div>' +
+      '<div class="sa-mgmt-b" id="heBody"></div></div>';
+    document.body.appendChild(ov);
+    ov.addEventListener('click', function (e) { if (e.target === ov) ov.parentNode.removeChild(ov); });
+    heRender();
+  }
+  function heRender() {
+    var b = document.getElementById('heBody'); if (!b) return;
+    var rows = HE_POS.map(function (p, i) {
+      return '<tr>' +
+        '<td><input class="mu-in" style="width:80px" data-i="' + i + '" data-k="code" value="' + E(p.code) + '"></td>' +
+        '<td><input class="mu-in" style="width:90px" data-i="' + i + '" data-k="name" value="' + E(p.name) + '"></td>' +
+        '<td><input class="mu-in" style="width:76px" data-i="' + i + '" data-k="cost" value="' + E(p.cost) + '" placeholder="观察留空"></td>' +
+        '<td><input class="mu-in" style="width:70px" data-i="' + i + '" data-k="shares" value="' + E(p.shares) + '"></td>' +
+        '<td style="text-align:center"><input type="checkbox" data-i="' + i + '" data-k="watch" ' + (p.watch ? 'checked' : '') + '></td>' +
+        '<td><input class="mu-in" style="width:90px" data-i="' + i + '" data-k="note" value="' + E(p.note) + '"></td>' +
+        '<td><button class="mbtn mbtn-d" data-rm="' + i + '">删</button></td>' +
+        '</tr>';
+    }).join('');
+    b.innerHTML = '<div class="sa-mgmt-note info" style="margin-bottom:10px">此处添加的票会进入「持股监测」：每日自动给出评级、目标/止损位、次日上涨概率，并在评级恶化时预警。纯观察可不填成本。改动需 GitHub 令牌（仅本机会话保存），保存后写回密钥并触发重建。</div>' +
+      '<div class="sa-mgmt-add">' +
+      '<input id="heNewCode" placeholder="代码 如 600396" style="width:120px">' +
+      '<input id="heNewName" placeholder="名称(可选)" style="width:120px">' +
+      '<button class="mbtn mbtn-p" id="heAddBtn">+ 添加</button></div>' +
+      (HE_POS.length ? '<table class="sa-mgmt-t"><thead><tr><th>代码</th><th>名称</th><th>成本</th><th>股数</th><th>观察</th><th>备注</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+        : '<div class="sa-mgmt-empty">还没有持仓，添加一只试试。</div>') +
+      '<div class="sa-mgmt-actions">' +
+      '<button class="mbtn mbtn-p" id="heSaveBtn">保存并部署</button>' +
+      '<button class="mbtn mbtn-ghost" id="heCancelBtn">取消</button></div>' +
+      '<div class="sa-mgmt-note" id="heNote"></div>';
+    b.querySelectorAll('input[data-i]').forEach(function (inp) {
+      inp.addEventListener('input', function () {
+        var i = +inp.dataset.i, k = inp.dataset.k;
+        if (k === 'watch') { HE_POS[i].watch = inp.checked; return; }
+        HE_POS[i][k] = inp.value.trim();
+      });
+      inp.addEventListener('change', function () {
+        var i = +inp.dataset.i, k = inp.dataset.k;
+        if (k === 'watch') HE_POS[i].watch = inp.checked;
+      });
+    });
+    b.querySelectorAll('button[data-rm]').forEach(function (btn) {
+      btn.addEventListener('click', function () { HE_POS.splice(+btn.dataset.rm, 1); heRender(); });
+    });
+    var add = document.getElementById('heAddBtn');
+    if (add) add.addEventListener('click', function () {
+      var c = (document.getElementById('heNewCode').value || '').trim();
+      var nm = (document.getElementById('heNewName').value || '').trim();
+      if (!/^\d{6}$/.test(c)) { heNote('代码须为 6 位数字', 'err'); return; }
+      HE_POS.push({ code: c, name: nm, cost: '', shares: '', watch: true, note: '' });
+      heRender();
+    });
+    var save = document.getElementById('heSaveBtn');
+    if (save) save.addEventListener('click', heSave);
+    var cancel = document.getElementById('heCancelBtn');
+    if (cancel) cancel.addEventListener('click', function () { var o = document.getElementById('heOv'); if (o) o.remove(); });
+  }
+  function heSave() {
+    var tok = muRecallToken();
+    if (!tok) {
+      var b = document.getElementById('heBody'); if (!b) return;
+      if (document.getElementById('heTokIn')) { heNote('请先输入令牌', 'err'); return; }
+      var gate = document.createElement('div');
+      gate.innerHTML = '<label class="mu-lb">GitHub 令牌<span class="muted">（repo 权限，仅本机会话保存）</span></label>' +
+        '<input class="mu-in" id="heTokIn" type="password" placeholder="ghp_… / github_pat_…">' +
+        '<label class="mu-ck"><input type="checkbox" id="heTokKeep">记住令牌</label>' +
+        '<div class="sa-mgmt-hint">创建：github.com/settings/tokens/new?scopes=repo。令牌等于仓库钥匙，别外泄。</div>';
+      b.insertBefore(gate, b.firstChild);
+      heNote('需要 GitHub 令牌才能写回持仓密钥（仅本机会话保存）', 'info');
+      var go = document.getElementById('heSaveBtn');
+      if (go) go.textContent = '确认保存';
+      go.onclick = function () {
+        var t = (document.getElementById('heTokIn').value || '').trim();
+        if (!t) { heNote('请粘贴令牌', 'err'); return; }
+        MU.token = t;
+        try { if (document.getElementById('heTokKeep').checked) localStorage.setItem(MU_TOKEN_KEY, t); else sessionStorage.setItem(MU_TOKEN_KEY, t); } catch (e) {}
+        gate.remove(); go.textContent = '保存并部署'; go.onclick = null;
+        heSave();
+      };
+      return;
+    }
+    heNote('正在加密写回 GitHub 密钥…', 'info');
+    var btn = document.getElementById('heSaveBtn'); if (btn) btn.disabled = true;
+    muLoadNacl().then(function () {
+      return muGh('GET', '/repos/' + muRepo() + '/actions/secrets/public-key');
+    }).then(function (pk) {
+      if (!pk || !pk.key || !pk.key_id) throw new Error('未取得仓库公钥');
+      var payload = { positions: HE_POS.filter(function (p) { return /^\d{6}$/.test(p.code || ''); }).map(function (p) {
+        return { code: p.code, name: p.name, cost: (p.cost === '' ? null : parseFloat(p.cost) || null),
+          shares: (p.shares === '' ? null : parseFloat(p.shares) || null), watch: !!p.watch, note: p.note };
+      }) };
+      var sealed = window.SA_SEAL(JSON.stringify(payload), pk.key);
+      return muGh('PUT', '/repos/' + muRepo() + '/actions/secrets/HOLDINGS_JSON', { encrypted_value: sealed, key_id: pk.key_id });
+    }).then(function () {
+      heNote('持仓已写入密钥，正在触发重建…', 'info');
+      return muGh('POST', '/repos/' + muRepo() + '/actions/workflows/stock.yml/dispatches', { ref: 'main', inputs: { task: 'build' } });
+    }).then(function () {
+      if (btn) btn.disabled = false;
+      heNote('已提交 ✅ 云端重建约 2 分钟，刷新即可看到监测结果', 'ok');
+    }).catch(function (e) {
+      if (btn) btn.disabled = false;
+      heNote('失败：' + ((e && e.message) || e), 'err');
+    });
+  }
+
   /* ---------------- 启动 ---------------- */
   function boot() {
     if (!D) {
@@ -2298,7 +2522,7 @@
     }
     initBackdrop();
     startFreshnessWatch();
-    var views = { overview: viewOverview, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction };
+    var views = { overview: viewOverview, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, holdings: viewHoldings };
     var done = {};
     function show(k) {
       if (!done[k]) {
@@ -2328,6 +2552,8 @@
       if (oc && oc.dataset && oc.dataset.kind) { applyOverlapFilter(oc.dataset.kind, oc.dataset.v); return; }
       var pc = t.closest('.pat-chip');
       if (pc && pc.dataset && pc.dataset.p) { openPatternList(pc.dataset.p); return; }
+      var ed = t.closest('.he-edit-btn');
+      if (ed) { openHoldingsEditor(); return; }
     });
     document.getElementById('tabs').addEventListener('click', function (e) {
       if (e.target.dataset && e.target.dataset.v) show(e.target.dataset.v);

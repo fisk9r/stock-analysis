@@ -191,12 +191,15 @@ jobs:
         if: steps.task.outputs.task == 'build'
         env:
           AU: ${{ secrets.ALLOWED_USERS_JSON }}
+          HJ: ${{ secrets.HOLDINGS_JSON }}
         run: |
           if [ -n "$AU" ]; then printf '%s' "$AU" > config/allowed_users.json; echo "✅ 已写出访问人员配置"; else echo "⚠ 未配置 ALLOWED_USERS_JSON，站点将无加密数据（登录后提示无数据）"; fi
+          if [ -n "$HJ" ]; then printf '%s' "$HJ" > config/holdings.json; echo "✅ 已写出持仓配置（持股监测）"; else echo "ℹ 未配置 HOLDINGS_JSON，持股监测为空（可在站点「持股监测」页编辑）"; fi
 
       - name: 执行流水线
         env:
           NOTIFY_JSON: ${{ secrets.NOTIFY_JSON }}   # 凭据只走 Secrets，仓库无明文
+          HOLDINGS_JSON: ${{ secrets.HOLDINGS_JSON }}
         run: |
           set -o pipefail
           case "${{ steps.task.outputs.task }}" in

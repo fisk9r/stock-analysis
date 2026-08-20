@@ -15,6 +15,10 @@ import em_api
 import ai_judge
 import notifier
 import yaogu
+import bull
+import coldwave
+import holdings
+import data_guard
 
 ROOT = store.ROOT
 DIST = os.path.join(ROOT, "dist")
@@ -237,6 +241,13 @@ def compute_money_flow():
 def run(date_override=None, dedup_close=False):
     t0 = time.time()
     con = store.connect()
+    # 数据完整性自检：修复可能的量纲异常（如某日 vol/amount 被放大 ~100×），幂等。
+    try:
+        nfix = data_guard.repair(con, apply=True, verbose=False)
+        if nfix:
+            log("  数据修复：修正 %d 处量纲异常" % nfix)
+    except Exception as e:
+        log("  数据修复跳过（不影响主流程）：%r" % e)
     log("载入行情库 ...")
     u = engine.Universe(con, days=130)
     log("覆盖 %d 只个股 / %d 个交易日" % (len(u.bars), len(u.dates)))
@@ -511,6 +522,34 @@ def run(date_override=None, dedup_close=False):
         "yaogu": yaogu_data,
     }
 
+    # ---- 牛股雷达：多维度独立抓牛股信号（10 种探测器共振）----
+    try:
+        data["bull"] = bull.scan(u, date, con, code2boards, topn=12)
+        log("  牛股雷达命中 %d 只" % len(data.get("bull") or []))
+    except Exception as e:
+        log("  牛股雷达失败（不影响主流程）：%r" % e)
+        data["bull"] = []
+
+    # ---- 冷启修复节奏预判 + 冷后领涨风格轮动规律 ----
+    try:
+        data["cold"] = coldwave.analyze(u, date, code2boards, n=140)
+        cw = data["cold"]
+        if cw and cw.get("forecast"):
+            log("  冷启预判：%s（%s）" % (cw["forecast"]["state"], cw["forecast"]["expect"]))
+    except Exception as e:
+        log("  冷启分析失败（不影响主流程）：%r" % e)
+        data["cold"] = None
+
+    # ---- 持股监测：预测未来 + 持续跟踪（无持仓配置则为空）----
+    try:
+        data["holdings"] = holdings.monitor(u, date, con, code2boards)
+        hrep = data["holdings"]
+        if hrep and hrep.get("items"):
+            log("  持股监测 %d 只，预警 %d 条" % (len(hrep["items"]), len(hrep.get("alerts") or [])))
+    except Exception as e:
+        log("  持股监测失败（不影响主流程）：%r" % e)
+        data["holdings"] = None
+
     # ---- 历史连板库落库：先回填前一日推荐的真实结局，再记录当日状态 ----
     try:
         n_bf = store.backfill_rec_outcomes(con, u)
@@ -593,8 +632,10 @@ def run(date_override=None, dedup_close=False):
             if os.path.exists(du):
                 deploy_url = open(du, encoding="utf-8").read().strip()
             summary = notifier.format_stock_summary(data, deploy_url, mode="close")
+            # ServerChan 单条 desp ≤ 8192 字：附一份精简「只给结果」版，确保关键推送不静默丢失
+            summary["sc_text"] = notifier.format_sc(data, deploy_url, mode="close")["text"]
             if dedup_close:
-                # 复盘补发(close_again)必须用独立的 mode，与 15:20 收盘(mode="close")互不干扰，
+                # 复盘补发(close_again)必须用独立的 mode，与 15:20 按时(mode="close")互不干扰，
                 # 否则会被 notifier 的 once-per-day 去重当成“今日已推送”直接吞掉
                 # （已复现：run 58 复盘跑成功却零发送，用户收不到复盘）。
                 # 复盘必须保证送达：仅由 once-per-day 挡住多重定时器的重复触发，
@@ -602,6 +643,7 @@ def run(date_override=None, dedup_close=False):
                 # 去重按『分析日(adate)』判定，避免前一日补发在零点后运行吞掉当日名额。
                 summary = dict(summary)
                 summary["title"] = summary["title"].replace("盘后复盘", "复盘补发")
+                summary["sc_text"] = notifier.format_sc(data, deploy_url, mode="close_again")["text"]
                 notifier.push(summary, mode="close_again", analysis_date=date)
             else:
                 notifier.push(summary, mode="close", analysis_date=date)
@@ -720,7 +762,12 @@ def push_preauction():
     du = os.path.join(ROOT, "config", "deploy_url.txt")
     if os.path.exists(du):
         deploy_url = open(du, encoding="utf-8").read().strip()
+    deploy_url = ""
+    du = os.path.join(ROOT, "config", "deploy_url.txt")
+    if os.path.exists(du):
+        deploy_url = open(du, encoding="utf-8").read().strip()
     summary = notifier.format_stock_summary(data, deploy_url, mode="preauction")
+    summary["sc_text"] = notifier.format_sc(data, deploy_url, mode="preauction")["text"]
     return notifier.push(summary, mode="preauction")
 
 

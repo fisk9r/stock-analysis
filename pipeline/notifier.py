@@ -620,7 +620,16 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None):
         if not c:
             continue
         try:
-            ok, msg = fn(c, title, text)
+            body = text
+            if name == "wechat_serverchan":
+                # ServerChan 单条 desp 硬上限 8192 字：用精简结果版（format_sc），
+                # 仍超限则硬截断兜底，确保这条关键推送不静默丢失。
+                sc_text = summary.get("sc_text")
+                if sc_text:
+                    body = sc_text
+                if len(body) > SC_CAP:
+                    body = body[:SC_CAP - 120].rstrip() + "\n…（完整版见 PushPlus 与站点看板）"
+            ok, msg = fn(c, title, body)
             results.append("%s:%s" % (name, msg))
         except Exception as e:
             results.append("%s:失败 %r" % (name, e))
@@ -1018,6 +1027,142 @@ def format_stock_summary(data, url="", mode="close"):
         L.append("---")
         L.append("完整数据看板：%s" % url)
     return {"title": "A股盘后复盘 %s" % date, "text": "\n".join(L)}
+
+
+# ServerChan 免费档单条 desp 硬上限 8192 字，超长会被静默丢弃（导致收盘/复盘只到 PushPlus）。
+# 因此给 ServerChan 单独生成「只给结果、紧凑有逻辑」的版本：去掉判断过程与冗长叙述，
+# 仅保留盘面数据 + 牛股雷达 + 推荐 + 趋势 + 妖股 + 风险，天然压到 8K 以内。
+# 这同时满足了"排版精美、逻辑强、只给结果"的诉求。
+SC_CAP = 8000
+
+
+def format_sc(data, url="", mode="close"):
+    """ServerChan 专用精简版（只给结果、强结构、< 8K）。"""
+    m = data.get("meta", {})
+    date = m.get("date", "")
+    sent = data.get("market", {}).get("sentiment", {}) or {}
+    cyc = data.get("market", {}).get("cycle", {}) or {}
+    lus = data.get("limit_ups", []) or []
+    rec = data.get("recommend", {}) or {}
+    regime = data.get("regime", {}) or {}
+
+    if mode == "preauction":
+        L = []
+        L.append("## 竞价前 · %s" % date)
+        g = data.get("global_market") or {}
+        L.append("外围：%s" % _global_signal(g))
+        if regime.get("note"):
+            L.append("连板：%s" % regime.get("note", ""))
+        pool = _top_recs(rec.get("core"), rec.get("relay"), rec.get("all"), MAX_RECS)
+        L.append("昨日推荐 · 今日竞价强弱：")
+        for i, it in enumerate(pool, 1):
+            L.append(_rec_line(it, i, tag="续强"))
+        pp = data.get("preopen_plan") or {}
+        if pp.get("position"):
+            L.append("盘前策略：仓位 %s ｜ 主线 %s ｜ 接力 %s"
+                     % (pp["position"], "、".join(pp.get("main_line", []) or []),
+                        "、".join(pp.get("relay_dir", []) or [])))
+        if url:
+            L.append("看板：%s" % url)
+        return {"title": "竞价前 %s" % date, "text": "\n".join(L)}
+
+    # 收盘后复盘
+    L = []
+    L.append("## 盘后复盘 · %s" % date)
+    L.append("情绪 %.1f(%s) ｜ 周期 %s" % (sent.get("score", 0), sent.get("label", ""), cyc.get("phase", "")))
+    L.append("涨停 %d ｜ 最高 %d板 ｜ 晋级 %s ｜ 封板 %s"
+             % (len(lus), max([r.get("streak", 0) for r in lus], default=0),
+                _pct(sent.get("promote_rate")), _pct(sent.get("seal_rate"))))
+    if regime.get("note"):
+        L.append("连板研判：%s" % regime.get("note", ""))
+    micro = data.get("micro") or {}
+    if micro:
+        p = micro.get("profit") or {}
+        pt = micro.get("promote_tiered") or {}
+        fb = micro.get("first_board", {})
+        L.append("赚钱效应 昨涨停今均 %s(翻红 %s/再板 %s) ｜ 亏钱 %s"
+                 % (_pct(p.get("avg_pct")), _pct(p.get("red_rate")),
+                    _pct(p.get("again_rate")), _pct(p.get("green_rate"))))
+        L.append("晋级 1进2 %s ｜ 2进3 %s ｜ 3板+ %s ｜ 首板 %d ｜ 炸板率 %s"
+                 % (_pct(pt.get("1进2")), _pct(pt.get("2进3")), _pct(pt.get("3板及以上")),
+                    fb.get("count", 0), _pct(micro.get("zhaban_rate"))))
+    money = data.get("money") or {}
+    if money and money.get("boards_in"):
+        L.append("主力净流入 %s亿 ｜ 净流入行业 %s"
+                 % (("+" if money.get("total_main_net", 0) >= 0 else "") + str(money.get("total_main_net")),
+                    "、".join((b.get("name") or "") + _signed(b.get("net"), 0) + "亿"
+                              for b in money.get("boards_in", [])[:3])))
+    # 牛股雷达（本次新增，多维度共振候选）
+    bull = data.get("bull")
+    if bull:
+        L.append("牛股雷达 Top%d：" % min(MAX_RECS, len(bull)))
+        for it in bull[:MAX_RECS]:
+            L.append("- %s %s【%s】%.2f元 %+.1f%% 量比%.1f"
+                     % (it["code"], it["name"], "+".join(it["signals"]),
+                        it["price"] or 0, it["pct"] or 0, it["vol_ratio"] or 0))
+    # 个股推荐
+    core = rec.get("core") or []
+    relay = rec.get("relay") or []
+    allit = rec.get("all") or []
+    recs = _top_recs(core, relay, allit, MAX_RECS)
+    L.append("个股推荐 Top%d：" % MAX_RECS)
+    if recs:
+        for i, it in enumerate(recs, 1):
+            L.append(_rec_line(it, i))
+    else:
+        L.append("（今日无明确推荐，建议控仓或低位试错）")
+    # 趋势主升
+    trend = rec.get("trend") or []
+    if trend:
+        L.append("趋势主升 Top%d：" % min(MAX_RECS, len(trend)))
+        for it in trend[:MAX_RECS]:
+            tm = it.get("trend_meta") or {}
+            L.append("- %s(%s) %.2f ｜ 多头 MA5/10/20=%.2f/%.2f/%.2f ｜ 近5日%d涨 ｜ 量能%.1f倍"
+                     % (it.get("name"), it.get("industry", "—"), it.get("close", 0),
+                        tm.get("ma5", 0), tm.get("ma10", 0), tm.get("ma20", 0),
+                        tm.get("up_days", 0), tm.get("vol_ratio", 0)))
+    # 妖股潜力 Top3
+    if mode in ("close", "close_again"):
+        try:
+            import yaogu as _yg
+            yg = data.get("yaogu")
+            if yg and yg.get("ranked"):
+                blk = _yg.top3_block(yg)
+                if blk:
+                    L.append("妖股潜力 Top3：")
+                    L.append(blk)
+        except Exception:
+            pass
+    # 恐慌
+    pn = data.get("panic") or {}
+    if pn.get("level") in ("升温", "恐慌"):
+        L.append("⚠ 恐慌：%s 跌停%d 大面%d 昨涨停收绿%.0f%%"
+                 % (pn.get("level"), pn.get("dt_count", 0), pn.get("bigface_count", 0),
+                    pn.get("yest_green") or 0))
+    # 冷启修复预判
+    cw = data.get("cold")
+    if cw and cw.get("forecast"):
+        f0 = cw["forecast"]
+        L.append("冷启预判：%s · 预计 %s（T+1 %.0f%% / 两日内 %.0f%% / 三日内 %.0f%%）"
+                 % (f0["state"], f0["expect"], f0.get("p_t1", 0) * 100,
+                    f0.get("cum_t2", 0) * 100, f0.get("cum_t3", 0) * 100))
+        cands = cw.get("candidates") or []
+        if cands:
+            L.append("冷后候选：")
+            for it in cands[:3]:
+                L.append("- %s %s %.2f元 ｜ %s" % (it["code"], it["name"], it["price"] or 0, it.get("why", "")))
+    # 持股监测
+    hrep = data.get("holdings")
+    if hrep and hrep.get("enabled"):
+        try:
+            import holdings as _hd
+            for ln in _hd.summary_lines(hrep, limit=6):
+                L.append(ln)
+        except Exception:
+            pass
+    if url:
+        L.append("看板：%s" % url)
+    return {"title": "盘后复盘 %s" % date, "text": "\n".join(L)}
 
 
 def format_auction_summary(data, url="", con=None):

@@ -3,6 +3,9 @@ config/notify.json
 config/models.json
 config/allowed_users.json
 config/owner_pass.txt
+# 持仓含私人成本/股数，绝不入库；网页端「编辑持仓」走 HOLDINGS_JSON 密钥写回。
+# 模板 config/holdings.json.example 可入库。
+config/holdings.json
 
 # ---- 运行时生成的加密产物（由流水线在云端重建，不进 git） ----
 dist/data/

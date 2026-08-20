@@ -1,0 +1,32 @@
+{
+  "positions": [
+    {
+      "code": "600396",
+      "name": "华电辽能",
+      "cost": 4.20,
+      "shares": 10000,
+      "watch": false,
+      "note": "冷后领涨观察"
+    },
+    {
+      "code": "002580",
+      "name": "圣阳股份",
+      "cost": null,
+      "shares": null,
+      "watch": true,
+      "note": "趋势跟踪（纯观察，不填成本）"
+    },
+    {
+      "code": "003032",
+      "name": "传智教育",
+      "watch": true,
+      "note": "异动跟踪"
+    },
+    {
+      "code": "600721",
+      "name": "百花医药",
+      "watch": true,
+      "note": "冷后轮动观察"
+    }
+  ]
+}
