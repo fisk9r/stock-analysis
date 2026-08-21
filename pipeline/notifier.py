@@ -289,19 +289,35 @@ def send_wechat_serverchan(cfg, title, text):
         return False, "未配置 sendkey"
     ok_list, fail_list = [], []
     for label, key in keys:
-        try:
-            url = "https://sctapi.ftqq.com/%s.send" % key
-            resp = http_post_form(url, {"title": title, "desp": text})
+        # 免费档接口偶发 5xx/网络抖动会静默吞掉整条推送；加 2 次重试 + 退避，避免『该到的没到』。
+        _done = False
+        for _attempt in range(2):
             try:
-                j = json.loads(resp)
-                if j.get("code") == 0:
-                    ok_list.append(label)
-                else:
-                    fail_list.append("%s:%s" % (label, str(j.get("message", resp))[:40]))
-            except Exception:
-                ok_list.append("%s(响应未解析)" % label)
-        except Exception as e:
-            fail_list.append("%s:%r" % (label, e))
+                url = "https://sctapi.ftqq.com/%s.send" % key
+                resp = http_post_form(url, {"title": title, "desp": text})
+                try:
+                    j = json.loads(resp)
+                    if j.get("code") == 0:
+                        ok_list.append(label)
+                        _done = True
+                        break
+                    else:
+                        _err = "%s:%s" % (label, str(j.get("message", resp))[:40])
+                        if _attempt == 0:
+                            time.sleep(3)   # 首次失败退避后重试
+                            continue
+                        fail_list.append(_err)
+                except Exception:
+                    ok_list.append("%s(响应未解析)" % label)
+                    _done = True
+                    break
+            except Exception as e:
+                if _attempt == 0:
+                    time.sleep(3)
+                    continue
+                fail_list.append("%s:%r" % (label, e))
+        if not _done and label not in [x.split(":", 1)[0] for x in ok_list]:
+            pass
     msg = "ServerChan 成功 %d/%d（%s）" % (len(ok_list), len(keys), "、".join(ok_list) or "无")
     if fail_list:
         msg += " 失败：" + "；".join(fail_list)
@@ -513,7 +529,119 @@ def _recently_pushed(mode, cooldown_min):
     return False
 
 
-def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None):
+# ============================================================== 用户级个性化推送
+def load_users():
+    """读取 config/allowed_users.json（CI 运行时由 ALLOWED_USERS_JSON 密钥解密后写出，明文）。
+
+    返回 [ {id, name, sc, pp, holdings}, ... ]；忽略无关字段。无文件/解析失败返回 []。
+    sc = 该用户的 ServerChan 推送密钥；pp = 该用户的 PushPlus 令牌；
+    holdings = 该用户的个性化持仓列表（与 config/holdings.json 同构）。"""
+    p = os.path.join(ROOT, "config", "allowed_users.json")
+    if not os.path.exists(p):
+        return []
+    try:
+        d = json.load(open(p, encoding="utf-8"))
+    except Exception:
+        return []
+    us = d.get("users") if isinstance(d, dict) else None
+    if not isinstance(us, list):
+        return []
+    out = []
+    for u in us:
+        if not isinstance(u, dict):
+            continue
+        out.append({
+            "id": u.get("id"),
+            "name": u.get("name") or u.get("id"),
+            "sc": (u.get("sc") or "").strip(),
+            "pp": (u.get("pp") or "").strip(),
+            "holdings": u.get("holdings") if isinstance(u.get("holdings"), list) else None,
+        })
+    return out
+
+
+def _filter_claimed(cfg, claimed_sc, claimed_pp):
+    """把已被某用户『个人认领』的 sendkey/token 从共享广播配置中剔除，避免重复发送给同一人。"""
+    if not (claimed_sc or claimed_pp) or not cfg:
+        return cfg
+    import copy
+    c = copy.deepcopy(cfg)
+    sc = c.get("wechat_serverchan")
+    if isinstance(sc, dict) and isinstance(sc.get("sendkey"), list):
+        sc["sendkey"] = [x for x in sc["sendkey"]
+                         if not ((isinstance(x, dict) and x.get("key") in claimed_sc)
+                                 or (isinstance(x, str) and x in claimed_sc))]
+    pp = c.get("wechat_pushplus")
+    if isinstance(pp, dict) and isinstance(pp.get("token"), list):
+        pp["token"] = [x for x in pp["token"]
+                       if not ((isinstance(x, dict) and (x.get("token") or x.get("key")) in claimed_pp)
+                               or (isinstance(x, str) and x in claimed_pp))]
+    return c
+
+
+def _log_personal_send(pmode, title):
+    """写一条极简去重记录，供 _already_pushed_today 判定『该用户该 mode 今日已发』。"""
+    try:
+        logp = os.path.join(DIST, "push_log.jsonl")
+        with open(logp, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": _bj_now().strftime("%Y-%m-%d %H:%M:%S"),
+                                 "mode": pmode, "title": title}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _push_personalized(data, mode, users, analysis_date, results):
+    """为每个『配置了专属通道 + 持股』的用户单独发送个性化消息（市場概述 + 其本人持股体检）。
+
+    去重：同一用户同一 mode 当天只发一次（防多调度器重复烧 ServerChan 5条/天额度）。"""
+    import engine as _engine
+    import holdings as _hd
+    con = store.connect()
+    u = _engine.Universe(con, days=130)
+    date = analysis_date or (u.dates[-1] if u.dates else None)
+    if not date:
+        return
+    for uu in users:
+        _uid = uu.get("id") or uu.get("name") or "?"
+        _pmode = "personal_%s_%s" % (mode, _uid)
+        if _already_pushed_today(_pmode, analysis_date):
+            results.append("wechat_personal:%s 跳过(今日已发)" % (uu.get("name") or _uid))
+            continue
+        positions = uu.get("holdings")
+        if not isinstance(positions, list) or not positions:
+            continue
+        kind = "sc" if uu.get("sc") else ("pp" if uu.get("pp") else None)
+        if not kind:
+            continue
+        key = uu["sc"] if kind == "sc" else uu["pp"]
+        uname = uu.get("name") or uu.get("id")
+        try:
+            urep = _hd.monitor(u, date, con, positions=positions, persist=False)
+            if not (urep and urep.get("enabled")):
+                continue
+            d2 = dict(data)
+            d2["holdings"] = urep
+            fmt = format_sc(d2, "", mode)
+            text = fmt["text"]
+            title = fmt["title"]
+            if kind == "sc":
+                if len(text) > SC_CAP:
+                    text = text[:SC_CAP - 120].rstrip() + "\n…（完整版见站点看板）"
+                ok, msg = send_wechat_serverchan(
+                    {"sendkey": [{"key": key, "name": uname}]}, title, text)
+            else:
+                ok, msg = send_wechat_pushplus(
+                    {"token": [{"token": key, "name": uname}]}, title, text)
+            results.append("wechat_%s:%s → %s" % (kind, uname, msg))
+            print("[notifier][personal][%s] %s(%s): %s" % (kind, uname, key[:6] + "…", msg))
+            if ok:
+                _log_personal_send(_pmode, title)
+        except Exception as e:
+            results.append("wechat_%s:%s 失败 %r" % (kind, uname, e))
+            print("[notifier][personal] %s 失败：%r" % (uname, e))
+
+
+def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, data=None):
     """summary: {"title": str, "text": str}。返回已送达通道列表。
     mode 取值与去重（同一 mode 当天只发一次）对应：
       - "preauction"  盘前预判（08:50）
@@ -570,6 +698,19 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None):
     except Exception:
         pass
     cfg = load_config()
+    # 用户级个性化：按各人『专属通道 + 本人持仓』给每个人发专属复盘（盘面 + 其本人持仓跟踪）。
+    # 规则：
+    #  - 仅当某用户配置了 专属通道(sc/pp) 且 有持仓 时，才从『共享广播』剔除其密钥，
+    #    避免同一人既收广播又收专属（重复 + 烧 ServerChan 5条/天额度）。
+    #  - 仅 close / close_again（每日主复盘）做个性化替换；盘前/竞价仍走共享广播，
+    #    保证每个人都能收到盘面节奏，不会因被过滤而漏掉。
+    _users = load_users()
+    _users_with_pos = [u for u in _users
+                       if (u.get("sc") or u.get("pp")) and u.get("holdings")]
+    _claimed_sc = {u["sc"] for u in _users_with_pos if u.get("sc")}
+    _claimed_pp = {u["pp"] for u in _users_with_pos if u.get("pp")}
+    _personal_modes = (mode in ("close", "close_again"))
+    cfg_shared = _filter_claimed(cfg, _claimed_sc, _claimed_pp) if _personal_modes else cfg
     title = summary.get("title", "A股盘后复盘")
     text = summary.get("text", "")
     results = []
@@ -597,11 +738,11 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None):
     #    PushPlus 随时推送（200 条/天几乎不限）：盘中异动(anomaly)、竞价(auction)、周末发酵(weekend)
     #    以及 open_anomaly 的冗余兜底，绝不挤占 ServerChan 的固定 4 条名额。
     _all = [
-        ("wechat_serverchan", send_wechat_serverchan, cfg.get("wechat_serverchan")),
-        ("wechat_pushplus", send_wechat_pushplus, cfg.get("wechat_pushplus")),
-        ("wecom", send_wecom, cfg.get("wecom")),
-        ("telegram", send_telegram, cfg.get("telegram")),
-        ("email", send_email, cfg.get("email")),
+        ("wechat_serverchan", send_wechat_serverchan, cfg_shared.get("wechat_serverchan")),
+        ("wechat_pushplus", send_wechat_pushplus, cfg_shared.get("wechat_pushplus")),
+        ("wecom", send_wecom, cfg_shared.get("wecom")),
+        ("telegram", send_telegram, cfg_shared.get("telegram")),
+        ("email", send_email, cfg_shared.get("email")),
     ]
     if mode == "open_anomaly":
         # 竞价后开盘前异动：ServerChan 固定四条之一（与盘前/收盘/复盘并列的关键节点），
@@ -639,6 +780,11 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None):
         for r in results:
             if not r.startswith("file:"):
                 print("[notifier] %s" % r)
+
+    # 4) 用户级个性化推送（仅 close / close_again）：给每位『专属通道 + 持仓』用户发本人专属复盘，
+    #    其密钥已从上方共享广播中剔除（避免重复），这里单独走其本人通道。
+    if _personal_modes and _users_with_pos:
+        _push_personalized(data, mode, _users_with_pos, analysis_date, results)
 
     # 3) 仅在『至少一条通道真实送达』后才写去重账本 push_log.jsonl。
     #    关键修复：绝不能“先记账再发通道”。若通道发送失败（弱网偶发），账本已记“今日已推”，
@@ -1068,7 +1214,13 @@ def format_sc(data, url="", mode="close"):
 
     # 收盘后复盘
     L = []
-    L.append("## 盘后复盘 · %s" % date)
+    if mode == "close_again":
+        # 复盘补发必须与 15:20 收盘内容有差异：ServerChan 免费档对『重复/极相似 desp』会静默拒收，
+        # 之前连续两天 20:00 复盘补发收不到，根因就是 close 与 close_again 的 desp 字节级相同。
+        L.append("## 复盘补发 · %s" % date)
+        L.append("（盘后数据已最终定格 · 含你的持仓跟踪）")
+    else:
+        L.append("## 盘后复盘 · %s" % date)
     L.append("情绪 %.1f(%s) ｜ 周期 %s" % (sent.get("score", 0), sent.get("label", ""), cyc.get("phase", "")))
     L.append("涨停 %d ｜ 最高 %d板 ｜ 晋级 %s ｜ 封板 %s"
              % (len(lus), max([r.get("streak", 0) for r in lus], default=0),
@@ -1162,7 +1314,8 @@ def format_sc(data, url="", mode="close"):
             pass
     if url:
         L.append("看板：%s" % url)
-    return {"title": "盘后复盘 %s" % date, "text": "\n".join(L)}
+    _title = ("复盘补发 %s" % date) if mode == "close_again" else ("盘后复盘 %s" % date)
+    return {"title": _title, "text": "\n".join(L)}
 
 
 def format_auction_summary(data, url="", con=None):
