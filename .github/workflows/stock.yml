@@ -19,7 +19,8 @@ name: A股盘后分析流水线
 # ⚠ 状态持久化：runner 每次都是全新机器，什么都不留。本项目有三份状态必须跨次续存：
 #     cache/market.db        130 天 K 线，76MB
 #     dist/data.js           最近一次分析结果，盘前/竞价/异动推送都靠它
-#     dist/push_log.jsonl    推送去重依据，丢了会重复发、白烧 ServerChan 额度
+#     state/push_ledger.jsonl  推送去重账本（权威，跨 run 续存），丢了会重复发、白烧 ServerChan 额度
+#     dist/push_log.jsonl      上述账本的镜像（仅供本机看板展示，去重判定只看 state 账本）
 #   统一存放在 tag = data-snapshot 的 Release 里，两个附件：
 #     market.db.gz（约 22MB）  state.tar.gz（几百 KB）
 # ============================================================================
@@ -147,7 +148,7 @@ jobs:
           # 状态包首次运行可以不存在（build 会自己生成），故不致命
           if gh release download "$DB_TAG" -p "$STATE_FILE" -D /tmp/ 2>/dev/null; then
             tar xzf "/tmp/$STATE_FILE" -C .
-            echo "✅ 状态已恢复：data.js $( [ -f dist/data.js ] && echo 有 || echo 无 ) · 推送日志 $( [ -f dist/push_log.jsonl ] && wc -l < dist/push_log.jsonl || echo 0 ) 条"
+            echo "✅ 状态已恢复：data.js $( [ -f dist/data.js ] && echo 有 || echo 无 ) · 权威去重账本 $( [ -f state/push_ledger.jsonl ] && wc -l < state/push_ledger.jsonl || echo 0 ) 条 · 镜像 $( [ -f dist/push_log.jsonl ] && wc -l < dist/push_log.jsonl || echo 0 ) 条"
           else
             echo "⚠ 无历史状态包（首次运行正常）。推送去重从本次开始累积。"
           fi
@@ -242,6 +243,7 @@ jobs:
         run: |
           tar czf "/tmp/$STATE_FILE" \
             $( [ -f dist/data.js ] && echo dist/data.js ) \
+            $( [ -f state/push_ledger.jsonl ] && echo state/push_ledger.jsonl ) \
             $( [ -f dist/push_log.jsonl ] && echo dist/push_log.jsonl ) \
             $( ls dist/last_push_*.md 2>/dev/null ) \
             2>/dev/null || true

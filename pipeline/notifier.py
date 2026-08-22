@@ -58,6 +58,11 @@ def _in_anomaly_window():
 ROOT = store.ROOT
 CFG_PATH = os.path.join(ROOT, "config", "notify.json")
 DIST = os.path.join(ROOT, "dist")
+# 去重账本权威位置：放在 state/ 下（构建过程绝不改写 dist/，故与构建产物解耦，
+# 跨 run 续存更稳）。state.tar.gz Release 资产会随每次运行回存该文件，
+# 下个 run 恢复步骤再解包出来，去重判定在多次触发（主调度/看门狗/外部定时器）间真正生效。
+STATE_DIR = os.path.join(ROOT, "state")
+LEDGER = os.path.join(STATE_DIR, "push_ledger.jsonl")
 
 
 def _env_config():
@@ -401,6 +406,31 @@ def send_email(cfg, title, text):
 _ONCE_PER_DAY = {"preauction", "auction", "open_anomaly", "close", "close_again", "weekend"}
 
 
+def _ledger_path():
+    """去重账本权威路径（state/ 下，跨 run 续存）"""
+    return LEDGER
+
+
+def _append_ledger(rec):
+    """写一条去重账本记录：权威落 state/push_ledger.jsonl，并镜像一份到 dist/push_log.jsonl
+    供看板展示（看板只读镜像，去重判定只看 state 账本，互不干扰）。任一写入失败均不影响推送。"""
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+    except Exception:
+        pass
+    try:
+        with open(LEDGER, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print("[notifier] 权威账本写入失败（不影响推送）：%r" % e)
+    try:
+        os.makedirs(DIST, exist_ok=True)
+        with open(os.path.join(DIST, "push_log.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def _already_pushed_today(mode, analysis_date=None):
     """同一 mode 当天是否已推送过（读 push_log.jsonl 判定）。
 
@@ -412,7 +442,7 @@ def _already_pushed_today(mode, analysis_date=None):
     if mode not in _ONCE_PER_DAY:
         return False
     try:
-        logp = os.path.join(DIST, "push_log.jsonl")
+        logp = _ledger_path()
         if not os.path.exists(logp):
             return False
         today = _bj_now().strftime("%Y-%m-%d")
@@ -449,7 +479,7 @@ def _anomaly_recently_pushed(cooldown_min=12):
     N 必须小于 GitHub 盘中 anomaly 时点的最小间隔（09:50→10:07 为 17 分钟），
     否则会误伤合法盘中信号。"""
     try:
-        logp = os.path.join(DIST, "push_log.jsonl")
+        logp = _ledger_path()
         if not os.path.exists(logp):
             return False
         now = _bj_now()
@@ -479,7 +509,7 @@ def reported_anomaly_codes_today():
     """返回今天（北京时间）已推送过的盘中异动标的代码集合，用于内容去重：
     同一标的当天只首次提示，避免 15 分钟巡查把已报过的票反复刷屏。"""
     try:
-        logp = os.path.join(DIST, "push_log.jsonl")
+        logp = _ledger_path()
         if not os.path.exists(logp):
             return set()
         today = _bj_now().strftime("%Y-%m-%d")
@@ -503,7 +533,7 @@ def reported_anomaly_codes_today():
 def _recently_pushed(mode, cooldown_min):
     """通用冷却去重：最近 N 分钟内已推送过指定 mode 则跳过（用于 panic 等日内多次推送）。"""
     try:
-        logp = os.path.join(DIST, "push_log.jsonl")
+        logp = _ledger_path()
         if not os.path.exists(logp):
             return False
         now = _bj_now()
@@ -581,13 +611,8 @@ def _filter_claimed(cfg, claimed_sc, claimed_pp):
 
 def _log_personal_send(pmode, title):
     """写一条极简去重记录，供 _already_pushed_today 判定『该用户该 mode 今日已发』。"""
-    try:
-        logp = os.path.join(DIST, "push_log.jsonl")
-        with open(logp, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"ts": _bj_now().strftime("%Y-%m-%d %H:%M:%S"),
-                                 "mode": pmode, "title": title}, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    _append_ledger({"ts": _bj_now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "mode": pmode, "title": title})
 
 
 def _push_personalized(data, mode, users, analysis_date, results):
@@ -608,7 +633,20 @@ def _push_personalized(data, mode, users, analysis_date, results):
             results.append("wechat_personal:%s 跳过(今日已发)" % (uu.get("name") or _uid))
             continue
         positions = uu.get("holdings")
+        if isinstance(positions, str):
+            positions = [positions]
         if not isinstance(positions, list) or not positions:
+            continue
+        # 归一化：前端/ALLOWED_USERS_JSON 里 holdings 是「代码字符串列表」（如 ["600519","000001"]），
+        # 而 holdings.monitor(positions=) 经 _norm_pos 处理、要求 {code:...} 字典列表。
+        # 这里做桥接，否则字符串会被 _norm_pos 整批过滤成 enabled=False，个性化整段跳过。
+        norm_pos = []
+        for c in positions:
+            if isinstance(c, dict):
+                norm_pos.append(c)
+            elif isinstance(c, str) and c.strip().isdigit() and len(c.strip()) == 6:
+                norm_pos.append({"code": c.strip()})
+        if not norm_pos:
             continue
         kind = "sc" if uu.get("sc") else ("pp" if uu.get("pp") else None)
         if not kind:
@@ -616,7 +654,7 @@ def _push_personalized(data, mode, users, analysis_date, results):
         key = uu["sc"] if kind == "sc" else uu["pp"]
         uname = uu.get("name") or uu.get("id")
         try:
-            urep = _hd.monitor(u, date, con, positions=positions, persist=False)
+            urep = _hd.monitor(u, date, con, positions=norm_pos, persist=False)
             if not (urep and urep.get("enabled")):
                 continue
             d2 = dict(data)
@@ -650,10 +688,13 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
       - "close_again" 复盘补发（20:00，与 close 独立，不可共用否则被去重吞掉）
       - "weekend"     周末发酵/周一前瞻（周日/周一）
       - "anomaly"     盘中异动（随时，走 PushPlus 冷却去重，不占 ServerChan 额度）
-      - "open_anomaly" 竞价后开盘前异动（09:26，ServerChan 固定四条之一 + PushPlus 冗余兜底）
+      - "open_anomaly" 竞价后开盘前异动（09:26，ServerChan 固定关键节点 + PushPlus 冗余兜底）
       - "panic"       盘中恐慌/崩盘预警（突发快速下杀，走 PushPlus 随时推送，不占 ServerChan 额度）
+      - "stoploss"    持仓止损即时提醒（评级 D 触发，走 PushPlus/企微，30分钟冷却，不占 SC 额度）
+    ServerChan 额度规避：close_again 复盘补发主动让出 SC 名额（优先 PushPlus/企微），
+    使 SC 单 key 5条/天只承载 preauction+open_anomaly+close 三个关键节点，预留余量。
     无论是否配置通道，都会把推送内容落地为可见文件（last_push_<mode>.md），避免『啥都看不到』。
-    注意：去重账本 push_log.jsonl 仅在『至少一条通道真实送达』后才写，失败不污染去重。"""
+    注意：去重账本 state/push_ledger.jsonl 仅在『至少一条通道真实送达』后才写，失败不污染去重。"""
     # 非交易日拦截：cron 写的是「周一至周五」，法定节假日（春节/国庆等）照样点火。
     # 若不拦，节假日会连日把「节前那根K线」当『今日复盘』推出去，既误导又白烧
     # ServerChan 额度（5 条/天）。weekend 模式本就在周末推，豁免。
@@ -691,6 +732,16 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
         if _recently_pushed("panic", 15):
             print("[notifier][panic] 15分钟内已推送恐慌预警，跳过（防重复）")
             return ["skipped:dup-panic"]
+    if not dry_run and mode == "stoploss":
+        # 止损即时提醒：持仓触发硬止损（评级 D）时经 PushPlus/企微即时告警，
+        # 不占 ServerChan 额度；仅交易时段推送（持仓仅在交易日变动），30 分钟冷却防重复。
+        if not _in_anomaly_window():
+            print("[notifier][stoploss] 当前非交易时段（北京 %s），跳过止损推送"
+                  % _bj_now().strftime("%H:%M"))
+            return ["skipped:off-hours"]
+        if _recently_pushed("stoploss", 30):
+            print("[notifier][stoploss] 30分钟内已推送止损提醒，跳过（防重复）")
+            return ["skipped:dup-stoploss"]
     # 输出兜底：避免 print 带 emoji 在非 UTF-8 控制台（如 GBK）抛 UnicodeEncodeError
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -745,16 +796,23 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
         ("email", send_email, cfg_shared.get("email")),
     ]
     if mode == "open_anomaly":
-        # 竞价后开盘前异动：ServerChan 固定四条之一（与盘前/收盘/复盘并列的关键节点），
+        # 竞价后开盘前异动：ServerChan 固定四条之一（与盘前/收盘并列的关键节点），
         # 同时 PushPlus 随时冗余推送（不冲突：ServerChan 仅占 1/4 额度，其余走 PushPlus）。
         _prefer = ["wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"]
-    elif mode in ("anomaly", "auction", "weekend", "panic", "yaogu"):
-        # 盘中异动 / 竞价确认 / 周末发酵：全部走 PushPlus 系（200 条/天几乎不限），
-        # 绝不占 ServerChan 的固定 4 条额度。竞价确认主动让出 ServerChan 给关键节点。
+    elif mode == "close_again":
+        # 复盘补发让出 ServerChan 额度（单 key 5条/天）：复盘非生死节点，
+        # 优先走 PushPlus/企微，把 SC 名额留给盘前/竞价/收盘这 3 个关键节点；
+        # 仅当这些通道都未配置时才退回 SC，避免漏发。
+        _has_alt = any(cfg_shared.get(n) for n in ("wechat_pushplus", "wecom", "telegram", "email"))
+        _prefer = (["wechat_pushplus", "wecom", "telegram", "email"]
+                   if _has_alt else
+                   ["wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"])
+    elif mode in ("anomaly", "auction", "weekend", "panic", "yaogu", "stoploss"):
+        # 盘中异动 / 竞价确认 / 周末发酵 / 止损即时：全部走 PushPlus 系（200 条/天几乎不限），
+        # 绝不占 ServerChan 的固定 3~4 条额度。竞价确认主动让出 ServerChan 给关键节点。
         _prefer = ["wechat_pushplus", "wecom", "telegram", "email"]
     else:
-        # 盘前 / 收盘 / 复盘：ServerChan 为主（固定三条，加 open_anomaly 共四条），
-        # PushPlus 冗余兜底。
+        # 盘前 / 收盘：ServerChan 为主（关键节点），PushPlus 冗余兜底。
         _prefer = ["wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"]
     dispatchers = [(n, fn, c) for (n, fn, c) in _all if n in _prefer and c]
     for name, fn, c in dispatchers:
@@ -801,13 +859,10 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
             _ch = [r.split(":", 1)[0] for r in results
                    if r.startswith(("wechat_serverchan", "wechat_pushplus", "wecom",
                                     "telegram", "email")) and "失败" not in r]
-            logp = os.path.join(DIST, "push_log.jsonl")
-            with open(logp, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps({"ts": _ts, "mode": mode, "title": title,
-                                     "text": text, "channels": _ch,
-                                     "codes": list(codes) if codes else [],
-                                     "adate": analysis_date if mode in ("close", "close_again") else None},
-                                    ensure_ascii=False) + "\n")
+            _append_ledger({"ts": _ts, "mode": mode, "title": title,
+                            "text": text, "channels": _ch,
+                            "codes": list(codes) if codes else [],
+                            "adate": analysis_date if mode in ("close", "close_again") else None})
         except Exception as e:
             print("[notifier] 去重账本写入失败（不影响已送达）：%r" % e)
         _rotate_push_log()
@@ -825,7 +880,7 @@ def _rotate_push_log(keep_days=90, full_text_days=7, brief_len=300):
     安全：任何异常都静默放弃清理，绝不影响已完成的推送与当天去重。
     """
     try:
-        logp = os.path.join(DIST, "push_log.jsonl")
+        logp = _ledger_path()
         if not os.path.exists(logp):
             return
         now = _bj_now()
@@ -873,7 +928,7 @@ def last_text_for_mode(mode):
     用于『复盘补发』与『收盘后』推送去重：内容相同时跳过，节省 ServerChan 额度。
     复盘(close_again)与收盘(close)必须用各自独立的 mode，否则复盘会被 once-per-day 吞掉。"""
     try:
-        logp = os.path.join(DIST, "push_log.jsonl")
+        logp = _ledger_path()
         if not os.path.exists(logp):
             return None
         last = None
@@ -1244,6 +1299,20 @@ def format_sc(data, url="", mode="close"):
                  % (("+" if money.get("total_main_net", 0) >= 0 else "") + str(money.get("total_main_net")),
                     "、".join((b.get("name") or "") + _signed(b.get("net"), 0) + "亿"
                               for b in money.get("boards_in", [])[:3])))
+    # 龙虎榜·游资合力（盘后公开数据，无需密钥；失败则跳过）
+    lhb = data.get("lhb")
+    if lhb:
+        try:
+            rows = sorted(lhb.items(), key=lambda kv: -(kv[1].get("net_amt") or 0))[:5]
+            if rows:
+                L.append("龙虎榜·游资合力 Top%d：" % len(rows))
+                for code, r in rows:
+                    seats = r.get("buy_seat", 0)
+                    L.append("- %s %s 净买%.2f亿 ｜ %d买方席位 ｜ %s"
+                             % (code, r.get("name", ""), (r.get("net_amt") or 0) / 1e8,
+                                seats, (r.get("explanation") or "")[:24]))
+        except Exception:
+            pass
     # 牛股雷达（本次新增，多维度共振候选）
     bull = data.get("bull")
     if bull:
@@ -1312,6 +1381,20 @@ def format_sc(data, url="", mode="close"):
                 L.append(ln)
         except Exception:
             pass
+    # 复盘补发专享（20:00，与 15:20 收盘相比补上更完整的盘后增量解读）
+    if mode == "close_again":
+        zb = data.get("market", {}).get("zhaban_stats")
+        if zb and zb.get("samples"):
+            L.append("炸板规律参考：近 %d 只『触板未封住』样本，次日平均收 %s%%（收绿率 %s%%）——"
+                     "高位烂板隔日风险偏高，打板需看封单质量。"
+                     % (zb.get("samples", 0), zb.get("avg_next_close"), _pct(zb.get("green_rate"))))
+        ro = (data.get("cold") or {}).get("rotation") or {}
+        if ro.get("pairs"):
+            L.append("冷后方向轮动：相邻两次冷后换方向概率 %.0f%%；最近领涨方向 %s"
+                     % (ro["switch_rate"] * 100, "→".join(ro.get("last_inds") or []) or "—"))
+        # 持股监测评级变化（相对上一交易日的降级预警）
+        if hrep and hrep.get("enabled") and hrep.get("alerts"):
+            L.append("⚠ 你的持仓评级变化：" + "；".join(hrep["alerts"][:4]))
     if url:
         L.append("看板：%s" % url)
     _title = ("复盘补发 %s" % date) if mode == "close_again" else ("盘后复盘 %s" % date)

@@ -1912,14 +1912,21 @@
     var isRemote = MU.mode === 'remote';
     var rows = MU.users.map(function (u, i) {
       var isOwner = u.id === 'owner';
+      var sc = (u.sc || '').toString();
+      var pp = (u.pp || '').toString();
+      var hd = (Array.isArray(u.holdings) ? u.holdings : []).join(',');
       return '<tr>' +
         '<td class="id">' + saEsc(u.id) + '</td>' +
         '<td class="nm">' + saEsc(u.name) + (isOwner ? ' <span class="tag">管理员</span>' : '') + '</td>' +
-        '<td class="pw">' + (isOwner ? '—' : '<code>' + saEsc(u.pass) + '</code>') + '</td>' +
+        '<td class="pw">' + (isOwner ? '—' : '<code>' + saEsc(u.pass) + '</code> <button class="mbtn" data-act="cp" data-i="' + i + '">改口令</button>') + '</td>' +
+        '<td class="keys">' +
+          '<input class="mu-in" data-f="sc" data-i="' + i + '" placeholder="ServerChan 密钥(留空=共用广播)" value="' + saEsc(sc) + '">' +
+          '<input class="mu-in" data-f="pp" data-i="' + i + '" placeholder="PushPlus 令牌(留空=共用广播)" value="' + saEsc(pp) + '">' +
+        '</td>' +
+        '<td class="hold"><input class="mu-in" data-f="holdings" data-i="' + i + '" placeholder="本人持仓代码，逗号分隔(如 600519,000001)" value="' + saEsc(hd) + '"></td>' +
         '<td class="ac">' +
         (isOwner ? '<span class="muted">不可删除</span>'
           : '<button class="mbtn mbtn-d" data-act="rm" data-i="' + i + '">删除</button>') +
-        ' <button class="mbtn" data-act="cp" data-i="' + i + '">改口令</button>' +
         '</td></tr>';
     }).join('');
     b.innerHTML =
@@ -1928,7 +1935,7 @@
       '<input id="muNewName" placeholder="显示名称（可选，如 莉莉）" maxlength="20">' +
       '<button class="mbtn mbtn-p" id="muAddBtn">+ 添加</button></div>' +
       (MU.users.length
-        ? '<table class="sa-mgmt-t"><thead><tr><th>账户</th><th>名称</th><th>口令</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>'
+        ? '<table class="sa-mgmt-t"><thead><tr><th>账户</th><th>名称</th><th>口令</th><th>推送密钥(SC/PP)</th><th>本人持仓(个性化推送用)</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>'
         : '<div class="sa-mgmt-empty">暂无其他用户。添加一个，把「账户名 + 口令」发给对方即可。</div>') +
       '<div class="sa-mgmt-actions">' +
       '<button class="mbtn mbtn-p" id="muDeployBtn">保存并部署</button>' +
@@ -1940,7 +1947,8 @@
       '</div>' +
       '<div class="sa-mgmt-note" id="muNote"></div>' +
       '<div class="sa-mgmt-hint">修改后必须「保存并部署」才会生效（云端为每个用户重新生成加密数据，约 2 分钟）。' +
-      (isRemote ? '口令明文只在你这台设备上，写到 GitHub 前会先加密。' : '') + '</div>';
+      (isRemote ? '口令明文只在你这台设备上，写到 GitHub 前会先加密。' : '') +
+      '｜ 想让某用户收『本人持仓专属复盘』：在其行填 ServerChan/PushPlus 密钥 + 本人持仓代码（逗号分隔）即可，未填则自动并入共用广播。' + '</div>';
     MU.noteEl = document.getElementById('muNote');
     document.getElementById('muAddBtn').addEventListener('click', function () {
       var uid = document.getElementById('muNewId').value.trim();
@@ -1963,6 +1971,21 @@
         if (act === 'rm') muRemove(i); else if (act === 'cp') muChgPass(i);
       });
     });
+    // 每用户推送密钥(SC/PP) + 本人持仓：输入即时回写 MU.users（无需手动保存，点"保存并部署"即密封上传）
+    b.querySelectorAll('input[data-f]').forEach(function (inp) {
+      inp.addEventListener('input', function () {
+        var i = parseInt(inp.dataset.i, 10);
+        var f = inp.dataset.f;
+        var u = MU.users[i];
+        if (!u) return;
+        if (f === 'holdings') {
+          u.holdings = inp.value.split(/[,，\s]+/).map(function (s) { return s.trim(); }).filter(Boolean);
+          if (!u.holdings.length) u.holdings = [];
+        } else {
+          u[f] = inp.value.trim();
+        }
+      });
+    });
   }
   function muAdd(uname, dname) {
     var id = (uname || '').trim().toLowerCase().replace(/[^a-z0-9一-龥]/g, '').slice(0, 20);
@@ -1970,7 +1993,7 @@
     if (MU.users.some(function (u) { return u.id === id; })) { muNote('用户名「' + id + '」已存在', 'err'); return; }
     var name = (dname || '').trim() || id;
     var pass = muGenPass();
-    MU.users.push({ id: id, name: name, pass: pass });
+    MU.users.push({ id: id, name: name, pass: pass, sc: '', pp: '', holdings: [] });
     muRender(); muNote('已添加「' + name + '」（' + id + '），口令：' + pass + '（保存并部署后生效）', 'ok');
   }
   function muRemove(i) {

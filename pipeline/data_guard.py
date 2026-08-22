@@ -131,6 +131,22 @@ def health_report(con):
     return rep
 
 
+def integrity_report(con):
+    """数据完整性自检报告（构建期调用，仅告警不阻断）。
+
+    归一化 health_report 的输出，供 build.py / 站点展示使用。
+    返回 {ok, warnings:[...], trade_days, last_date, last_day_rows, scale_anomalies}。"""
+    r = health_report(con)
+    return {
+        "ok": r.get("ok", False),
+        "warnings": list(r.get("issues") or []),
+        "trade_days": r.get("trade_days"),
+        "last_date": r.get("last_date"),
+        "last_day_rows": r.get("last_day_rows"),
+        "scale_anomalies": r.get("scale_anomalies") or [],
+    }
+
+
 if __name__ == "__main__":
     con = store.connect()
     apply = "--apply" in sys.argv

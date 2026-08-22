@@ -550,6 +550,31 @@ def run(date_override=None, dedup_close=False):
         log("  持股监测失败（不影响主流程）：%r" % e)
         data["holdings"] = None
 
+    # ---- 龙虎榜·游资合力（盘后公开数据，无需密钥；失败则跳过，不影响主流程）----
+    try:
+        lhb = em_api.lhb_day_list(date)
+        if lhb:
+            data["lhb"] = lhb
+            log("  龙虎榜 %d 只上榜（游资合力因子已纳入推送）" % len(lhb))
+        else:
+            data["lhb"] = None
+            log("  龙虎榜为空（可能非交易日或接口限流），跳过")
+    except Exception as e:
+        data["lhb"] = None
+        log("  龙虎榜抓取失败（不影响主流程）：%r" % e)
+
+    # ---- 数据完整性自检（缺口/覆盖骤降/新股截断/复权异常，仅告警不阻断）----
+    try:
+        integ = data_guard.integrity_report(con)
+        data["integrity"] = integ
+        for w in (integ.get("warnings") or []):
+            log("  ⚠ 数据完整性：%s" % w)
+        if integ.get("ok"):
+            log("  数据完整性体检通过")
+    except Exception as e:
+        data["integrity"] = {"ok": False, "warnings": ["自检异常：%r" % e]}
+        log("  数据完整性自检异常（不影响主流程）：%r" % e)
+
     # ---- 历史连板库落库：先回填前一日推荐的真实结局，再记录当日状态 ----
     try:
         n_bf = store.backfill_rec_outcomes(con, u)
