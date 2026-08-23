@@ -1105,7 +1105,12 @@ def _fmt_close_compact(data, url="", mode="close"):
     if recs:
         L.append("🔥 **推荐 Top%d**" % len(recs))
         for i, it in enumerate(recs, 1):
-            L.append(_rec_line(it, i))
+            # 注意：必须用「- 」列表语法，ServerChan/PushPlus 渲染器对裸 "1. " 行不换行
+            rs = it.get("reasons") or []
+            extra = (" ｜ %s" % "、".join(rs[:1])) if rs else ""
+            L.append("- **%d. %s**(%s) · 价值 **%.0f分** · 晋级 **%.0f%%**%s"
+                     % (i, it.get("name", "?"), _board(it),
+                        it.get("worth_score", 0), it.get("p_continue", 0), extra))
     else:
         L.append("🔥 今日无明确推荐，建议控仓或低位试错")
     # ---- 分区榜单：每板块独立标题，每股单独一行（用户要求：分区清晰不糊在一起）----
