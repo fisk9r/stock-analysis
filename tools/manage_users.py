@@ -31,6 +31,7 @@ from setup_github import (  # noqa: E402
 )
 
 CFG = os.path.join(ROOT, "config", "allowed_users.json")
+HOLD = os.path.join(ROOT, "config", "holdings.json")
 
 
 def load():
@@ -115,6 +116,41 @@ class _APIHandler(SimpleHTTPRequestHandler):
                 dispatch_build(tok, owner)
                 url = "https://%s.github.io/%s/" % (owner, REPO)
                 self._json({"ok": True, "url": url, "msg": "部署已触发，约 2 分钟后生效"})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)}, status=500)
+        elif self.path == "/api/save-holdings":
+            # 本机模式持仓保存：写本地 config/holdings.json（与云端 Secret 同构 {positions:[…]}）
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length)
+            try:
+                data = json.loads(raw)
+                if "positions" not in data or not isinstance(data["positions"], list):
+                    raise ValueError("缺少 positions 字段")
+                os.makedirs(os.path.dirname(HOLD), exist_ok=True)
+                with open(HOLD, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                self._json({"ok": True, "msg": "已保存 %d 只持仓" % len(data["positions"])})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)}, status=400)
+        elif self.path == "/api/deploy-holdings":
+            # 把本机 holdings.json 写入 HOLDINGS_JSON Secret 并触发重建（本机令牌，浏览器零接触）
+            try:
+                if not os.path.exists(HOLD):
+                    self._json({"ok": False, "error": "还没有保存过持仓"}, status=400)
+                    return
+                ensure_pynacl()
+                tok_path = os.path.normpath(os.path.join(ROOT, "..", ".ghtoken"))
+                if not os.path.exists(tok_path):
+                    tok_path = TOKEN_FILE_DEFAULT
+                if not os.path.exists(tok_path):
+                    self._json({"ok": False, "error": "找不到 GitHub 令牌文件（%s）" % tok_path}, status=400)
+                    return
+                tok = open(tok_path, encoding="utf-8").read().strip()
+                owner = get_user(tok)
+                payload = json.load(open(HOLD, encoding="utf-8"))
+                set_secret(tok, owner, "HOLDINGS_JSON", json.dumps(payload, ensure_ascii=False))
+                dispatch_build(tok, owner)
+                self._json({"ok": True, "msg": "部署已触发，约 2 分钟后生效"})
             except Exception as e:
                 self._json({"ok": False, "error": str(e)}, status=500)
         else:
