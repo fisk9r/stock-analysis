@@ -69,7 +69,9 @@ env:
   TZ: Asia/Shanghai
   # 外部 AI 模型密钥（换脑兜底）：仅在 config/models.json 填 key 或设此 Secret 时启用。
   # 不配置则 ai_judge 自动跳过，不影响主流程；Hy3 不可用只要有此 key 共识照常产出。
+  # zhipu(GLM 免费档) 为保底：kimi 失败/超时时自动切换。
   AI_KIMI_KEY: ${{ secrets.AI_KIMI_KEY }}
+  AI_ZHIPU_KEY: ${{ secrets.AI_ZHIPU_KEY }}
 
 jobs:
   run:

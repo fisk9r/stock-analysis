@@ -405,7 +405,8 @@ def generate_narrative_backup(data, preferred=None):
     cfg = load_model_config()
     if preferred is None:
         nb = cfg.get("narrative_backup")
-        pref_list = nb if isinstance(nb, list) and nb else ["kimi"]
+        # 默认保底链：kimi 主用 → zhipu(GLM 免费档) 兜底（云端无 models.json 时同样生效）
+        pref_list = nb if isinstance(nb, list) and nb else ["kimi", "zhipu"]
     elif isinstance(preferred, str):
         pref_list = [preferred]
     else:
