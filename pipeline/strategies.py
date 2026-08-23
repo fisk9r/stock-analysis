@@ -487,10 +487,64 @@ def scan(u, date, con, code2boards=None, topn=12):
     return merged[:topn]
 
 
+# ----------------------------------------------------------------- 历史回测
+def backtest(u, days=25, horizons=(1, 3)):
+    """策略历史回测：近 N 个交易日逐日重放全部探测器，统计每个策略信号的
+    次日/3日前向收益（信号日收盘买入价口径）。零成本：全部用已落库 K 线。
+
+    返回 [{signal, n, win1, avg1, win3, avg3}, ...] 按样本数降序；
+    样本不足(<5)的策略标注 low=1。放量跌停为观察类信号，照常统计仅供参考。
+    """
+    dates = u.dates[-days:]
+    stats = {}   # signal -> {"r1":[], "r3":[]}
+    for d in dates:
+        for det in STRATEGIES:
+            name = SIGNAL_NAMES.get(det.__name__, det.__name__)
+            try:
+                hits = det(u, d, None)
+            except Exception:
+                continue
+            if not hits:
+                continue
+            i = u.dates.index(d)
+            b1 = u.dates[i + 1] if i + 1 < len(u.dates) else None
+            b3 = u.dates[i + 3] if i + 3 < len(u.dates) else None
+            if not b1:
+                continue
+            s = stats.setdefault(name, {"r1": [], "r3": []})
+            for h in hits:
+                code = h["code"]
+                c0b = u.bar(code, d)
+                c1b = u.bar(code, b1) if b1 else None
+                if not c0b or not c1b or not c0b.get("c") or not c1b.get("c"):
+                    continue
+                s["r1"].append(c1b["c"] / c0b["c"] - 1.0)
+                if b3:
+                    c3b = u.bar(code, b3)
+                    if c3b and c3b.get("c"):
+                        s["r3"].append(c3b["c"] / c0b["c"] - 1.0)
+    out = []
+    for name, s in stats.items():
+        r1, r3 = s["r1"], s["r3"]
+        if len(r1) < 5:
+            out.append({"signal": name, "n": len(r1), "win1": None, "avg1": None,
+                        "win3": None, "avg3": None, "low": 1})
+            continue
+        out.append({
+            "signal": name, "n": len(r1),
+            "win1": round(100.0 * sum(1 for x in r1 if x > 0) / len(r1), 1),
+            "avg1": round(100.0 * sum(r1) / len(r1), 2),
+            "win3": round(100.0 * sum(1 for x in r3 if x > 0) / len(r3), 1) if r3 else None,
+            "avg3": round(100.0 * sum(r3) / len(r3), 2) if r3 else None,
+        })
+    out.sort(key=lambda x: -x["n"])
+    return out
+
+
 if __name__ == "__main__":
     import json
     cc = store.connect()
-    u = engine.Universe(cc, days=130)
+    u = engine.Universe(cc, days=270)
     d = u.dates[-1] if u.dates else None   # 库内最后一个交易日（周末运行=周五）
     rep = scan(u, d, cc)
     print("经典策略 Top%d (%s)" % (len(rep), d))

@@ -521,7 +521,7 @@ if __name__ == "__main__":
     import trade_calendar as tc
     cc = store.connect()
     d = tc.last_trade_date(cc)
-    u = engine.Universe(cc, days=130)
+    u = engine.Universe(cc, days=270)
     rep = scan(u, d, cc)
     print("牛股雷达 Top%d (%s)" % (len(rep), d))
     for it in rep:

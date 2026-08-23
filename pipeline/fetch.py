@@ -64,7 +64,7 @@ def snapshot_to_bars(con, rows, date=None):
     return len(tup)
 
 
-def refresh_bars(con, stocks, full_days=130):
+def refresh_bars(con, stocks, full_days=260):
     n_code = con.execute("SELECT COUNT(DISTINCT code) FROM bars").fetchone()[0] or 0
     n_date = con.execute("SELECT COUNT(DISTINCT date) FROM bars").fetchone()[0] or 0
     last = con.execute("SELECT MAX(date) FROM bars").fetchone()[0]

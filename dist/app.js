@@ -1635,7 +1635,7 @@
   var MU_ADMIN_KEY = 'sa_worker_admin_key';
   // 管理代理 Worker：留空 = 沿用旧模式（浏览器直连 GitHub，需粘贴令牌）
   // 填入你的 Worker URL 后 = 浏览器只发「管理密钥(ADMIN_KEY)」，GitHub 令牌仅存于 Worker 服务端
-  var WORKER_URL = '';
+  var WORKER_URL = 'https://stock-admin.37204360.workers.dev';
 
   // 站点部署在 <owner>.github.io/<repo>/，据此推断仓库；本地预览时回退
   function muRepo() {
@@ -2454,8 +2454,7 @@
     var desc = '移植自 GitHub 开源项目（InStock 系）的经典选股策略：放量上涨 · 均线多头 · 停机坪 · 回踩长线(年线/半年线) · 海龟突破(唐奇安60日) · 高窄旗形 · 稳健上行(无大幅回撤) · 低ATR慢牛 · 放量跌停观察。与牛股雷达互补共振。';
     if (!rep.length) {
       h += card('🎯 经典策略库', '<div class="empty">今日无经典策略信号（市场偏冷或风格不匹配，建议等待）</div>', desc);
-      return h;
-    }
+    } else {
     var rows = rep.map(function (it) {
       var sig = (it.signals || []).map(function (s) { return sigBadge(s); }).join(' ');
       return '<tr>' +
@@ -2474,6 +2473,78 @@
       { t: '涨跌幅', a: 'num' }, { t: '量比', a: 'num' }, { t: '行业' }, { t: '说明' }
     ];
     h += card('🎯 经典策略库 · Top' + rep.length, table(cols, rows), desc);
+    }
+    /* -- 策略历史回测（近25交易日逐日重放） -- */
+    var bt = D.strategy_bt || [];
+    if (bt.length) {
+      var btDesc = '对 9 类策略在近 25 个交易日做逐日重放：信号触发后次日 / 3日的胜率与平均收益（真实前向价计算）。样本<5 标记为「低」，仅供参考。';
+      var btRows = bt.map(function (b) {
+        var wr1 = b.n ? Math.round(b.win1 * 100 / b.n) : 0;
+        var wr3 = b.n ? Math.round(b.win3 * 100 / b.n) : 0;
+        return '<tr>' +
+          '<td>' + sigBadge(b.signal) + '</td>' +
+          '<td class="num">' + n2(b.n) + (b.low ? ' <span style="color:#94a3b8;font-size:12px">低</span>' : '') + '</td>' +
+          '<td class="num ' + (wr1 >= 50 ? 'up' : 'down') + '">' + wr1 + '%</td>' +
+          '<td class="num ' + ((b.avg1 || 0) >= 0 ? 'up' : 'down') + '">' + sign(b.avg1 * 100, 2) + '%</td>' +
+          '<td class="num ' + (wr3 >= 50 ? 'up' : 'down') + '">' + wr3 + '%</td>' +
+          '<td class="num ' + ((b.avg3 || 0) >= 0 ? 'up' : 'down') + '">' + sign(b.avg3 * 100, 2) + '%</td>' +
+          '</tr>';
+      }).join('');
+      h += card('📊 策略历史回测 · 近25交易日', table(
+        [{ t: '策略' }, { t: '样本', a: 'num' }, { t: '次日胜率', a: 'num' }, { t: '次日均收', a: 'num' }, { t: '3日胜率', a: 'num' }, { t: '3日均收', a: 'num' }],
+        btRows), btDesc);
+    }
+    /* -- K线组合形态（今日识别） -- */
+    var cd = D.candles || {};
+    var cstats = cd.stats || [];
+    var chits = cd.hits || [];
+    if (cstats.length) {
+      var dirC = function (d) { return d === 'bull' ? '#ef4444' : (d === 'bear' ? '#22c55e' : '#64748b'); };
+      var dirL = { bull: '看涨', bear: '看跌', neutral: '中性' };
+      var chips = cstats.map(function (s) {
+        return '<span style="display:inline-flex;align-items:center;gap:5px;margin:2px;padding:4px 10px;border-radius:14px;border:1px solid ' + dirC(s.direction) + '55;color:' + dirC(s.direction) + ';font-weight:600">' +
+          E(s.pattern) + '<b>' + n2(s.n) + '</b><span style="opacity:.7;font-size:11px">' + dirL[s.direction] + '</span></span>';
+      }).join('');
+      var cdDesc = '基于日K识别 12 种经典蜡烛图形态（锤头/上吊/吞没/晨星/暮星/红三兵/三乌鸦/刺透/乌云盖顶/十字星系）。A股惯例：红=看涨、绿=看跌。';
+      var chRows = chits.slice(0, 20).map(function (x) {
+        return '<tr>' +
+          '<td>' + stk(x.code, x.name) + '</td>' +
+          '<td style="color:' + dirC(x.direction) + ';font-weight:600">' + E(x.pattern) + '</td>' +
+          '<td>' + (dirL[x.direction] || '—') + '</td>' +
+          '<td class="num">' + f(x.close) + '</td>' +
+          '<td class="num ' + ((x.pct || 0) >= 0 ? 'up' : 'down') + '">' + sign(x.pct) + '</td>' +
+          '</tr>';
+      }).join('');
+      var cdBody = '<div style="margin-bottom:10px;line-height:2.2">' + chips + '</div>';
+      if (chRows) {
+        cdBody += table([{ t: '个股' }, { t: '形态' }, { t: '方向' }, { t: '收盘', a: 'num' }, { t: '涨跌幅', a: 'num' }], chRows) +
+          (chits.length > 20 ? '<div class="muted" style="margin-top:6px;font-size:12px">仅展示前 20 条，共 ' + chits.length + ' 条命中</div>' : '');
+      }
+      h += card('🕯 K线形态 · 今日识别', cdBody, cdDesc);
+    }
+    /* -- 筹码获利盘（近似估计） -- */
+    var cp = D.chips || {};
+    if (cp.n) {
+      var avgPct = Math.round((cp.avg || 0) * 100);
+      var cpDesc = '近120日成交量按换手半衰期加权分布到价格区间估算获利盘比例（一阶近似，仅供参考）。获利盘低=套牢沉重/超跌，高=注意兑现风险。';
+      var cpRow = function (x, hot) {
+        return '<tr>' +
+          '<td>' + stk(x.code, x.name) + '</td>' +
+          '<td class="num" style="color:' + (hot ? '#ef4444' : '#22c55e') + ';font-weight:700">' + Math.round(x.ratio * 100) + '%</td>' +
+          '<td class="num">' + f(x.close) + '</td>' +
+          '<td class="num ' + ((x.pct || 0) >= 0 ? 'up' : 'down') + '">' + sign(x.pct) + '</td>' +
+          '</tr>';
+      };
+      var lo = (cp.top_low || []).map(function (x) { return cpRow(x, false); }).join('');
+      var hi2 = (cp.top_high || []).map(function (x) { return cpRow(x, true); }).join('');
+      var colsCp = [{ t: '个股' }, { t: '获利盘', a: 'num' }, { t: '收盘', a: 'num' }, { t: '涨跌幅', a: 'num' }];
+      var cpBody = kpi('全市场平均获利盘', avgPct + '%', '基于 ' + n2(cp.n) + ' 只有效样本', '') +
+        '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:12px"><div style="flex:1;min-width:260px">' +
+        '<div style="font-weight:700;margin-bottom:4px;color:#22c55e">🔻 获利盘最低（超跌/套牢区）</div>' + table(colsCp, lo) + '</div>' +
+        '<div style="flex:1;min-width:260px">' +
+        '<div style="font-weight:700;margin-bottom:4px;color:#ef4444">🔺 获利盘最高（兑现风险区）</div>' + table(colsCp, hi2) + '</div></div>';
+      h += card('🪙 筹码分布 · 获利盘', cpBody, cpDesc);
+    }
     return h;
   }
 
@@ -2526,6 +2597,7 @@
         '<div class="kv" style="margin:4px 0">' + tgt + ' ｜ ' + stp + '</div>' +
         '<div style="margin:6px 0"><b style="color:var(--muted);font-size:12px">风险</b> ' + risks + '</div>' +
         (plus ? '<div style="margin:6px 0"><b style="color:var(--muted);font-size:12px">亮点</b> ' + plus + '</div>' : '') +
+        ((d.signals && d.signals.length) ? '<div style="margin:6px 0"><b style="color:var(--muted);font-size:12px">信号</b> ' + d.signals.map(sigBadge).join(' ') + '</div>' : '') +
         '<div class="note" style="margin-top:6px">动作：<b>' + E(d.action) + '</b> · ' + E(d.why || '') + '</div>' +
         '</div></div>';
     }).join('');
@@ -2775,4 +2847,8 @@
     show(views[location.hash.slice(1)] ? location.hash.slice(1) : 'overview');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
+  /* PWA：注册 Service Worker（离线壳 + 数据网络优先） */
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    try { navigator.serviceWorker.register('sw.js'); } catch (e) {}
+  }
 })();

@@ -1,0 +1,19 @@
+{
+  "name": "A股盘后复盘分析系统",
+  "short_name": "盘后复盘",
+  "description": "涨停归因 · 断板测算 · 情绪周期 · 妖股甄别 · 经典策略",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b1020",
+  "theme_color": "#0b1020",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

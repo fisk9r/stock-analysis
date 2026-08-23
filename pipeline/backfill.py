@@ -15,8 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import em_api as A
 import store
 
-MIN_BARS = 100   # 少于该根数视为残缺，需要重拉
-LIMIT = 130      # 每只拉取的日 K 根数
+MIN_BARS = 240   # 少于该根数视为残缺，需要重拉（260日扩容后旧130日库全量重拉一次）
+LIMIT = 260      # 每只拉取的日 K 根数（扩容：解锁真·年线 MA250 策略）
 
 
 def log(*a):

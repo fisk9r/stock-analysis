@@ -260,7 +260,7 @@ jobs:
         run: |
           rm -rf site && mkdir -p site
           # 逐个拷贝：默认 shell 是 bash -e，一次 cp 多文件只要缺一个整步就挂
-          for f in index.html styles.css charts.js app.js auth.js nacl.js users.json meta.json; do
+          for f in index.html styles.css charts.js app.js auth.js nacl.js users.json meta.json sw.js manifest.webmanifest icon.svg; do
             if [ -f "dist/$f" ]; then cp "dist/$f" site/; else echo "::warning::缺少 dist/$f"; fi
           done
           # 目标必须写全 site/data；写成 site/ 会因目录已存在而变成 site/data/data

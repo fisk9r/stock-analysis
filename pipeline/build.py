@@ -17,6 +17,8 @@ import notifier
 import yaogu
 import bull
 import strategies
+import candles
+import chips
 import coldwave
 import holdings
 import data_guard
@@ -250,7 +252,7 @@ def run(date_override=None, dedup_close=False):
     except Exception as e:
         log("  数据修复跳过（不影响主流程）：%r" % e)
     log("载入行情库 ...")
-    u = engine.Universe(con, days=130)
+    u = engine.Universe(con, days=270)
     log("覆盖 %d 只个股 / %d 个交易日" % (len(u.bars), len(u.dates)))
     date = pick_date(u, date_override)
     prev = u.prev_date(date)
@@ -539,6 +541,32 @@ def run(date_override=None, dedup_close=False):
         log("  经典策略失败（不影响主流程）：%r" % e)
         data["strategies"] = []
 
+    # ---- 策略历史回测：近 25 个交易日逐日重放信号，统计次日/3日胜率 ----
+    try:
+        data["strategy_bt"] = strategies.backtest(u, days=25)
+        ok = [s for s in (data.get("strategy_bt") or []) if not s.get("low")]
+        log("  策略回测完成：%d 个策略有足够样本" % len(ok))
+    except Exception as e:
+        log("  策略回测失败（不影响主流程）：%r" % e)
+        data["strategy_bt"] = []
+
+    # ---- K线组合形态：12 种经典蜡烛图形态全市场识别 ----
+    try:
+        data["candles"] = candles.scan(u, date, limit_per_pattern=8)
+        n_hit = len(data.get("candles", {}).get("hits") or [])
+        log("  K线形态命中 %d 条（%d 类）" % (n_hit, len(data.get("candles", {}).get("stats") or [])))
+    except Exception as e:
+        log("  K线形态失败（不影响主流程）：%r" % e)
+        data["candles"] = {"stats": [], "hits": []}
+
+    # ---- 筹码分布：获利盘比例近似估计（换手半衰期加权） ----
+    try:
+        data["chips"] = chips.scan(u, date)
+        log("  筹码获利盘：均值 %.1f%%（%d 只）" % (data["chips"]["avg"] * 100, data["chips"]["n"]))
+    except Exception as e:
+        log("  筹码分布失败（不影响主流程）：%r" % e)
+        data["chips"] = {"n": 0, "avg": 0, "top_low": [], "top_high": []}
+
     # ---- 冷启修复节奏预判 + 冷后领涨风格轮动规律 ----
     try:
         data["cold"] = coldwave.analyze(u, date, code2boards, n=140)
@@ -558,6 +586,25 @@ def run(date_override=None, dedup_close=False):
     except Exception as e:
         log("  持股监测失败（不影响主流程）：%r" % e)
         data["holdings"] = None
+
+    # ---- 持仓×策略/雷达联动：给持仓条目打上当日命中信号标签 ----
+    try:
+        hrep = data.get("holdings")
+        if hrep and hrep.get("items"):
+            sigmap = {}
+            for src in ("strategies", "bull"):
+                for it in (data.get(src) or []):
+                    sigmap.setdefault(it.get("code"), []).extend(it.get("signals") or [])
+            n_linked = 0
+            for it in hrep["items"]:
+                sg = sigmap.get(it.get("code"))
+                if sg:
+                    it["signals"] = sg[:3]
+                    n_linked += 1
+            if n_linked:
+                log("  持仓联动：%d 只持仓命中策略/雷达信号" % n_linked)
+    except Exception as e:
+        log("  持仓联动失败（不影响主流程）：%r" % e)
 
     # ---- 龙虎榜·游资合力（盘后公开数据，无需密钥；失败则跳过，不影响主流程）----
     try:

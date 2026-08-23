@@ -622,7 +622,7 @@ def _push_personalized(data, mode, users, analysis_date, results):
     import engine as _engine
     import holdings as _hd
     con = store.connect()
-    u = _engine.Universe(con, days=130)
+    u = _engine.Universe(con, days=270)
     date = analysis_date or (u.dates[-1] if u.dates else None)
     if not date:
         return
@@ -1058,6 +1058,13 @@ def _fmt_close_compact(data, url="", mode="close"):
     money = data.get("money") or {}
     narr = data.get("narrative") or {}
 
+    # 板块自选：config/notify.json 加 "sections": {"trend":false,...} 可关闭对应小节；
+    # 未配置默认全开。可选键：bullets/rec/trend/bull/strat/yaogu/avoid/money
+    _sec_cfg = (load_config() or {}).get("sections") or {}
+
+    def _on(k):
+        return bool(_sec_cfg.get(k, True))
+
     L = []
     head = "复盘补发 · %s" % _wd(date) if mode == "close_again" else "盘后复盘 · %s" % _wd(date)
     L.append("## 📊 " + head)
@@ -1073,7 +1080,7 @@ def _fmt_close_compact(data, url="", mode="close"):
         L.append("赚钱效应 昨涨停今均 **%s**（翻红%s/再板%s）· 炸板率 %s"
                  % (_signed(p.get("avg_pct"), 1) + "%", _pct(p.get("red_rate")),
                     _pct(p.get("again_rate")), _pct(micro.get("zhaban_rate"))))
-    if money and money.get("boards_in"):
+    if _on("money") and money and money.get("boards_in"):
         L.append("主力净流入 **%s亿** ｜ 流入行业 %s"
                  % (("+" if money.get("total_main_net", 0) >= 0 else "")
                     + str(money.get("total_main_net")),
@@ -1094,14 +1101,14 @@ def _fmt_close_compact(data, url="", mode="close"):
         L.append("")
         L.append("🧭 %s" % " ｜ ".join(bits))
     # ---- 要点（≤3 条）----
-    bl = [b for b in (narr.get("bullets") or []) if b][:3]
+    bl = [b for b in (narr.get("bullets") or []) if b][:3] if _on("bullets") else []
     if bl:
         L.append("")
         for b in bl:
             L.append("- ✨ %s" % b)
     # ---- 推荐 Top5 ----
     L.append("")
-    recs = _top_recs(rec.get("core"), rec.get("relay"), rec.get("all"), 5)
+    recs = _top_recs(rec.get("core"), rec.get("relay"), rec.get("all"), 5) if _on("rec") else []
     if recs:
         L.append("🔥 **推荐 Top%d**" % len(recs))
         for i, it in enumerate(recs, 1):
@@ -1123,19 +1130,19 @@ def _fmt_close_compact(data, url="", mode="close"):
         for r in rows:
             L.append("- %s" % r)
 
-    trend = rec.get("trend") or []
+    trend = rec.get("trend") or [] if _on("trend") else []
     _sec("📈 趋势主升", [
         "**%s**(%s) %.2f ｜ 近5日%d涨"
         % (t.get("name", "?"), t.get("industry", "—") or "—",
            t.get("close", 0) or 0, (t.get("trend_meta") or {}).get("up_days", 0) or 0)
         for t in trend[:4]])
-    bull = data.get("bull") or []
+    bull = data.get("bull") or [] if _on("bull") else []
     _sec("🐂 牛股雷达", [
         "**%s**〔%s〕%.2f元 %+.1f%%"
         % (b.get("name", "?"), "+".join((b.get("signals") or [])[:2]),
            b.get("price") or 0, b.get("pct") or 0)
         for b in bull[:4]])
-    strat = data.get("strategies") or []
+    strat = data.get("strategies") or [] if _on("strat") else []
     _sec("🎯 经典策略", [
         "**%s**〔%s〕%.2f元 %+.1f%%"
         % (s.get("name", "?"), "+".join((s.get("signals") or [])[:2]),
@@ -1144,15 +1151,15 @@ def _fmt_close_compact(data, url="", mode="close"):
     if mode in ("close", "close_again"):
         try:
             import yaogu as _yg
-            rk = ((data.get("yaogu") or {}).get("ranked")) or []
+            rk = ((data.get("yaogu") or {}).get("ranked")) or [] if _on("yaogu") else []
             _sec("⚡ 妖股潜力", [
                 "**%s** %.0f分（%s）"
                 % (r.get("name", "?"), r.get("score", 0) or 0, r.get("sector", "—") or "—")
                 for r in rk[:3]])
         except Exception:
             pass
-    avoid = rec.get("avoid") or []
-    if not avoid and rec.get("all"):
+    avoid = (rec.get("avoid") or []) if _on("avoid") else []
+    if not avoid and _on("avoid") and rec.get("all"):
         avoid = sorted(rec["all"], key=lambda x: -(x.get("p_break") or 0))[:2]
     _sec("🚫 高位回避", [
         "**%s**(%s·断板%.0f%%)"

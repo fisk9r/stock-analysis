@@ -154,7 +154,7 @@ def resample(seq, n):
 class Universe(object):
     """从本地日K库重建全市场涨停/连板历史"""
 
-    def __init__(self, con, days=130):
+    def __init__(self, con, days=270):
         self.con = con
         self.stocks = {}
         for code, market, name, tmv, fmv in con.execute(
