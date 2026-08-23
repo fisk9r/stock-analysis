@@ -2395,7 +2395,10 @@
     var m = {
       '阶段新高突破': 't-main', '平台突破': 't-main', '二波启动': 't-main', '趋势加速': 't-main',
       '反包': 't-sub', '均线发散': 't-sub', '深水拉板': 't-sub', '低位首板': 't-min',
-      'N字回调': 't-min', '缺口不补': 't-min'
+      'N字回调': 't-min', '缺口不补': 't-min',
+      '放量上涨': 't-main', '均线多头': 't-main', '海龟突破': 't-main',
+      '停机坪': 't-sub', '高窄旗形': 't-sub', '稳健上行': 't-sub',
+      '回踩长线': 't-min', '低ATR慢牛': 't-min', '放量跌停': 't-min'
     };
     return '<span class="bd ' + (m[s] || 't-min') + '">' + E(s) + '</span>';
   }
@@ -2433,6 +2436,44 @@
       { t: '涨跌幅', a: 'num' }, { t: '量比', a: 'num' }, { t: '行业' }, { t: '说明' }
     ];
     h += card('🐂 牛股雷达 · Top' + rep.length, table(cols, rows), desc);
+    return h;
+  }
+
+  /* ---------------- 经典策略库（开源策略移植） ---------------- */
+  function viewStrategies() {
+    var rep = D.strategies || [];
+    var h = '';
+    var multi = rep.filter(function (x) { return x.multi >= 2; }).length;
+    var best = rep[0] || {};
+    h += '<div class="grid g4" style="margin-bottom:16px">' +
+      kpi('策略命中', n2(rep.length), '9 类经典选股策略', rep.length ? 'up' : '') +
+      kpi('多策略共振', n2(multi), '≥2 个策略同时命中', multi ? 'up' : '') +
+      kpi('最强标的', best.name ? E(best.name) : '—', best.signals ? best.signals.join('+') : '暂无') +
+      kpi('最高评分', f(best.score), '多策略加权', '') +
+      '</div>';
+    var desc = '移植自 GitHub 开源项目（InStock 系）的经典选股策略：放量上涨 · 均线多头 · 停机坪 · 回踩长线(年线/半年线) · 海龟突破(唐奇安60日) · 高窄旗形 · 稳健上行(无大幅回撤) · 低ATR慢牛 · 放量跌停观察。与牛股雷达互补共振。';
+    if (!rep.length) {
+      h += card('🎯 经典策略库', '<div class="empty">今日无经典策略信号（市场偏冷或风格不匹配，建议等待）</div>', desc);
+      return h;
+    }
+    var rows = rep.map(function (it) {
+      var sig = (it.signals || []).map(function (s) { return sigBadge(s); }).join(' ');
+      return '<tr>' +
+        '<td>' + stk(it.code, it.name) + '</td>' +
+        '<td>' + sig + '</td>' +
+        '<td class="num">' + f(it.score) + '</td>' +
+        '<td class="num">' + (it.price != null ? f(it.price) : '—') + '</td>' +
+        '<td class="num ' + ((it.pct || 0) >= 0 ? 'up' : 'down') + '">' + (it.pct != null ? sign(it.pct) : '—') + '</td>' +
+        '<td class="num">' + (it.vol_ratio ? f(it.vol_ratio, 1) : '—') + '</td>' +
+        '<td>' + E(it.ind || '') + '</td>' +
+        '<td class="muted">' + E(it.tags || '') + '</td>' +
+        '</tr>';
+    }).join('');
+    var cols = [
+      { t: '个股' }, { t: '命中策略' }, { t: '评分', a: 'num' }, { t: '现价', a: 'num' },
+      { t: '涨跌幅', a: 'num' }, { t: '量比', a: 'num' }, { t: '行业' }, { t: '说明' }
+    ];
+    h += card('🎯 经典策略库 · Top' + rep.length, table(cols, rows), desc);
     return h;
   }
 
@@ -2695,7 +2736,7 @@
     }
     initBackdrop();
     startFreshnessWatch();
-    var views = { overview: viewOverview, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, holdings: viewHoldings };
+    var views = { overview: viewOverview, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings };
     var done = {};
     function show(k) {
       if (!done[k]) {

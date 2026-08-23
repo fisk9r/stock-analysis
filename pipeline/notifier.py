@@ -1030,6 +1030,135 @@ def _signed(v, nd=0):
     return ("%+." + str(int(nd)) + "f") % x
 
 
+
+def _wd(date):
+    """'2026-08-21' -> '08-21(周五)'，解析失败原样返回。"""
+    try:
+        import datetime as _dt
+        d = _dt.date.fromisoformat(date)
+        return "%s(%s)" % (date[5:], "周" + "一二三四五六日"[d.weekday()])
+    except Exception:
+        return date
+
+
+def _fmt_close_compact(data, url="", mode="close"):
+    """全新简洁板式（ServerChan / PushPlus 统一）：一屏读完、只给结果。
+
+    设计原则：盘面 4 行定调 → 要点 ≤3 条 → 推荐 ≤5 只 → 其余榜单一律单行内联，
+    砍掉全部长字段叙述（MA 全值/多级晋级分档/回测样本说明等，看板里都有）。
+    """
+    m = data.get("meta", {})
+    date = m.get("date", "")
+    sent = data.get("market", {}).get("sentiment", {}) or {}
+    cyc = data.get("market", {}).get("cycle", {}) or {}
+    lus = data.get("limit_ups", []) or []
+    rec = data.get("recommend", {}) or {}
+    regime = data.get("regime") or {}
+    micro = data.get("micro") or {}
+    money = data.get("money") or {}
+    narr = data.get("narrative") or {}
+
+    L = []
+    head = "复盘补发 · %s" % _wd(date) if mode == "close_again" else "盘后复盘 · %s" % _wd(date)
+    L.append("## 📊 " + head)
+    # ---- 盘面速览（≤4 行）----
+    L.append("情绪 **%.1f %s** ｜ 周期 **%s**"
+             % (sent.get("score", 0), sent.get("label", ""), cyc.get("phase", "")))
+    hi_streak = max([r.get("streak", 0) for r in lus], default=0)
+    row2 = "涨停 **%d** · 最高 **%d板** · 晋级 **%s** · 封板 **%s**" % (
+        len(lus), hi_streak, _pct(sent.get("promote_rate")), _pct(sent.get("seal_rate")))
+    L.append(row2)
+    if micro:
+        p = micro.get("profit") or {}
+        L.append("赚钱效应 昨涨停今均 **%s**（翻红%s/再板%s）· 炸板率 %s"
+                 % (_signed(p.get("avg_pct"), 1) + "%", _pct(p.get("red_rate")),
+                    _pct(p.get("again_rate")), _pct(micro.get("zhaban_rate"))))
+    if money and money.get("boards_in"):
+        L.append("主力净流入 **%s亿** ｜ 流入行业 %s"
+                 % (("+" if money.get("total_main_net", 0) >= 0 else "")
+                    + str(money.get("total_main_net")),
+                    "、".join((b.get("name") or "") + _signed(b.get("net"), 0) + "亿"
+                              for b in money.get("boards_in", [])[:3])))
+    # ---- 定调 ----
+    pp = data.get("preopen_plan") or {}
+    tone = (regime.get("note") or "").strip()
+    tone = tone.split("（数据源")[0].split("(数据源")[0].rstrip(" ｜，,")  # 内部字段不外发
+    if len(tone) > 46:
+        tone = tone[:45] + "…"
+    bits = []
+    if tone:
+        bits.append(tone)
+    if pp.get("position"):
+        bits.append("建议仓位 %s" % pp["position"])
+    if bits:
+        L.append("")
+        L.append("🧭 %s" % " ｜ ".join(bits))
+    # ---- 要点（≤3 条）----
+    bl = [b for b in (narr.get("bullets") or []) if b][:3]
+    if bl:
+        L.append("")
+        for b in bl:
+            L.append("- ✨ %s" % b)
+    # ---- 推荐 Top5 ----
+    L.append("")
+    recs = _top_recs(rec.get("core"), rec.get("relay"), rec.get("all"), 5)
+    if recs:
+        L.append("🔥 **推荐 Top%d**" % len(recs))
+        for i, it in enumerate(recs, 1):
+            L.append(_rec_line(it, i))
+    else:
+        L.append("🔥 今日无明确推荐，建议控仓或低位试错")
+    # ---- 单行榜单（有才显示，无则整行省略）----
+    trend = rec.get("trend") or []
+    if trend:
+        L.append("📈 趋势主升：" + "、".join(
+            "**%s** %.2f" % (t.get("name", "?"), t.get("close", 0) or 0)
+            for t in trend[:4]))
+    bull = data.get("bull") or []
+    if bull:
+        L.append("🐂 牛股雷达：" + "、".join(
+            "**%s**〔%s〕" % (b.get("name", "?"), "+".join((b.get("signals") or [])[:2]))
+            for b in bull[:4]))
+    strat = data.get("strategies") or []
+    if strat:
+        L.append("🎯 经典策略：" + "、".join(
+            "**%s**〔%s〕" % (s.get("name", "?"), "+".join((s.get("signals") or [])[:2]))
+            for s in strat[:4]))
+    if mode in ("close", "close_again"):
+        try:
+            import yaogu as _yg
+            yg = data.get("yaogu")
+            rk = (yg or {}).get("ranked") or []
+            if rk:
+                L.append("⚡ 妖股潜力：" + "、".join(
+                    "**%s** %.0f分" % (r.get("name", "?"), r.get("score", 0) or 0)
+                    for r in rk[:3]))
+        except Exception:
+            pass
+    avoid = rec.get("avoid") or []
+    if not avoid and rec.get("all"):
+        avoid = sorted(rec["all"], key=lambda x: -(x.get("p_break") or 0))[:2]
+    if avoid:
+        L.append("🚫 回避：" + "、".join(
+            "**%s**(%s·断板%.0f%%)" % (a.get("name", "?"), _board(a),
+                                       a.get("p_break", 0) or 0)
+            for a in avoid[:2]))
+    pn = data.get("panic") or {}
+    if pn.get("level") in ("升温", "恐慌"):
+        L.append("⚠️ 恐慌扫描：**%s**（跌停%d 大面%d 昨涨停收绿%.0f%%）"
+                 % (pn.get("level"), pn.get("dt_count", 0), pn.get("bigface_count", 0),
+                    pn.get("yest_green") or 0))
+    if mode == "close_again":
+        hrep = data.get("holdings")
+        alerts = (hrep or {}).get("alerts") or []
+        if hrep and hrep.get("enabled") and alerts:
+            L.append("📡 持仓预警：" + "；".join(alerts[:3]))
+    if url:
+        L.append("")
+        L.append("🔗 看板 %s" % url)
+    return "\n".join(L)
+
+
 def format_stock_summary(data, url="", mode="close"):
     """ServerChan/PushPlus(markdown) 排版：盘面数据 / 复盘要点 / 推荐 / 风险，分区清晰、留白克制。
     mode='close' 收盘后；mode='preauction' 竞价前。"""
@@ -1084,150 +1213,9 @@ def format_stock_summary(data, url="", mode="close"):
             L.append("完整看板：%s" % url)
         return {"title": "竞价前观察 %s" % date, "text": "\n".join(L)}
 
-    # 收盘后复盘（Markdown 分区）
-    L = []
-    L.append("## A股盘后复盘 · %s" % date)
-    L.append("")
-    L.append("**情绪温度计**：%.1f（%s）｜ **周期**：%s" % (sent.get("score", 0), sent.get("label", ""), cyc.get("phase", "")))
-    L.append("**涨停**：%d 只 ｜ **最高**：%d 连板 ｜ **晋级率**：%s ｜ **封板率**：%s"
-             % (len(lus), max([r.get("streak", 0) for r in lus], default=0),
-                _pct(sent.get("promote_rate")), _pct(sent.get("seal_rate"))))
-    if regime.get("level"):
-        L.append("**连板热度研判**：%s" % regime.get("note", ""))
-    # 短线情绪微观结构（首板/断层/晋级率分档/炸板率/赚钱效应细分）
-    micro = data.get("micro") or {}
-    if micro:
-        p = micro.get("profit") or {}
-        pt = micro.get("promote_tiered") or {}
-        fb = micro.get("first_board", {})
-        L.append("**赚钱效应**：昨涨停今均 %s（翻红 %s / 再涨停 %s）｜ 亏钱效应(翻绿) %s"
-                 % (_pct(p.get("avg_pct")), _pct(p.get("red_rate")),
-                    _pct(p.get("again_rate")), _pct(p.get("green_rate"))))
-        L.append("**晋级率**：1进2 %s ｜ 2进3 %s ｜ 3板+ %s ｜ **首板** %d 只 ｜ **炸板率** %s"
-                 % (_pct(pt.get("1进2")), _pct(pt.get("2进3")), _pct(pt.get("3板及以上")),
-                    fb.get("count", 0), _pct(micro.get("zhaban_rate"))))
-        gap = micro.get("gap") or []
-        if gap:
-            L.append("**梯队断层**：缺 %s 板（中位断档，警惕高位分歧）" % "/".join("%d" % g for g in gap))
-    # 竞价强度定调（涨停股集合竞价强弱）
-    auc = data.get("auction") or {}
-    mv = auc.get("market_view") or {}
-    if mv and mv.get("avg_score") is not None:
-        L.append("**竞价强度**：涨停股竞价定调 %s 分（%s）｜ 平均高开 %s ｜ 弱转强 %d / 强转弱 %d ｜ 抢筹 %d / 派发预警 %d"
-                 % (mv.get("avg_score"), mv.get("strength"),
-                    _pct(auc.get("summary", {}).get("avg_open_pct")),
-                    mv.get("momentum", {}).get("weak_strong", 0),
-                    mv.get("momentum", {}).get("strong_weak", 0),
-                    len(mv.get("qiangchou", [])), len(mv.get("paifa", []))))
-    # 主力/北向资金流向
-    money = data.get("money") or {}
-    if money and money.get("boards_in"):
-        n = money.get("north")
-        L.append("**资金流向**：全市场主力净流入 %s 亿（净流入板块 %d / 净流出 %d）｜ 主力净流入行业Top：%s"
-                 % (("+" if money.get("total_main_net", 0) >= 0 else "") + str(money.get("total_main_net")),
-                    money.get("net_in_boards", 0), money.get("net_out_boards", 0),
-                    "、".join((b.get("name") or "") + _signed(b.get("net"), 0) + "亿" for b in money.get("boards_in", [])[:3])))
-        if n:
-            L.append("**北向资金**：沪 %s / 深 %s / 合计 %s 亿（净流入）" % (n.get("sh"), n.get("sz"), n.get("total")))
-        else:
-            L.append("**北向资金**：数据源停更（东财调整口径，暂不可用）")
-    # 选股回测
-    bt = data.get("backtest") or {}
-    if bt and bt.get("total"):
-        h1 = bt.get("h1") or {}; h3 = bt.get("h3") or {}; h5 = bt.get("h5") or {}
-        L.append("**选股回测**（样本 %d）：次日胜率 %s%% / 持有3日 %s%% / 持有5日 %s%%（均收益 %s%% / %s%% / %s%%）"
-                 % (bt["total"], h1.get("win", "-"), h3.get("win", "-"), h5.get("win", "-"),
-                    h1.get("avg", "-"), h3.get("avg", "-"), h5.get("avg", "-")))
-    # 板块接力 / 主线切换（断板→接力）
-    rl = data.get("sector_relay") or {}
-    if rl.get("available"):
-        if rl.get("broken"):
-            b = rl["broken"]
-            rn = "、".join(x["name"] for x in rl.get("relay", []))
-            L.append("**板块接力**：【%s】断板退潮（峰值 %d→现 %d 只涨停），资金切向【%s】"
-                     % (b["name"], b["peak_zt"], b["latest_zt"], rn or "混沌轮动"))
-        elif rl.get("relay"):
-            rn = "、".join(x["name"] for x in rl.get("relay", []))
-            L.append("**板块接力**：无单一退潮主线，当前资金聚焦【%s】" % rn)
-    L.append("")
-
-    # 恐慌 / 崩盘扫描
-    pn = data.get("panic") or {}
-    if pn.get("level") in ("升温", "恐慌"):
-        L.append("**⚠️ 恐慌扫描**：%s（跌停 %d 家｜ 大面 %d 只｜ 昨涨停收绿 %.0f%%）"
-                 % (pn.get("level"), pn.get("dt_count", 0), pn.get("bigface_count", 0),
-                    pn.get("yest_green") or 0))
-
-    if narr.get("bullets"):
-        L.append("### 复盘要点")
-        for b in narr["bullets"][:4]:
-            L.append("- %s" % b)
-        L.append("")
-    core = rec.get("core") or []
-    relay = rec.get("relay") or []
-    avoid = rec.get("avoid") or []
-    allit = rec.get("all") or []
-    if not avoid and allit:
-        avoid = sorted(allit, key=lambda x: -(x.get("p_break") or 0))[:3]
-    L.append("### 个股推荐 Top%d" % MAX_RECS)
-    recs = _top_recs(core, relay, allit, MAX_RECS)
-    if recs:
-        for i, it in enumerate(recs, 1):
-            L.append(_rec_line(it, i))
-    else:
-        L.append("（今日无明确推荐标的，建议控仓或低位试错）")
-    if len(allit) > MAX_RECS:
-        L.append("")
-        L.append("> 共 %d 只候选，仅列前 %d 只；完整推荐与原因见看板。" % (len(allit), MAX_RECS))
-    L.append("")
-    if avoid:
-        L.append("### 高位风险回避")
-        for it in avoid[:3]:
-            rk = "；".join(it.get("risks") or []) or "高位断板风险"
-            L.append("- **%s**(%d板) 断板概率%.0f%%：%s" % (it.get("name"), it.get("streak", 0), it.get("p_break", 0), rk))
-        L.append("")
-    # 趋势向上（主升段趋势票，独立板块）
-    trend = rec.get("trend") or []
-    if trend:
-        L.append("### 趋势向上 · 主升候选 Top%d" % min(MAX_RECS, len(trend)))
-        for it in trend[:MAX_RECS]:
-            tm = it.get("trend_meta") or {}
-            L.append("- **%s**(%s) 收%.2f ｜ 多头排列 MA5/10/20=%.2f/%.2f/%.2f ｜ 近5日%d涨 ｜ 偏离MA20 +%.1f%% ｜ 量能%.1f倍"
-                     % (it.get("name"), it.get("industry", "—"), it.get("close", 0),
-                        tm.get("ma5", 0), tm.get("ma10", 0), tm.get("ma20", 0),
-                        tm.get("up_days", 0), tm.get("momentum_pct", 0), tm.get("vol_ratio", 0)))
-            rs = it.get("reasons") or []
-            if rs:
-                L.append("   简因：%s" % "、".join(rs[:2]))
-        L.append("")
-    # 妖股潜力 Top3（收盘主推送内联，按潜力分降序；数据来自上一交易日涨停池，永不空推）
-    if mode in ("close", "close_again"):
-        try:
-            import yaogu as _yg
-            yg = data.get("yaogu")
-            if yg and yg.get("ranked"):
-                L.append("### ⚡ 妖股潜力 Top3（上一交易日 · 按潜力分降序）")
-                blk = _yg.top3_block(yg)
-                if blk:
-                    L.append(blk)
-                    L.append("> 完整妖股潜力榜（含龙虎榜游资合力/板块联动解读）见 PushPlus 推送与站点「妖股潜力」页签。")
-                L.append("")
-            # 妖股双确认（基因∩潜力 交集，确认度=√(基因×潜力)）：资金+形态共振 =
-            # 早期妖股确认度最高的票；两者任一塌方则被排除。无交集不展示，绝不空推。
-            dms = data.get("demons")
-            if yg and yg.get("ranked") and dms:
-                oblk = _yg.overlap_top3_block(dms, yg.get("ranked"))
-                if oblk:
-                    L.append("### 🔗 妖股双确认 Top3（基因∩潜力 · 确认度=√(基因×潜力)）")
-                    L.append(oblk)
-                    L.append("> 资金+形态共振的最强早期妖股信号；完整双确认榜见站点「妖股交集」页签。")
-                    L.append("")
-        except Exception:
-            pass
-    if url:
-        L.append("---")
-        L.append("完整数据看板：%s" % url)
-    return {"title": "A股盘后复盘 %s" % date, "text": "\n".join(L)}
+    # 收盘后复盘：统一走「简洁板式」（与 ServerChan 同源，一屏读完只给结果）
+    return {"title": "A股盘后复盘 %s" % date,
+            "text": _fmt_close_compact(data, url, mode)}
 
 
 # ServerChan 免费档单条 desp 硬上限 8192 字，超长会被静默丢弃（导致收盘/复盘只到 PushPlus）。
@@ -1267,138 +1255,9 @@ def format_sc(data, url="", mode="close"):
             L.append("看板：%s" % url)
         return {"title": "竞价前 %s" % date, "text": "\n".join(L)}
 
-    # 收盘后复盘
-    L = []
-    if mode == "close_again":
-        # 复盘补发必须与 15:20 收盘内容有差异：ServerChan 免费档对『重复/极相似 desp』会静默拒收，
-        # 之前连续两天 20:00 复盘补发收不到，根因就是 close 与 close_again 的 desp 字节级相同。
-        L.append("## 复盘补发 · %s" % date)
-        L.append("（盘后数据已最终定格 · 含你的持仓跟踪）")
-    else:
-        L.append("## 盘后复盘 · %s" % date)
-    L.append("情绪 %.1f(%s) ｜ 周期 %s" % (sent.get("score", 0), sent.get("label", ""), cyc.get("phase", "")))
-    L.append("涨停 %d ｜ 最高 %d板 ｜ 晋级 %s ｜ 封板 %s"
-             % (len(lus), max([r.get("streak", 0) for r in lus], default=0),
-                _pct(sent.get("promote_rate")), _pct(sent.get("seal_rate"))))
-    if regime.get("note"):
-        L.append("连板研判：%s" % regime.get("note", ""))
-    micro = data.get("micro") or {}
-    if micro:
-        p = micro.get("profit") or {}
-        pt = micro.get("promote_tiered") or {}
-        fb = micro.get("first_board", {})
-        L.append("赚钱效应 昨涨停今均 %s(翻红 %s/再板 %s) ｜ 亏钱 %s"
-                 % (_pct(p.get("avg_pct")), _pct(p.get("red_rate")),
-                    _pct(p.get("again_rate")), _pct(p.get("green_rate"))))
-        L.append("晋级 1进2 %s ｜ 2进3 %s ｜ 3板+ %s ｜ 首板 %d ｜ 炸板率 %s"
-                 % (_pct(pt.get("1进2")), _pct(pt.get("2进3")), _pct(pt.get("3板及以上")),
-                    fb.get("count", 0), _pct(micro.get("zhaban_rate"))))
-    money = data.get("money") or {}
-    if money and money.get("boards_in"):
-        L.append("主力净流入 %s亿 ｜ 净流入行业 %s"
-                 % (("+" if money.get("total_main_net", 0) >= 0 else "") + str(money.get("total_main_net")),
-                    "、".join((b.get("name") or "") + _signed(b.get("net"), 0) + "亿"
-                              for b in money.get("boards_in", [])[:3])))
-    # 龙虎榜·游资合力（盘后公开数据，无需密钥；失败则跳过）
-    lhb = data.get("lhb")
-    if lhb:
-        try:
-            rows = sorted(lhb.items(), key=lambda kv: -(kv[1].get("net_amt") or 0))[:5]
-            if rows:
-                L.append("龙虎榜·游资合力 Top%d：" % len(rows))
-                for code, r in rows:
-                    seats = r.get("buy_seat", 0)
-                    L.append("- %s %s 净买%.2f亿 ｜ %d买方席位 ｜ %s"
-                             % (code, r.get("name", ""), (r.get("net_amt") or 0) / 1e8,
-                                seats, (r.get("explanation") or "")[:24]))
-        except Exception:
-            pass
-    # 牛股雷达（本次新增，多维度共振候选）
-    bull = data.get("bull")
-    if bull:
-        L.append("牛股雷达 Top%d：" % min(MAX_RECS, len(bull)))
-        for it in bull[:MAX_RECS]:
-            L.append("- %s %s【%s】%.2f元 %+.1f%% 量比%.1f"
-                     % (it["code"], it["name"], "+".join(it["signals"]),
-                        it["price"] or 0, it["pct"] or 0, it["vol_ratio"] or 0))
-    # 个股推荐
-    core = rec.get("core") or []
-    relay = rec.get("relay") or []
-    allit = rec.get("all") or []
-    recs = _top_recs(core, relay, allit, MAX_RECS)
-    L.append("个股推荐 Top%d：" % MAX_RECS)
-    if recs:
-        for i, it in enumerate(recs, 1):
-            L.append(_rec_line(it, i))
-    else:
-        L.append("（今日无明确推荐，建议控仓或低位试错）")
-    # 趋势主升
-    trend = rec.get("trend") or []
-    if trend:
-        L.append("趋势主升 Top%d：" % min(MAX_RECS, len(trend)))
-        for it in trend[:MAX_RECS]:
-            tm = it.get("trend_meta") or {}
-            L.append("- %s(%s) %.2f ｜ 多头 MA5/10/20=%.2f/%.2f/%.2f ｜ 近5日%d涨 ｜ 量能%.1f倍"
-                     % (it.get("name"), it.get("industry", "—"), it.get("close", 0),
-                        tm.get("ma5", 0), tm.get("ma10", 0), tm.get("ma20", 0),
-                        tm.get("up_days", 0), tm.get("vol_ratio", 0)))
-    # 妖股潜力 Top3
-    if mode in ("close", "close_again"):
-        try:
-            import yaogu as _yg
-            yg = data.get("yaogu")
-            if yg and yg.get("ranked"):
-                blk = _yg.top3_block(yg)
-                if blk:
-                    L.append("妖股潜力 Top3：")
-                    L.append(blk)
-        except Exception:
-            pass
-    # 恐慌
-    pn = data.get("panic") or {}
-    if pn.get("level") in ("升温", "恐慌"):
-        L.append("⚠ 恐慌：%s 跌停%d 大面%d 昨涨停收绿%.0f%%"
-                 % (pn.get("level"), pn.get("dt_count", 0), pn.get("bigface_count", 0),
-                    pn.get("yest_green") or 0))
-    # 冷启修复预判
-    cw = data.get("cold")
-    if cw and cw.get("forecast"):
-        f0 = cw["forecast"]
-        L.append("冷启预判：%s · 预计 %s（T+1 %.0f%% / 两日内 %.0f%% / 三日内 %.0f%%）"
-                 % (f0["state"], f0["expect"], f0.get("p_t1", 0) * 100,
-                    f0.get("cum_t2", 0) * 100, f0.get("cum_t3", 0) * 100))
-        cands = cw.get("candidates") or []
-        if cands:
-            L.append("冷后候选：")
-            for it in cands[:3]:
-                L.append("- %s %s %.2f元 ｜ %s" % (it["code"], it["name"], it["price"] or 0, it.get("why", "")))
-    # 持股监测
-    hrep = data.get("holdings")
-    if hrep and hrep.get("enabled"):
-        try:
-            import holdings as _hd
-            for ln in _hd.summary_lines(hrep, limit=6):
-                L.append(ln)
-        except Exception:
-            pass
-    # 复盘补发专享（20:00，与 15:20 收盘相比补上更完整的盘后增量解读）
-    if mode == "close_again":
-        zb = data.get("market", {}).get("zhaban_stats")
-        if zb and zb.get("samples"):
-            L.append("炸板规律参考：近 %d 只『触板未封住』样本，次日平均收 %s%%（收绿率 %s%%）——"
-                     "高位烂板隔日风险偏高，打板需看封单质量。"
-                     % (zb.get("samples", 0), zb.get("avg_next_close"), _pct(zb.get("green_rate"))))
-        ro = (data.get("cold") or {}).get("rotation") or {}
-        if ro.get("pairs"):
-            L.append("冷后方向轮动：相邻两次冷后换方向概率 %.0f%%；最近领涨方向 %s"
-                     % (ro["switch_rate"] * 100, "→".join(ro.get("last_inds") or []) or "—"))
-        # 持股监测评级变化（相对上一交易日的降级预警）
-        if hrep and hrep.get("enabled") and hrep.get("alerts"):
-            L.append("⚠ 你的持仓评级变化：" + "；".join(hrep["alerts"][:4]))
-    if url:
-        L.append("看板：%s" % url)
+    # 收盘后复盘：与 PushPlus 共用同一简洁板式（天然远小于 8K 上限）
     _title = ("复盘补发 %s" % date) if mode == "close_again" else ("盘后复盘 %s" % date)
-    return {"title": _title, "text": "\n".join(L)}
+    return {"title": _title, "text": _fmt_close_compact(data, url, mode)}
 
 
 def format_auction_summary(data, url="", con=None):

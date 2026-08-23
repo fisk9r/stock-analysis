@@ -16,6 +16,7 @@ import ai_judge
 import notifier
 import yaogu
 import bull
+import strategies
 import coldwave
 import holdings
 import data_guard
@@ -529,6 +530,14 @@ def run(date_override=None, dedup_close=False):
     except Exception as e:
         log("  牛股雷达失败（不影响主流程）：%r" % e)
         data["bull"] = []
+
+    # ---- 经典策略库：开源选股策略移植（InStock 系 9 探测器，与牛股雷达互补）----
+    try:
+        data["strategies"] = strategies.scan(u, date, con, code2boards, topn=12)
+        log("  经典策略命中 %d 只" % len(data.get("strategies") or []))
+    except Exception as e:
+        log("  经典策略失败（不影响主流程）：%r" % e)
+        data["strategies"] = []
 
     # ---- 冷启修复节奏预判 + 冷后领涨风格轮动规律 ----
     try:
