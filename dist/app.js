@@ -1627,10 +1627,15 @@
     users: [], connected: false, overlay: null, noteEl: null,
     mode: null,          // 'local' | 'remote'
     ownerPass: '',       // 解开名单快照用，仅存内存
-    token: '',           // GitHub 令牌，仅存内存 / sessionStorage
+    token: '',           // GitHub 令牌（旧模式直连用），仅存内存 / sessionStorage
+    adminKey: '',        // 代理 Worker 的管理密钥（新模式用），仅存内存 / sessionStorage
     repoOwner: '', repoName: 'stock-analysis'
   };
   var MU_TOKEN_KEY = 'sa_gh_token';
+  var MU_ADMIN_KEY = 'sa_worker_admin_key';
+  // 管理代理 Worker：留空 = 沿用旧模式（浏览器直连 GitHub，需粘贴令牌）
+  // 填入你的 Worker URL 后 = 浏览器只发「管理密钥(ADMIN_KEY)」，GitHub 令牌仅存于 Worker 服务端
+  var WORKER_URL = '';
 
   // 站点部署在 <owner>.github.io/<repo>/，据此推断仓库；本地预览时回退
   function muRepo() {
@@ -1646,6 +1651,11 @@
     if (MU.token) return MU.token;
     try { MU.token = sessionStorage.getItem(MU_TOKEN_KEY) || localStorage.getItem(MU_TOKEN_KEY) || ''; } catch (e) {}
     return MU.token;
+  }
+  function muRecallAdminKey() {
+    if (MU.adminKey) return MU.adminKey;
+    try { MU.adminKey = sessionStorage.getItem(MU_ADMIN_KEY) || localStorage.getItem(MU_ADMIN_KEY) || ''; } catch (e) {}
+    return MU.adminKey;
   }
   // 登录时若勾了「记住口令」，这里就能直接拿到 owner 口令，免得再输一次
   function muRecallPass() {
@@ -1750,47 +1760,64 @@
   /* —— 远程模式：先把「owner 口令 + GitHub 令牌」凑齐，再拉名单 —— */
   function muStartRemote() {
     MU.ownerPass = MU.ownerPass || muRecallPass();
-    muRecallToken();
-    if (MU.ownerPass && MU.token) { muLoadRemote(); return; }
+    if (WORKER_URL) muRecallAdminKey(); else muRecallToken();
+    var haveKey = WORKER_URL ? MU.adminKey : MU.token;
+    if (MU.ownerPass && haveKey) { muLoadRemote(); return; }
     muRenderRemoteGate();
   }
 
   function muRenderRemoteGate(errMsg) {
     var b = document.getElementById('saMgmtBody'); if (!b) return;
     var needPass = !MU.ownerPass;
+    var useWorker = !!WORKER_URL;
+    var secretLabel = useWorker
+      ? '管理密钥<span class="muted">（你在 Cloudflare Worker 里设的 ADMIN_KEY，仅本机会话保存，不是 GitHub 令牌）</span>'
+      : 'GitHub 令牌<span class="muted">（需要 repo 权限，仅本次会话保存，不上传任何地方）</span>';
+    var secretInput = useWorker
+      ? '<input class="mu-in" id="muTokIn" type="password" placeholder="ADMIN_KEY（Worker 管理密钥）" autocomplete="off">'
+      : '<input class="mu-in" id="muTokIn" type="password" placeholder="ghp_… 或 github_pat_…" autocomplete="off">';
+    var keepBox = useWorker
+      ? '<label class="mu-ck"><input type="checkbox" id="muTokKeep">在这台设备上记住管理密钥（下次免输）</label>'
+      : '<label class="mu-ck"><input type="checkbox" id="muTokKeep">在这台设备上记住令牌（下次免输）</label>';
+    var createLink = useWorker ? '' :
+      '<a class="mbtn mbtn-ghost" href="https://github.com/settings/tokens/new?scopes=repo&description=stock-analysis%20admin" target="_blank" rel="noopener">去创建令牌</a>';
+    var hint = useWorker
+      ? '<div class="sa-mgmt-hint">管理密钥是你在 Worker 环境变量里自定的密码，不等于 GitHub 令牌。GitHub 令牌只存在 Worker 服务端，浏览器永不接触——这就是选 ① 的意义。</div>'
+      : '<div class="sa-mgmt-hint">创建令牌时勾选 <code>repo</code> 即可（fine-grained 令牌需要 Secrets 写 + Actions 写 + Contents 读）。令牌等于仓库钥匙，别发给别人；不想留痕就别勾「记住」。</div>';
     b.innerHTML = '<div class="sa-mgmt-off">' +
-      '<p>本机管理服务未运行，已切换到<b style="color:#7dd3fc">远程模式</b>——直接在这台设备上改，' +
-      '不需要你家里的电脑开机。</p>' +
+      '<p>本机管理服务未运行，已切换到<b style="color:#7dd3fc">远程模式</b>——直接在这台设备上改，不需要你家里的电脑开机。</p>' +
       (needPass
         ? '<label class="mu-lb">管理员口令<span class="muted">（你登录本站用的那个，用于解开云端名单）</span></label>' +
           '<input class="mu-in" id="muPassIn" type="password" placeholder="请输入管理员口令" autocomplete="off">'
         : '') +
-      '<label class="mu-lb">GitHub 令牌<span class="muted">（需要 repo 权限，仅本次会话保存，不上传任何地方）</span></label>' +
-      '<input class="mu-in" id="muTokIn" type="password" placeholder="ghp_… 或 github_pat_…" autocomplete="off">' +
-      '<label class="mu-ck"><input type="checkbox" id="muTokKeep">在这台设备上记住令牌（下次免输）</label>' +
+      '<label class="mu-lb">' + secretLabel + '</label>' +
+      secretInput +
+      keepBox +
       '<div class="sa-mgmt-actions">' +
       '<button class="mbtn mbtn-p" id="muGoBtn">进入管理</button>' +
-      '<a class="mbtn mbtn-ghost" href="https://github.com/settings/tokens/new?scopes=repo&description=stock-analysis%20admin" target="_blank" rel="noopener">去创建令牌</a>' +
+      createLink +
       '</div>' +
       '<div class="sa-mgmt-note' + (errMsg ? ' err' : '') + '" id="muNote">' + (errMsg ? saEsc(errMsg) : '') + '</div>' +
-      '<div class="sa-mgmt-hint">创建令牌时勾选 <code>repo</code> 即可（fine-grained 令牌需要 Secrets 写 + Actions 写 + Contents 读）。' +
-      '令牌等于仓库钥匙，别发给别人；不想留痕就别勾「记住」。</div>' +
+      hint +
       '</div>';
     MU.noteEl = document.getElementById('muNote');
     var go = document.getElementById('muGoBtn');
     function submit() {
-      var tok = (document.getElementById('muTokIn').value || '').trim();
+      var key = (document.getElementById('muTokIn').value || '').trim();
       if (needPass) {
         var p = (document.getElementById('muPassIn').value || '').trim();
         if (!p) { muNote('请输入管理员口令', 'err'); return; }
         MU.ownerPass = p;
       }
-      if (!tok) { muNote('请粘贴 GitHub 令牌', 'err'); return; }
-      MU.token = tok;
-      try {
-        if (document.getElementById('muTokKeep').checked) localStorage.setItem(MU_TOKEN_KEY, tok);
-        else sessionStorage.setItem(MU_TOKEN_KEY, tok);
-      } catch (e) {}
+      if (!key) { muNote(useWorker ? '请填写管理密钥' : '请粘贴 GitHub 令牌', 'err'); return; }
+      var keep = document.getElementById('muTokKeep') && document.getElementById('muTokKeep').checked;
+      if (useWorker) {
+        MU.adminKey = key;
+        try { if (keep) localStorage.setItem(MU_ADMIN_KEY, key); else sessionStorage.setItem(MU_ADMIN_KEY, key); } catch (e) {}
+      } else {
+        MU.token = key;
+        try { if (keep) localStorage.setItem(MU_TOKEN_KEY, key); else sessionStorage.setItem(MU_TOKEN_KEY, key); } catch (e) {}
+      }
       muLoadRemote();
     }
     go.addEventListener('click', submit);
@@ -1876,6 +1903,36 @@
     });
   }
 
+  /* 代理 Worker 中转：GitHub 令牌只存于 Worker 服务端，浏览器只发「管理密钥(ADMIN_KEY)」 */
+  function muProxyCall(action, payload) {
+    return fetch(WORKER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(Object.assign({ admin_key: MU.adminKey, action: action }, payload || {}))
+    }).then(function (r) {
+      return r.json().then(function (j) {
+        if (!r.ok) {
+          var msg = (j && j.error) || ('HTTP ' + r.status);
+          if (r.status === 403) msg = '管理密钥不正确或无权限';
+          throw new Error(msg);
+        }
+        return j || {};
+      });
+    });
+  }
+  function muGetPubKey() {
+    if (WORKER_URL) return muProxyCall('public-key', {});
+    return muGh('GET', '/repos/' + muRepo() + '/actions/secrets/public-key');
+  }
+  function muSecretWrite(name, sealed, keyId) {
+    if (WORKER_URL) return muProxyCall('put-secret', { secret_name: name, encrypted_value: sealed, key_id: keyId });
+    return muGh('PUT', '/repos/' + muRepo() + '/actions/secrets/' + name, { encrypted_value: sealed, key_id: keyId });
+  }
+  function muDispatchBuild() {
+    if (WORKER_URL) return muProxyCall('dispatch', {});
+    return muGh('POST', '/repos/' + muRepo() + '/actions/workflows/stock.yml/dispatches', { ref: 'main', inputs: { task: 'build' } });
+  }
+
   /* 远程保存：密封加密写回 Secret → 触发构建。明文口令只在浏览器里，不经第三方 */
   function muSaveDeployRemote() {
     if (!MU.users.length) { muNote('至少要保留一个用户', 'err'); return; }
@@ -1885,18 +1942,16 @@
     muLoadNacl()
       .then(function () {
         muNote('正在写入 GitHub 密钥…', 'info');
-        return muGh('GET', '/repos/' + muRepo() + '/actions/secrets/public-key');
+        return muGetPubKey();
       })
       .then(function (pk) {
         if (!pk || !pk.key || !pk.key_id) throw new Error('没能取到仓库公钥');
         var sealed = window.SA_SEAL(JSON.stringify({ users: MU.users }), pk.key);
-        return muGh('PUT', '/repos/' + muRepo() + '/actions/secrets/ALLOWED_USERS_JSON',
-          { encrypted_value: sealed, key_id: pk.key_id });
+        return muSecretWrite('ALLOWED_USERS_JSON', sealed, pk.key_id);
       })
       .then(function () {
         muNote('密钥已更新，正在触发重建…', 'info');
-        return muGh('POST', '/repos/' + muRepo() + '/actions/workflows/stock.yml/dispatches',
-          { ref: 'main', inputs: { task: 'build' } });
+        return muDispatchBuild();
       })
       .then(function () {
         if (btn) btn.disabled = false;
@@ -1960,9 +2015,15 @@
       isRemote ? muSaveDeployRemote : muSaveDeploy);
     if (isRemote) {
       document.getElementById('muForgetBtn').addEventListener('click', function () {
-        MU.token = '';
-        try { sessionStorage.removeItem(MU_TOKEN_KEY); localStorage.removeItem(MU_TOKEN_KEY); } catch (e) {}
-        muRenderRemoteGate('令牌已清除，需要重新输入。');
+        if (WORKER_URL) {
+          MU.adminKey = '';
+          try { sessionStorage.removeItem(MU_ADMIN_KEY); localStorage.removeItem(MU_ADMIN_KEY); } catch (e) {}
+          muRenderRemoteGate('管理密钥已清除，需要重新输入。');
+        } else {
+          MU.token = '';
+          try { sessionStorage.removeItem(MU_TOKEN_KEY); localStorage.removeItem(MU_TOKEN_KEY); } catch (e) {}
+          muRenderRemoteGate('令牌已清除，需要重新输入。');
+        }
       });
     }
     b.querySelectorAll('button[data-act]').forEach(function (btn) {
@@ -2458,24 +2519,36 @@
     if (cancel) cancel.addEventListener('click', function () { var o = document.getElementById('heOv'); if (o) o.remove(); });
   }
   function heSave() {
-    var tok = muRecallToken();
-    if (!tok) {
+    var haveKey = WORKER_URL ? MU.adminKey : muRecallToken();
+    if (!haveKey) {
       var b = document.getElementById('heBody'); if (!b) return;
-      if (document.getElementById('heTokIn')) { heNote('请先输入令牌', 'err'); return; }
+      if (document.getElementById('heTokIn')) { heNote(WORKER_URL ? '请先输入管理密钥' : '请先输入令牌', 'err'); return; }
       var gate = document.createElement('div');
-      gate.innerHTML = '<label class="mu-lb">GitHub 令牌<span class="muted">（repo 权限，仅本机会话保存）</span></label>' +
-        '<input class="mu-in" id="heTokIn" type="password" placeholder="ghp_… / github_pat_…">' +
-        '<label class="mu-ck"><input type="checkbox" id="heTokKeep">记住令牌</label>' +
-        '<div class="sa-mgmt-hint">创建：github.com/settings/tokens/new?scopes=repo。令牌等于仓库钥匙，别外泄。</div>';
+      if (WORKER_URL) {
+        gate.innerHTML = '<label class="mu-lb">管理密钥<span class="muted">（Worker 的 ADMIN_KEY，仅本机会话保存）</span></label>' +
+          '<input class="mu-in" id="heTokIn" type="password" placeholder="ADMIN_KEY">' +
+          '<label class="mu-ck"><input type="checkbox" id="heTokKeep">记住管理密钥</label>' +
+          '<div class="sa-mgmt-hint">管理密钥是 Worker 环境变量里自定的密码，不是 GitHub 令牌。</div>';
+      } else {
+        gate.innerHTML = '<label class="mu-lb">GitHub 令牌<span class="muted">（repo 权限，仅本机会话保存）</span></label>' +
+          '<input class="mu-in" id="heTokIn" type="password" placeholder="ghp_… / github_pat_…">' +
+          '<label class="mu-ck"><input type="checkbox" id="heTokKeep">记住令牌</label>' +
+          '<div class="sa-mgmt-hint">创建：github.com/settings/tokens/new?scopes=repo。令牌等于仓库钥匙，别外泄。</div>';
+      }
       b.insertBefore(gate, b.firstChild);
-      heNote('需要 GitHub 令牌才能写回持仓密钥（仅本机会话保存）', 'info');
+      heNote(WORKER_URL ? '需要管理密钥才能写回持仓密钥（仅本机会话保存）' : '需要 GitHub 令牌才能写回持仓密钥（仅本机会话保存）', 'info');
       var go = document.getElementById('heSaveBtn');
       if (go) go.textContent = '确认保存';
       go.onclick = function () {
         var t = (document.getElementById('heTokIn').value || '').trim();
-        if (!t) { heNote('请粘贴令牌', 'err'); return; }
-        MU.token = t;
-        try { if (document.getElementById('heTokKeep').checked) localStorage.setItem(MU_TOKEN_KEY, t); else sessionStorage.setItem(MU_TOKEN_KEY, t); } catch (e) {}
+        if (!t) { heNote(WORKER_URL ? '请填写管理密钥' : '请粘贴令牌', 'err'); return; }
+        if (WORKER_URL) {
+          MU.adminKey = t;
+          try { if (document.getElementById('heTokKeep').checked) localStorage.setItem(MU_ADMIN_KEY, t); else sessionStorage.setItem(MU_ADMIN_KEY, t); } catch (e2) {}
+        } else {
+          MU.token = t;
+          try { if (document.getElementById('heTokKeep').checked) localStorage.setItem(MU_TOKEN_KEY, t); else sessionStorage.setItem(MU_TOKEN_KEY, t); } catch (e2) {}
+        }
         gate.remove(); go.textContent = '保存并部署'; go.onclick = null;
         heSave();
       };
@@ -2484,7 +2557,7 @@
     heNote('正在加密写回 GitHub 密钥…', 'info');
     var btn = document.getElementById('heSaveBtn'); if (btn) btn.disabled = true;
     muLoadNacl().then(function () {
-      return muGh('GET', '/repos/' + muRepo() + '/actions/secrets/public-key');
+      return muGetPubKey();
     }).then(function (pk) {
       if (!pk || !pk.key || !pk.key_id) throw new Error('未取得仓库公钥');
       var payload = { positions: HE_POS.filter(function (p) { return /^\d{6}$/.test(p.code || ''); }).map(function (p) {
@@ -2492,10 +2565,10 @@
           shares: (p.shares === '' ? null : parseFloat(p.shares) || null), watch: !!p.watch, note: p.note };
       }) };
       var sealed = window.SA_SEAL(JSON.stringify(payload), pk.key);
-      return muGh('PUT', '/repos/' + muRepo() + '/actions/secrets/HOLDINGS_JSON', { encrypted_value: sealed, key_id: pk.key_id });
+      return muSecretWrite('HOLDINGS_JSON', sealed, pk.key_id);
     }).then(function () {
       heNote('持仓已写入密钥，正在触发重建…', 'info');
-      return muGh('POST', '/repos/' + muRepo() + '/actions/workflows/stock.yml/dispatches', { ref: 'main', inputs: { task: 'build' } });
+      return muDispatchBuild();
     }).then(function () {
       if (btn) btn.disabled = false;
       heNote('已提交 ✅ 云端重建约 2 分钟，刷新即可看到监测结果', 'ok');
