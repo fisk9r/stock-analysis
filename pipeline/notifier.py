@@ -1108,43 +1108,54 @@ def _fmt_close_compact(data, url="", mode="close"):
             L.append(_rec_line(it, i))
     else:
         L.append("🔥 今日无明确推荐，建议控仓或低位试错")
-    # ---- 单行榜单（有才显示，无则整行省略）----
+    # ---- 分区榜单：每板块独立标题，每股单独一行（用户要求：分区清晰不糊在一起）----
+    def _sec(icon_title, rows):
+        """rows 为空则整块省略；否则输出『**标题**』+ 每行一只。"""
+        if not rows:
+            return
+        L.append("")
+        L.append("**%s**" % icon_title)
+        for r in rows:
+            L.append("- %s" % r)
+
     trend = rec.get("trend") or []
-    if trend:
-        L.append("📈 趋势主升：" + "、".join(
-            "**%s** %.2f" % (t.get("name", "?"), t.get("close", 0) or 0)
-            for t in trend[:4]))
+    _sec("📈 趋势主升", [
+        "**%s**(%s) %.2f ｜ 近5日%d涨"
+        % (t.get("name", "?"), t.get("industry", "—") or "—",
+           t.get("close", 0) or 0, (t.get("trend_meta") or {}).get("up_days", 0) or 0)
+        for t in trend[:4]])
     bull = data.get("bull") or []
-    if bull:
-        L.append("🐂 牛股雷达：" + "、".join(
-            "**%s**〔%s〕" % (b.get("name", "?"), "+".join((b.get("signals") or [])[:2]))
-            for b in bull[:4]))
+    _sec("🐂 牛股雷达", [
+        "**%s**〔%s〕%.2f元 %+.1f%%"
+        % (b.get("name", "?"), "+".join((b.get("signals") or [])[:2]),
+           b.get("price") or 0, b.get("pct") or 0)
+        for b in bull[:4]])
     strat = data.get("strategies") or []
-    if strat:
-        L.append("🎯 经典策略：" + "、".join(
-            "**%s**〔%s〕" % (s.get("name", "?"), "+".join((s.get("signals") or [])[:2]))
-            for s in strat[:4]))
+    _sec("🎯 经典策略", [
+        "**%s**〔%s〕%.2f元 %+.1f%%"
+        % (s.get("name", "?"), "+".join((s.get("signals") or [])[:2]),
+           s.get("price") or 0, s.get("pct") or 0)
+        for s in strat[:4]])
     if mode in ("close", "close_again"):
         try:
             import yaogu as _yg
-            yg = data.get("yaogu")
-            rk = (yg or {}).get("ranked") or []
-            if rk:
-                L.append("⚡ 妖股潜力：" + "、".join(
-                    "**%s** %.0f分" % (r.get("name", "?"), r.get("score", 0) or 0)
-                    for r in rk[:3]))
+            rk = ((data.get("yaogu") or {}).get("ranked")) or []
+            _sec("⚡ 妖股潜力", [
+                "**%s** %.0f分（%s）"
+                % (r.get("name", "?"), r.get("score", 0) or 0, r.get("sector", "—") or "—")
+                for r in rk[:3]])
         except Exception:
             pass
     avoid = rec.get("avoid") or []
     if not avoid and rec.get("all"):
         avoid = sorted(rec["all"], key=lambda x: -(x.get("p_break") or 0))[:2]
-    if avoid:
-        L.append("🚫 回避：" + "、".join(
-            "**%s**(%s·断板%.0f%%)" % (a.get("name", "?"), _board(a),
-                                       a.get("p_break", 0) or 0)
-            for a in avoid[:2]))
+    _sec("🚫 高位回避", [
+        "**%s**(%s·断板%.0f%%)"
+        % (a.get("name", "?"), _board(a), a.get("p_break", 0) or 0)
+        for a in avoid[:3]])
     pn = data.get("panic") or {}
     if pn.get("level") in ("升温", "恐慌"):
+        L.append("")
         L.append("⚠️ 恐慌扫描：**%s**（跌停%d 大面%d 昨涨停收绿%.0f%%）"
                  % (pn.get("level"), pn.get("dt_count", 0), pn.get("bigface_count", 0),
                     pn.get("yest_green") or 0))
@@ -1152,7 +1163,7 @@ def _fmt_close_compact(data, url="", mode="close"):
         hrep = data.get("holdings")
         alerts = (hrep or {}).get("alerts") or []
         if hrep and hrep.get("enabled") and alerts:
-            L.append("📡 持仓预警：" + "；".join(alerts[:3]))
+            _sec("📡 持仓预警", [a for a in alerts[:4] if a])
     if url:
         L.append("")
         L.append("🔗 看板 %s" % url)
