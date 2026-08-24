@@ -1637,13 +1637,19 @@
   // 填入你的 Worker URL 后 = 浏览器只发「管理密钥(ADMIN_KEY)」，GitHub 令牌仅存于 Worker 服务端
   var WORKER_URL = 'https://stock-admin.37204360.workers.dev';
 
-  // 站点部署在 <owner>.github.io/<repo>/，据此推断仓库；本地预览时回退
+  // 站点部署地址：<owner>.github.io/<repo>/ 或 CF Pages（stock-analysis-8zm.pages.dev，仓库固定）；据此推断仓库
   function muRepo() {
     if (!MU.repoOwner) {
       var m = /^([^.]+)\.github\.io$/i.exec(location.hostname || '');
-      MU.repoOwner = m ? m[1] : 'fisk9r';
-      var seg = (location.pathname || '').split('/').filter(Boolean);
-      if (seg.length) MU.repoName = seg[0];
+      if (m) {
+        MU.repoOwner = m[1];
+        var seg = (location.pathname || '').split('/').filter(Boolean);
+        if (seg.length) MU.repoName = seg[0];
+      } else {
+        // CF Pages / 本地预览 / 其他托管：仓库固定（站点已迁移至 stock-analysis-8zm.pages.dev）
+        MU.repoOwner = 'fisk9r';
+        MU.repoName = 'stock-analysis';
+      }
     }
     return MU.repoOwner + '/' + MU.repoName;
   }
