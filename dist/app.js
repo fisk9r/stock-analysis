@@ -3,6 +3,9 @@
   'use strict';
   var D = window.__STOCK_DATA__;
   var E = CH.esc, C = CH.COLORS;
+  /* 主线/龙头映射：模块级全局，供 overview/rec/bull 等所有视图的 mlBadge() 共用。
+     （早期版本仅在某视图内部 var ML，导致 mlBadge 引用到 undefined，龙头/主线徽标不显示。） */
+  var ML = (D && D.recommend && D.recommend.mainline_map) || {};
 
   /* ---------------- 工具 ---------------- */
   function n2(v, d) { return (v === null || v === undefined || v !== v) ? (d === undefined ? '—' : d) : v; }
@@ -61,11 +64,13 @@
   }
   function table(cols, rows, opts) {
     opts = opts || {};
+    /* rows 允许为「<tr> 数组」或「已拼接好的 HTML 字符串」，统一兼容 */
+    var body = (rows == null) ? '' : (Array.isArray(rows) ? rows.join('') : String(rows));
     var h = '<div class="tbl-wrap' + (opts.scroll ? ' scroll-y' : '') + '"><table><thead><tr>' +
       cols.map(function (c) { return '<th class="' + (c.a || '') + '">' + c.t + '</th>'; }).join('') +
       '</tr></thead><tbody>';
-    if (!rows.length) return '<div class="empty">' + (opts.empty || '当日无符合条件的标的') + '</div>';
-    h += rows.join('');
+    if (!body) return '<div class="empty">' + (opts.empty || '当日无符合条件的标的') + '</div>';
+    h += body;
     return h + '</tbody></table></div>';
   }
   function seg(v, lo, hi) { return Math.max(0, Math.min(100, (v - lo) / (hi - lo) * 100)); }
@@ -2167,7 +2172,10 @@
       'background:rgba(6,10,18,.82);backdrop-filter:blur(6px);',
       'font-family:-apple-system,Segoe UI,Roboto,"Microsoft YaHei",sans-serif;}',
       '.kl{width:780px;max-width:94vw;max-height:92vh;display:flex;flex-direction:column;',
-      'background:var(--card);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow-lg);overflow:hidden;}',
+      'background:var(--card);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow-lg);overflow:hidden;',
+      'animation:klIn .22s ease}',
+      '@keyframes klIn{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:none}}',
+      '@media (prefers-reduced-motion:reduce){.kl{animation:none}}',
       '.kl-h{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-bottom:1px solid var(--border);}',
       '.kl-t{font-size:15px;font-weight:700;color:var(--text);display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;}',
       '.kl-t .kl-code{font-size:12px;color:var(--muted);font-family:"SF Mono",Menlo,monospace;}',
@@ -2817,23 +2825,39 @@
     var views = { overview: viewOverview, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings };
     var done = {};
     function show(k) {
+      var el = document.getElementById('v-' + k);
+      if (!el) { console.warn('[show] 缺少视图容器 #v-' + k); return; }
       if (!done[k]) {
         try {
-          var el = document.getElementById('v-' + k);
           el.innerHTML = views[k]();
           initCountUp(el);
         }
-        catch (e) { document.getElementById('v-' + k).innerHTML = '<div class="card"><div class="body"><div class="empty">渲染出错：' + E(e.message) + '</div></div></div>'; }
+        catch (e) {
+          el.innerHTML = '<div class="card"><div class="body"><div class="empty">渲染出错：' + E(e.message) + '</div></div></div>';
+        }
         done[k] = 1;
       }
+      /* 切换视图：仅对存在的容器切换 .on，避免缺节点时整段崩溃 */
       Object.keys(views).forEach(function (x) {
-        document.getElementById('v-' + x).classList.toggle('on', x === k);
+        var vx = document.getElementById('v-' + x);
+        if (vx) vx.classList.toggle('on', x === k);
       });
       [].forEach.call(document.querySelectorAll('#tabs button'), function (b) {
         b.classList.toggle('on', b.dataset.v === k);
       });
+      /* 重新触发淡入动画，使每次切换都有顺滑过渡 */
+      el.classList.remove('view-in'); void el.offsetWidth; el.classList.add('view-in');
+      moveTabInd();
       window.scrollTo(0, 0);
       if (location.hash.slice(1) !== k) history.replaceState(null, '', '#' + k);
+    }
+    /* 滑动指示条：跟随激活 tab 平滑移动 */
+    var tabsNav = document.getElementById('tabs');
+    var tabInd = document.createElement('span'); tabInd.className = 'tab-ind';
+    if (tabsNav) tabsNav.appendChild(tabInd);
+    function moveTabInd() {
+      var b = tabsNav && tabsNav.querySelector('button.on');
+      if (b && tabInd) { tabInd.style.width = b.offsetWidth + 'px'; tabInd.style.transform = 'translateX(' + b.offsetLeft + 'px)'; }
     }
     /* 全局点击：个股名 → 日K线；竞价形态 chip → 该形态个股清单 */
     document.addEventListener('click', function (e) {
@@ -2850,6 +2874,8 @@
     document.getElementById('tabs').addEventListener('click', function (e) {
       if (e.target.dataset && e.target.dataset.v) show(e.target.dataset.v);
     });
+    window.addEventListener('resize', moveTabInd);
+    window.addEventListener('load', moveTabInd);
     show(views[location.hash.slice(1)] ? location.hash.slice(1) : 'overview');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();

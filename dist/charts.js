@@ -32,7 +32,9 @@
   var C = {
     up: 'var(--up)', down: 'var(--down)', blue: 'var(--accent)', blue2: 'var(--accent-2)',
     gold: 'var(--gold)', purple: 'var(--purple)', teal: 'var(--ok)', gray: 'var(--faint)',
-    warn: 'var(--warn)', danger: 'var(--danger)'
+    warn: 'var(--warn)', danger: 'var(--danger)',
+    ok: 'var(--ok)', faint: 'var(--faint)', text: 'var(--text)', muted: 'var(--muted)',
+    border: 'var(--border)', border2: 'var(--border-2)', card: 'var(--card)'
   };
   function esc(s) {
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
