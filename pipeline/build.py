@@ -843,10 +843,6 @@ def push_preauction():
     du = os.path.join(ROOT, "config", "deploy_url.txt")
     if os.path.exists(du):
         deploy_url = open(du, encoding="utf-8").read().strip()
-    deploy_url = ""
-    du = os.path.join(ROOT, "config", "deploy_url.txt")
-    if os.path.exists(du):
-        deploy_url = open(du, encoding="utf-8").read().strip()
     summary = notifier.format_stock_summary(data, deploy_url, mode="preauction")
     summary["sc_text"] = notifier.format_sc(data, deploy_url, mode="preauction")["text"]
     return notifier.push(summary, mode="preauction")

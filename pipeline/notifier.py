@@ -688,7 +688,7 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
       - "close_again" 复盘补发（20:00，与 close 独立，不可共用否则被去重吞掉）
       - "weekend"     周末发酵/周一前瞻（周日/周一）
       - "anomaly"     盘中异动（随时，走 PushPlus 冷却去重，不占 ServerChan 额度）
-      - "open_anomaly" 竞价后开盘前异动（09:26，ServerChan 固定关键节点 + PushPlus 冗余兜底）
+      - "open_anomaly" 竞价后开盘前异动（09:26，个股检测类——走 PushPlus，不占 SC 额度）
       - "panic"       盘中恐慌/崩盘预警（突发快速下杀，走 PushPlus 随时推送，不占 ServerChan 额度）
       - "stoploss"    持仓止损即时提醒（评级 D 触发，走 PushPlus/企微，30分钟冷却，不占 SC 额度）
     ServerChan 额度规避：close_again 复盘补发主动让出 SC 名额（优先 PushPlus/企微），
@@ -784,10 +784,11 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
         print("[notifier] 文件痕迹写入失败：%r" % e)
 
     # 2) 通道推送（按 mode 路由）：
-    #    ServerChan 固定 4 条/工作日 = 盘前(preauction) + 竞价后开盘前异动(open_anomaly) +
-    #    收盘(close) + 复盘(close_again)，均为关键节点，占 ServerChan 单 key 5 条/天额度中的 4 条；
-    #    PushPlus 随时推送（200 条/天几乎不限）：盘中异动(anomaly)、竞价(auction)、周末发酵(weekend)
-    #    以及 open_anomaly 的冗余兜底，绝不挤占 ServerChan 的固定 4 条名额。
+    #    ServerChan 固定 2~3 条/工作日 = 盘前(preauction) + 收盘(close)，
+    #    均为关键节点，占 ServerChan 单 key 5 条/天额度中的 2 条；
+    #    PushPlus 随时推送（200 条/天几乎不限）：盘中异动(anomaly)、竞价(auction)、
+    #    竞价后开盘前异动(open_anomaly)、周末发酵(weekend)、止损(stoploss)、复盘补发(close_again)
+    #    ——个股/关注股类检测推送全部走 PushPlus（用户拍板：绝不挤占 SC 关键节点名额）。
     _all = [
         ("wechat_serverchan", send_wechat_serverchan, cfg_shared.get("wechat_serverchan")),
         ("wechat_pushplus", send_wechat_pushplus, cfg_shared.get("wechat_pushplus")),
@@ -795,11 +796,7 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
         ("telegram", send_telegram, cfg_shared.get("telegram")),
         ("email", send_email, cfg_shared.get("email")),
     ]
-    if mode == "open_anomaly":
-        # 竞价后开盘前异动：ServerChan 固定四条之一（与盘前/收盘并列的关键节点），
-        # 同时 PushPlus 随时冗余推送（不冲突：ServerChan 仅占 1/4 额度，其余走 PushPlus）。
-        _prefer = ["wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"]
-    elif mode == "close_again":
+    if mode == "close_again":
         # 复盘补发让出 ServerChan 额度（单 key 5条/天）：复盘非生死节点，
         # 优先走 PushPlus/企微，把 SC 名额留给盘前/竞价/收盘这 3 个关键节点；
         # 仅当这些通道都未配置时才退回 SC，避免漏发。
@@ -807,9 +804,10 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
         _prefer = (["wechat_pushplus", "wecom", "telegram", "email"]
                    if _has_alt else
                    ["wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"])
-    elif mode in ("anomaly", "auction", "weekend", "panic", "yaogu", "stoploss"):
-        # 盘中异动 / 竞价确认 / 周末发酵 / 止损即时：全部走 PushPlus 系（200 条/天几乎不限），
-        # 绝不占 ServerChan 的固定 3~4 条额度。竞价确认主动让出 ServerChan 给关键节点。
+    elif mode in ("anomaly", "auction", "open_anomaly", "weekend", "panic", "yaogu", "stoploss"):
+        # 盘中异动 / 竞价确认 / 竞价后开盘前异动 / 周末发酵 / 止损即时：
+        # 全部走 PushPlus 系（200 条/天几乎不限），绝不占 ServerChan 的固定额度。
+        # open_anomaly 属个股竞价异动检测——用户拍板：个股/关注股检测一律 PushPlus。
         _prefer = ["wechat_pushplus", "wecom", "telegram", "email"]
     else:
         # 盘前 / 收盘：ServerChan 为主（关键节点），PushPlus 冗余兜底。
@@ -968,11 +966,34 @@ def get_prev_rec_codes(con, date):
 MAX_RECS = 10  # 推送中最多展示的推荐只数（前10）；超过则精简并提示看网页
 
 
+def _push_gate():
+    """推送双重认证阈值（config/notify.json 加 "push_gate": {"min_score":..,"min_p_continue":..} 可覆盖）。"""
+    cfg = load_config() or {}
+    g = cfg.get("push_gate") or {}
+    try:
+        return float(g.get("min_score", 55)), float(g.get("min_p_continue", 40))
+    except Exception:
+        return 55.0, 40.0
+
+
+def _dual_ok(it):
+    """双重认证：买入价值评分 与 晋级率 同时达标，才允许进入『认证推送』名单。
+    任一字段缺失视为未认证（宁缺毋滥，杜绝低分票混进推荐位）。"""
+    s_min, p_min = _push_gate()
+    try:
+        sc = it.get("worth_score") or 0
+        pc = it.get("p_continue") or 0
+        return sc >= s_min and pc >= p_min
+    except Exception:
+        return False
+
+
 def _rec_line(it, idx, tag=""):
-    """单只推荐（markdown，单行克制：序号 名称(板) · 买入价值 · 晋级率 · 一条简因）。"""
+    """单只推荐（markdown 单行；必须用「- 」列表语法——SC/PP 渲染器对裸 "1. " 行不换行，
+    这是盘前板式曾『糊成一团』的根因）。"""
     mark = ("[%s] " % tag) if tag else ""
-    head = "%d. %s**%s**(%s) · 买入价值**%.0f分** · 晋级**%.0f%%**" % (
-        idx, mark, it.get("name", "?"), _board(it),
+    head = "- %s**%d. %s**(%s) · 买入价值**%.0f分** · 晋级**%.0f%%**" % (
+        mark, idx, it.get("name", "?"), _board(it),
         it.get("worth_score", 0), it.get("p_continue", 0))
     rs = it.get("reasons") or []
     extra = (" ｜ %s" % "、".join(rs[:1])) if rs else ""
@@ -1106,17 +1127,21 @@ def _fmt_close_compact(data, url="", mode="close"):
         L.append("")
         for b in bl:
             L.append("- ✨ %s" % b)
-    # ---- 推荐 Top5 ----
+    # ---- 推荐 Top5（双重认证前置：评分+晋级率双达标排前并打 ✅，未认证殿后） ----
     L.append("")
     recs = _top_recs(rec.get("core"), rec.get("relay"), rec.get("all"), 5) if _on("rec") else []
+    recs = sorted(recs, key=lambda x: 0 if _dual_ok(x) else 1)
     if recs:
-        L.append("🔥 **推荐 Top%d**" % len(recs))
+        n_gated = sum(1 for x in recs if _dual_ok(x))
+        L.append("🔥 **推荐 Top%d**%s"
+                 % (len(recs), ("（✅双重认证 %d 只）" % n_gated) if n_gated else "（今日无双重认证标的）"))
         for i, it in enumerate(recs, 1):
             # 注意：必须用「- 」列表语法，ServerChan/PushPlus 渲染器对裸 "1. " 行不换行
             rs = it.get("reasons") or []
             extra = (" ｜ %s" % "、".join(rs[:1])) if rs else ""
-            L.append("- **%d. %s**(%s) · 价值 **%.0f分** · 晋级 **%.0f%%**%s"
-                     % (i, it.get("name", "?"), _board(it),
+            okmark = "✅ " if _dual_ok(it) else ""
+            L.append("- %s**%d. %s**(%s) · 价值 **%.0f分** · 晋级 **%.0f%%**%s"
+                     % (okmark, i, it.get("name", "?"), _board(it),
                         it.get("worth_score", 0), it.get("p_continue", 0), extra))
     else:
         L.append("🔥 今日无明确推荐，建议控仓或低位试错")
@@ -1204,17 +1229,25 @@ def format_stock_summary(data, url="", mode="close"):
             L.append("**连板热度**：%s" % regime.get("note", ""))
         L.append("")
         pool = _top_recs(rec.get("core"), rec.get("relay"), rec.get("all"), MAX_RECS)
-        L.append("**昨日推荐 · 今日竞价强弱（Top%d）**" % MAX_RECS)
-        L.append("> 昨日入选标的，今日竞价定强弱：竞价强=续强确认，竞价弱/爆量派发=回避。")
+        gated = [x for x in pool if _dual_ok(x)]
+        ungated = [x for x in pool if not _dual_ok(x)]
+        L.append("**昨日推荐 · 今日竞价强弱（评分%.0f+晋级%.0f%% 双重认证）**"
+                 % _push_gate())
+        L.append("> 认证标的：竞价强=续强确认；竞价弱/爆量派发=回避。")
         L.append("")
-        if pool:
-            for i, it in enumerate(pool, 1):
-                L.append(_rec_line(it, i, tag="续强"))
+        if gated:
+            for i, it in enumerate(gated, 1):
+                L.append(_rec_line(it, i, tag="✅续强"))
+            if ungated:
+                names = "、".join("%s(%.0f分/%.0f%%)" % (u.get("name", "?"),
+                                u.get("worth_score", 0), u.get("p_continue", 0))
+                                for u in ungated[:6])
+                L.append("- ⚠ 未认证观察：%s" % names)
             if len(rec.get("all") or []) > MAX_RECS:
                 L.append("")
                 L.append("> 共 %d 只候选，仅列前 %d 只；完整强弱判定见看板。" % (len(rec.get("all") or []), MAX_RECS))
         else:
-            L.append("（暂无昨日推荐标的）")
+            L.append("今日无通过「评分+晋级率」双重认证的标的，建议观望。")
         # 盘前策略（聚合仓位/主线/接力/关注池/风险）
         pp = data.get("preopen_plan") or {}
         if pp.get("position"):
@@ -1266,9 +1299,16 @@ def format_sc(data, url="", mode="close"):
         if regime.get("note"):
             L.append("连板：%s" % regime.get("note", ""))
         pool = _top_recs(rec.get("core"), rec.get("relay"), rec.get("all"), MAX_RECS)
-        L.append("昨日推荐 · 今日竞价强弱：")
-        for i, it in enumerate(pool, 1):
-            L.append(_rec_line(it, i, tag="续强"))
+        gated = [x for x in pool if _dual_ok(x)]
+        ungated = [x for x in pool if not _dual_ok(x)]
+        L.append("双重认证（评分%.0f+晋级%.0f%%）· 今日竞价强弱：" % _push_gate())
+        if gated:
+            for i, it in enumerate(gated, 1):
+                L.append(_rec_line(it, i, tag="✅续强"))
+            if ungated:
+                L.append("- ⚠ 未认证：" + "、".join(u.get("name", "?") for u in ungated[:8]))
+        else:
+            L.append("无双重认证标的，建议观望")
         pp = data.get("preopen_plan") or {}
         if pp.get("position"):
             L.append("盘前策略：仓位 %s ｜ 主线 %s ｜ 接力 %s"
