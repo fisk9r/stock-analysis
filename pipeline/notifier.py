@@ -1080,7 +1080,7 @@ def _fmt_close_compact(data, url="", mode="close"):
     narr = data.get("narrative") or {}
 
     # 板块自选：config/notify.json 加 "sections": {"trend":false,...} 可关闭对应小节；
-    # 未配置默认全开。可选键：bullets/rec/trend/bull/strat/yaogu/avoid/money/cold
+    # 未配置默认全开。可选键：bullets/rec/trend/bull/strat/yaogu/avoid/money/cold/gaps
     _sec_cfg = (load_config() or {}).get("sections") or {}
 
     def _on(k):
@@ -1213,6 +1213,19 @@ def _fmt_close_compact(data, url="", mode="close"):
                         "**%s**(%.0f分·%s)" % (c.get("name", "?"), c.get("score", 0) or 0,
                                                c.get("ind") or "—")
                         for c in cands))
+        except Exception:
+            pass
+    # ---- 跳空缺口扫描（回补规律 + 当前未回补清单）----
+    if _on("gaps"):
+        try:
+            import gapscan as _gpmod
+            gp = data.get("gaps")
+            glines = _gpmod.summary_lines(gp) if gp else []
+            if glines:
+                L.append("")
+                L.append("**🕳 跳空缺口扫描**")
+                for x in glines[:4]:
+                    L.append("- %s" % x)
         except Exception:
             pass
     if mode == "close_again":

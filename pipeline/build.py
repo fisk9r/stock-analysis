@@ -20,6 +20,7 @@ import strategies
 import candles
 import chips
 import coldwave
+import gapscan
 import holdings
 import data_guard
 
@@ -576,6 +577,17 @@ def run(date_override=None, dedup_close=False):
     except Exception as e:
         log("  冷启分析失败（不影响主流程）：%r" % e)
         data["cold"] = None
+
+    # ---- 跳空缺口检测 + 回补规律 ----
+    try:
+        data["gaps"] = gapscan.scan(u, date)
+        gp = data["gaps"]
+        if gp and (gp.get("stats") or {}).get("n_total"):
+            log("  缺口扫描：历史 %d 个，当前未回补 %d 个"
+                % (gp["stats"]["n_total"], gp.get("open_n", 0)))
+    except Exception as e:
+        log("  缺口扫描失败（不影响主流程）：%r" % e)
+        data["gaps"] = None
 
     # ---- 持股监测：预测未来 + 持续跟踪（无持仓配置则为空）----
     try:

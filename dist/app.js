@@ -164,6 +164,7 @@
       '数据源：' + E(m.source || '公开行情接口') + '（全部为当日收盘后数据，无盘中实时成分）<br>' +
       '生成于 ' + E(m.generated_at) + '，构建耗时 ' + n2(m.build_seconds) + ' 秒 · 行情库覆盖 ' +
       n2(m.universe) + ' 只个股 / ' + n2(m.trade_days) + ' 个交易日<br>' +
+      '<span class="muted">快捷键：1~9 / 0 / - / = 直接切换视图</span><br>' +
       '所有概率与评分均为历史统计外推，仅供研究复盘，不构成投资建议。';
   }
 
@@ -314,6 +315,40 @@
             })) + '</div>';
       }
       h += card('❄️ 冷启修复节奏预判', cb, '热度百分位判定冷暖；每次转冷后第几天修复、什么风格领涨、方向是否重复——全部由本地日K库实测统计');
+    }
+
+    /* 跳空缺口：回补规律分桶 + 当前未回补清单 */
+    var GP = D.gaps;
+    if (GP && GP.stats && GP.stats.n_total) {
+      var GS = GP.stats, OV5 = (GS.overall || {}).t5 || {};
+      var gb = '<div class="chips" style="margin-bottom:8px">' +
+        '<span class="chip">历史缺口 <b>' + n2(GS.n_total) + '</b> 个（≥1%）</span>' +
+        (OV5.n ? '<span class="chip" style="border-color:' + C.blue + ';color:' + C.blue + '">5日回补 <b>' + pct((OV5.rate || 0) * 100, 0) + '</b></span>' : '') +
+        (GS.up_t5 != null ? '<span class="chip">向上缺口回补 <b>' + pct(GS.up_t5 * 100, 0) + '</b></span>' : '') +
+        (GS.down_t5 != null ? '<span class="chip">向下缺口回补 <b>' + pct(GS.down_t5 * 100, 0) + '</b></span>' : '') +
+        '</div>';
+      var BD = GS.by_depth || {}, dk = Object.keys(BD);
+      if (dk.length) {
+        gb += '<div style="margin-bottom:8px"><b style="color:var(--muted);font-size:12px">按深度 · 5 日回补率</b>' +
+          '<div class="chips" style="margin-top:4px">' + dk.map(function (k2) {
+            return '<span class="chip">' + E(k2) + ' <b>' + pct(BD[k2].fill_t5 * 100, 0) + '</b> <span class="muted">(' + n2(BD[k2].n) + ' 例)</span></span>';
+          }).join('') + '</div></div>';
+      }
+      var ogs = GP.open_gaps || [];
+      if (ogs.length) {
+        gb += '<div><b style="color:var(--muted);font-size:12px">当前未回补缺口（近 20 个交易日形成）</b>' +
+          table([{ t: '方向' }, { t: '标的' }, { t: '缺口日' }, { t: '幅度', a: 'r' }, { t: '已存', a: 'r' }, { t: '缺口区间' }],
+            ogs.map(function (o2) {
+              var isUp = o2.dir === 'up';
+              return '<tr><td style="color:' + (isUp ? C.up : C.down) + ';font-weight:700">' + (isUp ? '▲ 支撑' : '▼ 压力') + '</td>' +
+                '<td><b>' + E(o2.name) + '</b> <span class="muted">' + E(o2.code) + '</span></td>' +
+                '<td class="muted">' + E(o2.gap_date) + '</td>' +
+                '<td class="r">' + f(o2.gap_pct, 1) + '%</td>' +
+                '<td class="r">' + n2(o2.days_alive) + ' 天</td>' +
+                '<td class="muted">' + f(o2.gap_low, 2) + ' ~ ' + f(o2.gap_high, 2) + '</td></tr>';
+            })) + '</div>';
+      }
+      h += card('🕳 跳空缺口扫描', gb, '「缺口必补」到底多真？历史回补率按深度/方向分桶定量；未回补向上缺口作支撑参考、向下缺口作压力参考');
     }
 
     /* 市场可视化：温度走势(双线) + 板块涨停 TOP10 */
@@ -2937,6 +2972,16 @@
         try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { window.scrollTo(0, 0); }
       });
     }
+    /* 键盘快捷切换视图：1-9 / 0 / - / = 对应 12 个 tab（输入框聚焦时忽略） */
+    document.addEventListener('keydown', function (e) {
+      if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+      var tg = e.target;
+      if (tg && (tg.tagName === 'INPUT' || tg.tagName === 'TEXTAREA' || tg.isContentEditable)) return;
+      var order = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '='];
+      var keys = Object.keys(views);
+      var i = order.indexOf(e.key);
+      if (i >= 0 && keys[i]) show(keys[i]);
+    });
     show(views[location.hash.slice(1)] ? location.hash.slice(1) : 'overview');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
