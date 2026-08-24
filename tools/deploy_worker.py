@@ -32,7 +32,7 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 CF = "https://api.cloudflare.com/client/v4"
 WORKER_NAME = "stock-admin"
 REPO = "fisk9r/stock-analysis"
-ALLOW_ORIGIN = "https://fisk9r.github.io"
+ALLOW_ORIGIN = "https://stock-analysis-8zm.pages.dev"  # 仓库转私后站点由 CF Pages 托管（原 github.io 已弃用）
 
 
 def cf_req(token, method, path, data=None, headers=None, raw=None, content_type=None):

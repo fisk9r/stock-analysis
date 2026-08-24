@@ -17,12 +17,12 @@ name: A股盘后分析流水线
 #   EM_PUSH2_HOST=push2.eastmoney.com 强制走实时。
 #
 # ⚠ 状态持久化：runner 每次都是全新机器，什么都不留。本项目有三份状态必须跨次续存：
-#     cache/market.db        130 天 K 线，76MB
+#     cache/market.db        260 日 K 线
 #     dist/data.js           最近一次分析结果，盘前/竞价/异动推送都靠它
 #     state/push_ledger.jsonl  推送去重账本（权威，跨 run 续存），丢了会重复发、白烧 ServerChan 额度
 #     dist/push_log.jsonl      上述账本的镜像（仅供本机看板展示，去重判定只看 state 账本）
 #   统一存放在 tag = data-snapshot 的 Release 里，两个附件：
-#     market.db.gz（约 22MB）  state.tar.gz（几百 KB）
+#     market.db.gz  state.tar.gz
 # ============================================================================
 
 on:
@@ -59,8 +59,7 @@ concurrency:
 
 permissions:
   contents: write   # 读写 Release asset（数据库与状态快照）
-  pages: write      # 部署站点
-  id-token: write
+  # 站点已改由 Cloudflare Pages 托管（仓库转私有后 GH Pages free 不可用），无需 pages/id-token 权限
 
 env:
   DB_TAG: data-snapshot
@@ -277,11 +276,22 @@ jobs:
           echo "✅ 站点文件：$(ls -A site | tr '\n' ' ')"
           echo "✅ 加密数据：$(ls site/data | tr '\n' ' ')"
 
-      - name: 上传站点
+      # ---------- 8. 部署到 Cloudflare Pages ----------
+      # 仓库转私有后 GitHub Pages(free 账户)不可用，站点由 Cloudflare Pages 托管：
+      # https://stock-analysis-8zm.pages.dev （项目已创建，production_branch=main）
+      - name: 部署到 Cloudflare Pages
         if: steps.task.outputs.task == 'build'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: dc99e973372018bc225135ff47ea8650
+        run: npx wrangler@latest pages deploy site --project-name=stock-analysis --branch=main --commit-dirty=true
+
+      - name: 部署后自动体检
+        if: steps.task.outputs.task == 'build'
+        continue-on-error: true
+        run: |
+          sleep 30  # 等 CF Pages CDN 生效
+          python tools/verify_site.py https://stock-analysis-8zm.pages.dev
 
       # ---------- 8. 失败可诊断 ----------
       - name: 失败时保留现场
@@ -297,29 +307,3 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  # deploy-pages 必须跑在 github-pages 这个 environment 里，
-  # 而 environment 是 job 级属性，所以部署只能拆成独立 job。
-  deploy:
-    needs: run
-    if: needs.run.outputs.task == 'build'
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.pages.outputs.page_url }}
-    steps:
-      # 部署后体检脚本 tools/verify_site.py 需要仓库代码，deploy 是独立 job
-      # （必须跑在 github-pages environment 里），默认不检出，故此处显式 checkout。
-      - name: 检出仓库（供部署后体检脚本使用）
-        uses: actions/checkout@v4
-
-      - name: 部署到 GitHub Pages
-        id: pages
-        uses: actions/deploy-pages@v4
-
-      # ---------- 9. 部署后自动体检（回归防护） ----------
-      - name: 部署后自动体检
-        if: needs.run.outputs.task == 'build'
-        continue-on-error: true
-        run: |
-          sleep 25  # 等 Pages CDN 生效
-          python tools/verify_site.py https://fisk9r.github.io/stock-analysis
