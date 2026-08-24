@@ -265,6 +265,57 @@
       h += card('⚠️ 盘面恐慌 / 崩盘扫描', pBody, '跌停潮 + 大面榜(天地板/墓碑线) + 亏钱效应 + 炸板率 + 广度，综合判定盘面恐慌等级');
     }
 
+    /* 冷启修复节奏预判（coldwave）：热度位 / 修复预判 / 冷后领涨风格 / 方向轮动 */
+    var CW = D.cold;
+    if (CW && CW.today) {
+      var tw = CW.today;
+      var lvCol = (tw.level === '爆冷' || tw.level === '偏冷') ? C.down : (tw.level === '热' ? C.up : C.gold);
+      var cb = '<div class="chips" style="margin-bottom:8px">' +
+        '<span class="chip" style="border-color:' + lvCol + ';color:' + lvCol + '">热度位 <b>' + f(tw.hp, 1) + '</b>（' + E(tw.level) + '）</span>' +
+        '<span class="chip">涨停 <b>' + n2(tw.zt) + '</b> · 最高 <b>' + n2(tw.max_lb) + '板</b></span>' +
+        '<span class="chip">红盘占比 <b>' + f(tw.up_ratio, 0) + '%</b></span>' +
+        (CW.last_trough ? '<span class="chip">最近冷谷 <b>' + E(CW.last_trough) + '</b>（距今 T+' + n2(CW.since_trough) + '）</span>' : '') +
+        '</div>';
+      var FC = CW.forecast;
+      if (FC) {
+        cb += '<div class="bd" style="display:inline-block;background:' + lvCol + '22;color:' + lvCol + ';border-color:' + lvCol + '">' +
+          E(FC.state) + ' · 预计修复 <b>' + E(FC.expect) + '</b></div>' +
+          '<div class="note" style="margin-top:6px">' + E(FC.note || '') + '</div>';
+      }
+      var STY = CW.style;
+      if (STY && STY.n) {
+        cb += '<div style="margin-top:10px"><b style="color:var(--muted);font-size:12px">历史冷后领涨风格（' + n2(STY.n) + ' 只样本）</b>' +
+          '<div class="chips" style="margin-top:4px">' +
+          '<span class="chip">启动价中位 <b>' + f(STY.price_median, 1) + '元</b></span>' +
+          '<span class="chip">流通盘中位 <b>' + f(STY.fmv_median, 0) + '亿</b></span>' +
+          '<span class="chip">低价股占 <b>' + pct(STY.share_low_price * 100, 0) + '</b></span>' +
+          '<span class="chip">超跌股占 <b>' + pct(STY.share_oversold * 100, 0) + '</b></span>' +
+          ((STY.top_inds && STY.top_inds.length) ? '<span class="chip" style="border-color:' + C.purple + ';color:' + C.purple + '">高频方向 ' + STY.top_inds.slice(0, 4).map(function (x) { return E(x.name); }).join('/') + '</span>' : '') +
+          '</div></div>';
+      }
+      var RO = CW.rotation || {};
+      if (RO.pairs) {
+        cb += '<div class="note" style="margin-top:8px">方向轮动：相邻两次冷后<b>换方向概率 ' + pct(RO.switch_rate * 100, 0) + '</b>' +
+          ((RO.last_inds && RO.last_inds.length) ? '，最近领涨方向 ' + RO.last_inds.map(E).join('→') : '') + '</div>';
+      }
+      var cds = CW.candidates || [];
+      if (cds.length) {
+        cb += '<div style="margin-top:10px"><b style="color:var(--muted);font-size:12px">当下符合冷后风格的候选</b>' +
+          table([{ t: '标的' }, { t: '行业' }, { t: '评分', a: 'r' }, { t: '现价', a: 'r' }, { t: '流通(亿)', a: 'r' }, { t: '距60日高', a: 'r' }, { t: '量比', a: 'r' }, { t: '入选逻辑' }],
+            cds.slice(0, 6).map(function (c2) {
+              return '<tr><td><b>' + E(c2.name) + '</b> <span class="muted">' + E(c2.code) + '</span></td>' +
+                '<td>' + E(c2.ind || '—') + '</td>' +
+                '<td class="r" style="color:' + C.gold + '"><b>' + f(c2.score, 1) + '</b></td>' +
+                '<td class="r">' + f(c2.price, 2) + '</td>' +
+                '<td class="r">' + f(c2.fmv, 1) + '</td>' +
+                '<td class="r" style="color:' + C.down + '">' + f(c2.dd60, 0) + '%</td>' +
+                '<td class="r">' + f(c2.vol_ratio, 2) + '</td>' +
+                '<td class="muted" style="font-size:11px">' + E(c2.why || '') + '</td></tr>';
+            })) + '</div>';
+      }
+      h += card('❄️ 冷启修复节奏预判', cb, '热度百分位判定冷暖；每次转冷后第几天修复、什么风格领涨、方向是否重复——全部由本地日K库实测统计');
+    }
+
     /* 市场可视化：温度走势(双线) + 板块涨停 TOP10 */
     var VZ = D.viz;
     if (VZ && VZ.temp && VZ.temp.length) {
@@ -2876,6 +2927,16 @@
     });
     window.addEventListener('resize', moveTabInd);
     window.addEventListener('load', moveTabInd);
+    /* 回到顶部按钮：滚过一屏浮现，点击平滑回顶 */
+    var toTop = document.getElementById('toTop');
+    if (toTop) {
+      window.addEventListener('scroll', function () {
+        toTop.classList.toggle('show', (window.scrollY || document.documentElement.scrollTop || 0) > 420);
+      }, { passive: true });
+      toTop.addEventListener('click', function () {
+        try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { window.scrollTo(0, 0); }
+      });
+    }
     show(views[location.hash.slice(1)] ? location.hash.slice(1) : 'overview');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();

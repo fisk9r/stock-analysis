@@ -120,12 +120,16 @@ header.top{
 .pill.gray{background:var(--gray-bg);color:var(--gray-fg);border-color:var(--gray-br)}
 
 nav.tabs{display:flex;gap:2px;overflow-x:auto;max-width:1420px;margin:0 auto;padding:0 14px;
-  border-bottom:1px solid var(--border);background:var(--tabs);position:relative}
+  border-bottom:1px solid var(--border);background:var(--tabs);position:relative;
+  scrollbar-width:none;-webkit-overflow-scrolling:touch}
+nav.tabs::-webkit-scrollbar{display:none}
 nav.tabs button{
   border:0;background:none;padding:11px 15px;font-size:13.5px;color:var(--muted);cursor:pointer;
   border-bottom:2px solid transparent;white-space:nowrap;font-family:inherit;font-weight:500;transition:color .15s,background-color .15s
 }
 nav.tabs button:hover{color:var(--text);background:var(--card-2)}
+nav.tabs button:active{background:var(--accent-bg)}
+nav.tabs button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:6px}
 nav.tabs button.on{color:var(--accent);border-bottom-color:transparent;font-weight:600;text-shadow:var(--glow-text)}
 /* 滑动指示条：随激活 tab 平滑移动，替代突兀的下划线 */
 nav.tabs .tab-ind{position:absolute;bottom:0;left:0;height:2px;width:0;background:var(--accent);
@@ -172,7 +176,8 @@ th{background:var(--card-2);color:var(--muted);font-weight:600;font-size:11.5px;
 th.sortable{cursor:pointer;user-select:none}
 th.sortable:hover{color:var(--accent)}
 th .arw{opacity:.45;font-size:9px}
-td{padding:8px 10px;border-bottom:1px solid var(--border-2);white-space:nowrap;vertical-align:middle}
+td{padding:8px 10px;border-bottom:1px solid var(--border-2);white-space:nowrap;vertical-align:middle;
+  font-variant-numeric:tabular-nums}
 tbody tr:hover{background:var(--card-2)}
 tbody tr:last-child td{border-bottom:0}
 td.name{font-weight:600;color:var(--text)}
@@ -466,3 +471,18 @@ html[data-theme="light"] #bgfx{display:none}
   nav.tabs button{padding:9px 9px;font-size:12px}
   .kpi .v{font-size:19px}
 }
+
+/* ---------------- 交互二轮优化 ---------------- */
+/* 平滑滚动（配合回到顶部；尊重减弱动态偏好） */
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+/* 回到顶部悬浮按钮：滚过一屏后浮现 */
+.to-top{position:fixed;right:18px;bottom:24px;z-index:60;width:40px;height:40px;border-radius:50%;
+  border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;
+  font-size:16px;line-height:1;box-shadow:var(--shadow-lg);
+  opacity:0;pointer-events:none;transform:translateY(8px);
+  transition:opacity .2s,transform .2s,color .15s,border-color .15s}
+.to-top.show{opacity:1;pointer-events:auto;transform:none}
+.to-top:hover{color:var(--accent);border-color:var(--accent)}
+.to-top:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){.to-top{transition:none}}

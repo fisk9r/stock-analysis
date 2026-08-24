@@ -1080,7 +1080,7 @@ def _fmt_close_compact(data, url="", mode="close"):
     narr = data.get("narrative") or {}
 
     # 板块自选：config/notify.json 加 "sections": {"trend":false,...} 可关闭对应小节；
-    # 未配置默认全开。可选键：bullets/rec/trend/bull/strat/yaogu/avoid/money
+    # 未配置默认全开。可选键：bullets/rec/trend/bull/strat/yaogu/avoid/money/cold
     _sec_cfg = (load_config() or {}).get("sections") or {}
 
     def _on(k):
@@ -1196,6 +1196,25 @@ def _fmt_close_compact(data, url="", mode="close"):
         L.append("⚠️ 恐慌扫描：**%s**（跌停%d 大面%d 昨涨停收绿%.0f%%）"
                  % (pn.get("level"), pn.get("dt_count", 0), pn.get("bigface_count", 0),
                     pn.get("yest_green") or 0))
+    # ---- 冷启修复节奏预判（coldwave，仅冷中/冷后窗口才有预判行）----
+    if _on("cold"):
+        try:
+            import coldwave as _cwmod
+            cw = data.get("cold")
+            clines = _cwmod.summary_lines(cw) if cw else []
+            if clines:
+                L.append("")
+                L.append("**❄️ 冷启修复预判**")
+                for x in clines:
+                    L.append("- %s" % x)
+                cands = (cw.get("candidates") or [])[:3]
+                if cands:
+                    L.append("- 冷后风格候选：%s" % "、".join(
+                        "**%s**(%.0f分·%s)" % (c.get("name", "?"), c.get("score", 0) or 0,
+                                               c.get("ind") or "—")
+                        for c in cands))
+        except Exception:
+            pass
     if mode == "close_again":
         hrep = data.get("holdings")
         alerts = (hrep or {}).get("alerts") or []
