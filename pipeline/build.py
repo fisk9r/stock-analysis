@@ -27,6 +27,7 @@ import maglue
 import trendsword
 import stylereg
 import tailraid
+import watchlist
 import holdings
 import data_guard
 
@@ -665,6 +666,18 @@ def run(date_override=None, dedup_close=False):
     except Exception as e:
         log("  尾盘扫描失败（不影响主流程）：%r" % e)
         data["tailraid"] = None
+
+    # ---- 关注股雷达：notify.json watch + holdings.json watch==true ----
+    try:
+        data["watch"] = watchlist.scan(u, date)
+        wl = data["watch"]
+        if wl:
+            log("  关注股雷达：%d 只，急讯 %d 条" % (wl.get("n", 0), wl.get("alert_n", 0)))
+        else:
+            log("  关注股雷达：关注池为空，跳过")
+    except Exception as e:
+        log("  关注股雷达失败（不影响主流程）：%r" % e)
+        data["watch"] = None
 
 
     # ---- 持股监测：预测未来 + 持续跟踪（无持仓配置则为空）----

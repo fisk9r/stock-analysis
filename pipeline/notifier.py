@@ -1080,7 +1080,7 @@ def _fmt_close_compact(data, url="", mode="close"):
 
     # 板块自选：config/notify.json 加 "sections": {"trend":false,...} 可关闭对应小节；
     # 未配置默认全开。可选键：bullets/rec/trend/bull/strat/yaogu/avoid/money/cold/gaps/
-    # dry/nh/glue/sword/style/tail
+    # dry/nh/glue/sword/style/tail/wl
     _sec_cfg = (load_config() or {}).get("sections") or {}
 
     def _on(k):
@@ -1300,6 +1300,18 @@ def _fmt_close_compact(data, url="", mode="close"):
                 L.append("")
                 L.append("**🌙 尾盘偷袭监测**")
                 for x in tlines[:3]:
+                    L.append("- %s" % x)
+        except Exception:
+            pass
+    if _on("wl"):
+        try:
+            import watchlist as _wlmod
+            wl = data.get("watch")
+            wlines = _wlmod.summary_lines(wl) if wl else []
+            if wlines:
+                L.append("")
+                L.append("**⭐ 关注股雷达**")
+                for x in wlines[:3]:
                     L.append("- %s" % x)
         except Exception:
             pass

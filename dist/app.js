@@ -487,6 +487,33 @@
       h += card('🌙 尾盘偷袭监测', tb, '分钟级数据定向扫描焦点池：14:30 后急拉=次日兑现风险/资金抢筹，尾盘跳水=出货警示；「惯犯」=近日常尾盘异动');
     }
 
+    /* 关注股雷达 */
+    var WL = D.watch;
+    if (WL && WL.items && WL.items.length) {
+      var wch = '<div class="chips" style="margin-bottom:8px">' +
+        '<span class="chip">关注池 <b>' + n2(WL.n) + '</b> 只</span>' +
+        '<span class="chip" style="border-color:' + C.warn + ';color:' + C.warn + '">急讯 <b>' + n2(WL.alert_n || 0) + '</b> 条</span>' +
+        '</div>';
+      var wRows = WL.items.map(function (x7) {
+        if (x7.no_data) {
+          return '<tr><td colspan="5"><b>' + E(x7.name || x7.code) + '</b> <span class="muted">' + E(x7.code) + '</span> <span class="muted">— ' + (x7.note || '暂无K线') + '</span></td></tr>';
+        }
+        var sigHtml = (x7.signals || []).map(function (s) {
+          var col = (s === '涨停' || s === '放量突破20日高' || s === '多头排列') ? C.up
+            : (s === '跌停' || s === '炸板' || s === '趋势破位' || s === '空头排列') ? C.down : '';
+          return '<span class="bd" style="' + (col ? 'border-color:' + col + ';color:' + col + ';' : '') + 'font-size:10px;padding:0 4px;margin-right:4px;white-space:nowrap">' + E(s) + '</span>';
+        }).join(' ') || '<span class="muted">—</span>';
+        return '<tr><td><b>' + E(x7.name || '') + '</b> <span class="muted">' + E(x7.code) + '</span>' +
+          (x7.urgent ? ' <span class="bd" style="border-color:' + C.warn + ';color:' + C.warn + ';font-size:10px;padding:0 4px">急</span>' : '') + '</td>' +
+          '<td class="r">' + f(x7.close, 2) + '</td>' +
+          '<td class="r" style="color:' + (x7.pct >= 0 ? C.up : C.down) + '">' + f(x7.pct, 2) + '%</td>' +
+          '<td class="r">' + f(x7.vol_ratio, 1) + '</td>' +
+          '<td>' + sigHtml + '</td></tr>';
+      });
+      wch += table([{ t: '标的' }, { t: '现价', a: 'r' }, { t: '涨幅', a: 'r' }, { t: '量比', a: 'r' }, { t: '信号' }], wRows);
+      h += card('⭐ 关注股雷达', wch, '自选（notify.json watch）与持仓关注股（holdings.json watch=true）的每日信号：涨停/跌停/炸板/破位为急讯，置顶展示');
+    }
+
     /* 市场可视化：温度走势(双线) + 板块涨停 TOP10 */
     var VZ = D.viz;
     if (VZ && VZ.temp && VZ.temp.length) {
