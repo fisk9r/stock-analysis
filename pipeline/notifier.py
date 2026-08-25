@@ -294,35 +294,34 @@ def send_wechat_serverchan(cfg, title, text):
         return False, "未配置 sendkey"
     ok_list, fail_list = [], []
     for label, key in keys:
-        # 免费档接口偶发 5xx/网络抖动会静默吞掉整条推送；加 2 次重试 + 退避，避免『该到的没到』。
+        # 免费档接口偶发 5xx/网络抖动/WAF 拦截页会静默吞掉整条推送；
+        # 加 3 次重试 + 退避。响应必须解析为 JSON 且 code==0 才算成功——
+        # 非 JSON（如 WAF 拦截页）一律视为失败重试，绝不静默当成功（曾导致丢推无据可查）。
         _done = False
-        for _attempt in range(2):
+        for _attempt in range(3):
             try:
                 url = "https://sctapi.ftqq.com/%s.send" % key
                 resp = http_post_form(url, {"title": title, "desp": text})
                 try:
                     j = json.loads(resp)
-                    if j.get("code") == 0:
-                        ok_list.append(label)
-                        _done = True
-                        break
-                    else:
-                        _err = "%s:%s" % (label, str(j.get("message", resp))[:40])
-                        if _attempt == 0:
-                            time.sleep(3)   # 首次失败退避后重试
-                            continue
-                        fail_list.append(_err)
                 except Exception:
-                    ok_list.append("%s(响应未解析)" % label)
+                    j = None
+                if isinstance(j, dict) and j.get("code") == 0:
+                    ok_list.append(label)
                     _done = True
                     break
+                _err = "%s:%s" % (label, str(
+                    (j or {}).get("message") if isinstance(j, dict) else
+                    ("非JSON响应:" + resp[:40]) if resp else "空响应")[:60])
+                if _attempt < 2:
+                    time.sleep(3 * (_attempt + 1))   # 退避后重试
+                    continue
+                fail_list.append(_err)
             except Exception as e:
-                if _attempt == 0:
-                    time.sleep(3)
+                if _attempt < 2:
+                    time.sleep(3 * (_attempt + 1))
                     continue
                 fail_list.append("%s:%r" % (label, e))
-        if not _done and label not in [x.split(":", 1)[0] for x in ok_list]:
-            pass
     msg = "ServerChan 成功 %d/%d（%s）" % (len(ok_list), len(keys), "、".join(ok_list) or "无")
     if fail_list:
         msg += " 失败：" + "；".join(fail_list)
@@ -1080,7 +1079,8 @@ def _fmt_close_compact(data, url="", mode="close"):
     narr = data.get("narrative") or {}
 
     # 板块自选：config/notify.json 加 "sections": {"trend":false,...} 可关闭对应小节；
-    # 未配置默认全开。可选键：bullets/rec/trend/bull/strat/yaogu/avoid/money/cold/gaps
+    # 未配置默认全开。可选键：bullets/rec/trend/bull/strat/yaogu/avoid/money/cold/gaps/
+    # dry/nh/glue/sword/style/tail
     _sec_cfg = (load_config() or {}).get("sections") or {}
 
     def _on(k):
@@ -1225,6 +1225,81 @@ def _fmt_close_compact(data, url="", mode="close"):
                 L.append("")
                 L.append("**🕳 跳空缺口扫描**")
                 for x in glines[:4]:
+                    L.append("- %s" % x)
+        except Exception:
+            pass
+    # ---- 六维检测雷达：市场风格/地量/52周广度/均线粘合/铡刀芙蓉/尾盘偷袭 ----
+    if _on("style"):
+        try:
+            import stylereg as _stymod
+            sty = data.get("stylereg")
+            slines = _stymod.summary_lines(sty) if sty else []
+            if slines:
+                L.append("")
+                L.append("**🧭 市场风格判定**")
+                for x in slines[:4]:
+                    L.append("- %s" % x)
+        except Exception:
+            pass
+    if _on("dry"):
+        try:
+            import dryvol as _dvmod
+            dv = data.get("dryvol")
+            dlines = _dvmod.summary_lines(dv) if dv else []
+            if dlines:
+                L.append("")
+                L.append("**💧 地量/缩量变盘窗口**")
+                for x in dlines[:3]:
+                    L.append("- %s" % x)
+        except Exception:
+            pass
+    if _on("nh"):
+        try:
+            import newhigh as _nhmod
+            nb = data.get("newhigh")
+            nlines = _nhmod.summary_lines(nb) if nb else []
+            if nlines:
+                L.append("")
+                L.append("**🏔 52周新高新低广度**")
+                for x in nlines[:3]:
+                    L.append("- %s" % x)
+        except Exception:
+            pass
+    if _on("glue"):
+        try:
+            import maglue as _glmod
+            gg = data.get("maglue")
+            glines2 = _glmod.summary_lines(gg) if gg else []
+            if glines2:
+                L.append("")
+                L.append("**🧲 均线粘合待变盘**")
+                for x in glines2[:3]:
+                    L.append("- %s" % x)
+        except Exception:
+            pass
+    if _on("sword"):
+        try:
+            import trendsword as _swmod
+            cf = data.get("trendsword")
+            swlines = _swmod.summary_lines(cf) if cf else []
+            if swlines:
+                L.append("")
+                L.append("**⚔️ 断头铡刀 / 出水芙蓉**")
+                for x in swlines[:3]:
+                    L.append("- %s" % x)
+        except Exception:
+            pass
+    if _on("tail") and data.get("tailraid"):
+        try:
+            import tailraid as _trmod
+            tr = data["tailraid"]
+            # 只在有实际异动时占用推送条数；全无异动不推
+            has_move = (tr.get("raid_n", 0) + tr.get("dump_n", 0)) > 0
+            tlines = _trmod.summary_lines(tr) if has_move else []
+            if tlines:
+                L.append("")
+                L.append("**🌙 尾盘偷袭监测**")
+                for x in tlines[:3]:
                     L.append("- %s" % x)
         except Exception:
             pass

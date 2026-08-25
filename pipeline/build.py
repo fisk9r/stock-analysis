@@ -21,6 +21,12 @@ import candles
 import chips
 import coldwave
 import gapscan
+import dryvol
+import newhigh
+import maglue
+import trendsword
+import stylereg
+import tailraid
 import holdings
 import data_guard
 
@@ -588,6 +594,78 @@ def run(date_override=None, dedup_close=False):
     except Exception as e:
         log("  缺口扫描失败（不影响主流程）：%r" % e)
         data["gaps"] = None
+
+    # ---- 地量/缩量变盘窗口 ----
+    try:
+        data["dryvol"] = dryvol.analyze(u, date, n=260)
+        dv = data["dryvol"]
+        if dv and dv.get("today"):
+            log("  地量扫描：额比 %.2f（%.0f%% 分位），连缩 %d 日"
+                % (dv["today"].get("ratio") or 0, dv["today"].get("hp") or -1,
+                   dv["today"].get("shrink_days") or 0))
+    except Exception as e:
+        log("  地量扫描失败（不影响主流程）：%r" % e)
+        data["dryvol"] = None
+
+    # ---- 52周新高新低广度 ----
+    try:
+        data["newhigh"] = newhigh.scan(u, date)
+        nb = data["newhigh"]
+        if nb and nb.get("today"):
+            t = nb["today"]
+            log("  52周广度：新高 %d vs 新低 %d（NH-NL 比 %+.2f）"
+                % (t.get("nh", 0), t.get("nl", 0), t.get("ratio", 0)))
+    except Exception as e:
+        log("  52周广度失败（不影响主流程）：%r" % e)
+        data["newhigh"] = None
+
+    # ---- 均线粘合待变盘池 ----
+    try:
+        data["maglue"] = maglue.scan(u, date)
+        gg = data["maglue"]
+        if gg:
+            log("  均线粘合：粘合池 %d 只，已现启动迹象 %d 只"
+                % (gg.get("glue_n", 0), gg.get("launching_n", 0)))
+    except Exception as e:
+        log("  均线粘合失败（不影响主流程）：%r" % e)
+        data["maglue"] = None
+
+    # ---- 断头铡刀 / 出水芙蓉 ----
+    try:
+        data["trendsword"] = trendsword.scan(u, date)
+        cf = data["trendsword"]
+        if cf:
+            log("  铡刀/芙蓉：今日命中 %d 条" % len(cf.get("hits") or []))
+    except Exception as e:
+        log("  铡刀/芙蓉失败（不影响主流程）：%r" % e)
+        data["trendsword"] = None
+
+    # ---- 市场风格判定（大小盘 / 抱团趋势）----
+    try:
+        data["stylereg"] = stylereg.scan(u, date)
+        sty = data["stylereg"]
+        if sty and sty.get("verdict"):
+            log("  风格判定：%s%s" % (sty["verdict"].get("label"),
+                                      ("（%s → %s）" % (stylereg.style_cn(sty["switch"]["from_style"]),
+                                                       stylereg.style_cn(sty["switch"]["to_style"])))
+                                      if sty.get("switch") else ""))
+    except Exception as e:
+        log("  风格判定失败（不影响主流程）：%r" % e)
+        data["stylereg"] = None
+
+    # ---- 尾盘偷袭/跳水（焦点池定向，需联网取腾讯分时；离线自动跳过）----
+    try:
+        data["tailraid"] = tailraid.scan(u, date)
+        tr = data["tailraid"]
+        if tr:
+            log("  尾盘扫描：焦点池 %d 只，偷袭 %d / 跳水 %d"
+                % (tr.get("scanned", 0), tr.get("raid_n", 0), tr.get("dump_n", 0)))
+        else:
+            log("  尾盘扫描：无网络或焦点池为空，跳过")
+    except Exception as e:
+        log("  尾盘扫描失败（不影响主流程）：%r" % e)
+        data["tailraid"] = None
+
 
     # ---- 持股监测：预测未来 + 持续跟踪（无持仓配置则为空）----
     try:

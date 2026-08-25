@@ -351,6 +351,142 @@
       h += card('🕳 跳空缺口扫描', gb, '「缺口必补」到底多真？历史回补率按深度/方向分桶定量；未回补向上缺口作支撑参考、向下缺口作压力参考');
     }
 
+    /* 市场风格判定：小微盘题材 / 连板接力 / 权重抱团 / 双轨市 */
+    var STY = D.stylereg;
+    if (STY && STY.verdict) {
+      var V = STY.verdict;
+      var vb = '<div style="margin-bottom:8px"><span class="bd" style="background:' + C.purple + '22;color:' + C.purple + ';border-color:' + C.purple + ';font-size:14px;font-weight:700">' + E(V.label) + '</span>' +
+        (STY.switch ? ' <span class="bd" style="border-color:' + C.warn + ';color:' + C.warn + '">⚠ 风格切换：' + E(STY.switch.from_style) + ' →</span>' : '') + '</div>';
+      var ev = V.evidence || [];
+      if (ev.length) {
+        vb += '<div class="chips" style="margin-bottom:8px">' + ev.map(function (e2) {
+          return '<span class="chip">' + E(e2) + '</span>';
+        }).join('') + '</div>';
+      }
+      if (V.note) vb += '<div class="note">' + E(V.note) + '</div>';
+      h += card('🧭 市场风格判定', vb, '涨停市值分布 × CR10 成交集中度 × 权重超额 × 强趋势占比，四维判定当下是谁在主导（小微盘题材轮动 / 连板接力 / 权重抱团趋势 / 双轨市），并给出对应打法');
+    }
+
+    /* 地量/缩量变盘窗口 */
+    var DV = D.dryvol;
+    if (DV && DV.today) {
+      var T = DV.today;
+      var stCol = T.in_dry ? C.down : ((T.shrink_days || 0) >= 3 ? C.warn : C.blue);
+      var db = '<div class="chips" style="margin-bottom:8px">' +
+        '<span class="chip" style="border-color:' + stCol + ';color:' + stCol + '">' + E((DV.state || {}).state || '常态') + '</span>' +
+        (T.ratio != null ? '<span class="chip">市场额比 <b>' + f(T.ratio, 2) + '</b></span>' : '') +
+        (T.hp != null && !T.partial ? '<span class="chip">近一年分位 <b>' + f(T.hp, 0) + '%</b></span>' : '') +
+        '<span class="chip">连续缩量 <b>' + n2(T.shrink_days || 0) + '</b> 日</span>' +
+        '</div>';
+      var SS = DV.stats;
+      if (SS && SS.n) {
+        db += '<div class="note">';
+        db += '历史 ' + n2(SS.n) + ' 次地量段：' + (SS.hit_n
+          ? '5 日内放量变盘率 ' + pct(SS.hit_rate * 100, 0) + '，向上占 ' + pct((SS.up_rate || 0) * 100, 0)
+          : '尚无 5 日内放量先例（地量后常见继续磨底，勿抢跑）');
+        if (SS.vol_expand != null) db += '；段末后5日波动为常态 <b>' + f(SS.vol_expand, 1) + ' 倍</b>、5日累计均 <b>' + f(SS.avg_dir5, 2) + '%</b>';
+        db += '</div>';
+      }
+      if ((DV.state || {}).note) db += '<div class="note" style="margin-top:6px">' + E(DV.state.note) + '</div>';
+      h += card('💧 地量 / 缩量变盘窗口', db, '全市场成交额分位识别地量区；地量之后是放量变盘还是继续磨底——由本地库历史实测统计给出答案');
+    }
+
+    /* 52周新高新低广度 */
+    var NH = D.newhigh;
+    if (NH && NH.today) {
+      var NT = NH.today;
+      var rCol = NT.ratio >= 0.3 ? C.up : (NT.ratio <= -0.3 ? C.down : C.gold);
+      var hb = '<div class="chips" style="margin-bottom:8px">' +
+        '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + '">52周新高 <b>' + n2(NT.nh) + '</b> 只</span>' +
+        '<span class="chip" style="border-color:' + C.down + ';color:' + C.down + '">52周新低 <b>' + n2(NT.nl) + '</b> 只</span>' +
+        '<span class="chip" style="border-color:' + rCol + ';color:' + rCol + '">NH-NL 比 <b>' + f(NT.ratio, 2) + '</b></span>' +
+        (NT.nh_rank != null ? '<span class="chip">新高占比处' + E(NH.span_note || '历史') + ' <b>' + f(NT.nh_rank, 0) + '%</b> 分位</span>' : '') +
+        (NT.nl_rank != null ? '<span class="chip">新低占比 <b>' + f(NT.nl_rank, 0) + '%</b> 分位</span>' : '') +
+        '</div>';
+      var _nhl = function (rows, cls) {
+        return rows.map(function (x2) { return '<span class="chip">' + E(x2.name) + '</span>'; }).join('');
+      };
+      if ((NH.new_highs || []).length) hb += '<div style="margin-bottom:6px"><b style="color:var(--muted);font-size:12px">新高前排</b><div class="chips" style="margin-top:4px">' + _nhl(NH.new_highs.slice(0, 8)) + '</div></div>';
+      if ((NH.new_lows || []).length) hb += '<div><b style="color:var(--muted);font-size:12px">新低前排（回避）</b><div class="chips" style="margin-top:4px">' + _nhl(NH.new_lows.slice(0, 8)) + '</div></div>';
+      h += card('🏔 52周新高新低广度', hb, '创新高/新低家数与 NH-NL 比是最诚实的市场广度指标；新低扩位常领先指数见底，新高收缩常领先情绪退潮');
+    }
+
+    /* 均线粘合待变盘池 */
+    var MG = D.maglue;
+    if (MG && MG.glue_n) {
+      var mb = '<div class="chips" style="margin-bottom:8px">' +
+        '<span class="chip">粘合池 <b>' + n2(MG.glue_n) + '</b> 只（MA5/10/20/60 离散≤2.5%）</span>' +
+        '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + '">已现放量启动 <b>' + n2(MG.launching_n) + '</b> 只</span>' +
+        '</div>';
+      var mrows = (MG.launching && MG.launching.length ? MG.launching : MG.items).slice(0, 6);
+      if (mrows.length) {
+        mb += table([{ t: '标的' }, { t: '粘合天数', a: 'r' }, { t: '离散度', a: 'r' }, { t: '20日振幅', a: 'r' }, { t: '量比', a: 'r' }, { t: '现价', a: 'r' }, { t: '今日', a: 'r' }],
+          mrows.map(function (x3) {
+            return '<tr>' + (x3.launch ? '<td><b>' + E(x3.name) + '</b> <span class="bd" style="border-color:' + C.up + ';color:' + C.up + ';font-size:10px;padding:0 4px">启动</span></td>'
+              : '<td><b>' + E(x3.name) + '</b></td>') +
+              '<td class="r">' + n2(x3.glue_days) + '</td>' +
+              '<td class="r">' + f(x3.spread, 2) + '%</td>' +
+              '<td class="r">' + f(x3.amp20, 1) + '%</td>' +
+              '<td class="r">' + f(x3.vol_ratio, 2) + '</td>' +
+              '<td class="r">' + f(x3.close, 2) + '</td>' +
+              '<td class="r" style="color:' + (x3.pct >= 0 ? C.up : C.down) + '">' + f(x3.pct, 2) + '%</td></tr>';
+          }));
+      }
+      h += card('🧲 均线粘合待变盘池', mb, '四线粘合 = 蓄势待变盘，粘合越久越紧能量越大；「启动」标记=当日放量阳线站上全部均线，优先关注');
+    }
+
+    /* 断头铡刀 / 出水芙蓉 */
+    var SW = D.trendsword;
+    if (SW && (SW.hits.length || Object.keys(SW.stats || {}).length)) {
+      var SWS = SW.stats || {}, zd = SWS.zhadao, fr = SWS.furong;
+      var wb = '<div class="chips" style="margin-bottom:8px">';
+      if (zd) wb += '<span class="chip" style="border-color:' + C.down + ';color:' + C.down + '>铡刀历史 ' + n2(zd.n) + ' 例·次日均 ' + f(zd.avg_t1, 2) + '%（胜率 ' + f(zd.win_t1, 0) + '%）</span>';
+      if (fr) wb += '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + '>芙蓉历史 ' + n2(fr.n) + ' 例·次日均 +' + f(fr.avg_t1, 2) + '%（胜率 ' + f(fr.win_t1, 0) + '%）</span>';
+      wb += '</div>';
+      if (SW.hits.length) {
+        wb += table([{ t: '形态' }, { t: '标的' }, { t: '今日涨幅', a: 'r' }, { t: '穿线数', a: 'r' }, { t: '量比', a: 'r' }, { t: '现价', a: 'r' }],
+          SW.hits.map(function (x4) {
+            var isZd = x4.kind === 'zhadao';
+            return '<tr><td style="color:' + (isZd ? C.down : C.up) + ';font-weight:700">' + (isZd ? '⚔ 断头铡刀' : '✦ 出水芙蓉') + '</td>' +
+              '<td><b>' + E(x4.name) + '</b> <span class="muted">' + E(x4.code) + '</span></td>' +
+              '<td class="r" style="color:' + (x4.pct >= 0 ? C.up : C.down) + '">' + f(x4.pct, 2) + '%</td>' +
+              '<td class="r">' + n2(x4.n_lines) + ' 线</td>' +
+              '<td class="r">' + f(x4.vol_ratio, 1) + '</td>' +
+              '<td class="r">' + f(x4.close, 2) + '</td></tr>';
+          }));
+      } else {
+        wb += '<div class="empty">今日无铡刀/芙蓉触发</div>';
+      }
+      h += card('⚔️ 断头铡刀 / 出水芙蓉', wb, '一根K线切断或站上多条均线的趋势级信号；铡刀破位宜止损回避，芙蓉放量上穿可关注回踩确认');
+    }
+
+    /* 尾盘偷袭监测 */
+    var TR = D.tailraid;
+    if (TR && (TR.raid_n || TR.dump_n)) {
+      var tb = '<div class="chips" style="margin-bottom:8px">' +
+        '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + '">尾盘偷袭拉升 <b>' + n2(TR.raid_n) + '</b> 只</span>' +
+        '<span class="chip" style="border-color:' + C.down + ';color:' + C.down + '">尾盘跳水 <b>' + n2(TR.dump_n) + '</b> 只</span>' +
+        '<span class="chip">焦点池 ' + n2(TR.scanned) + ' 只（涨停/炸板/连板）</span>' +
+        '</div>';
+      var trRows = (TR.raids || []).slice(0, 5).map(function (x5) {
+        return '<tr><td style="color:' + C.up + ';font-weight:700">🌙 偷袭拉升</td>' +
+          '<td><b>' + E(x5.name) + '</b>' + (x5.habit >= 2 ? ' <span class="bd" style="border-color:' + C.warn + ';color:' + C.warn + ';font-size:10px;padding:0 4px">惯犯×' + x5.habit + '</span>' : '') + '</td>' +
+          '<td class="r">尾盘 +' + f(x5.last30, 2) + '%</td>' +
+          '<td class="r">全天 ' + f(x5.day_pct, 2) + '%</td>' +
+          '<td class="r">尾盘额占比 ' + pct(x5.tail_amt * 100, 0) + '</td></tr>';
+      }).concat((TR.dumps || []).slice(0, 4).map(function (x6) {
+        return '<tr><td style="color:' + C.down + ';font-weight:700">💧 尾盘跳水</td>' +
+          '<td><b>' + E(x6.name) + '</b></td>' +
+          '<td class="r">尾盘 ' + f(x6.last30, 2) + '%</td>' +
+          '<td class="r">全天 ' + f(x6.day_pct, 2) + '%</td>' +
+          '<td class="r">尾盘额占比 ' + pct(x6.tail_amt * 100, 0) + '</td></tr>';
+      }));
+      if (trRows.length) {
+        tb += table([{ t: '类型' }, { t: '标的' }, { t: '尾盘(14:30后)', a: 'r' }, { t: '全天', a: 'r' }, { t: '量能分布', a: 'r' }], trRows);
+      }
+      h += card('🌙 尾盘偷袭监测', tb, '分钟级数据定向扫描焦点池：14:30 后急拉=次日兑现风险/资金抢筹，尾盘跳水=出货警示；「惯犯」=近日常尾盘异动');
+    }
+
     /* 市场可视化：温度走势(双线) + 板块涨停 TOP10 */
     var VZ = D.viz;
     if (VZ && VZ.temp && VZ.temp.length) {
