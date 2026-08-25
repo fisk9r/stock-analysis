@@ -1080,7 +1080,7 @@ def _fmt_close_compact(data, url="", mode="close"):
 
     # 板块自选：config/notify.json 加 "sections": {"trend":false,...} 可关闭对应小节；
     # 未配置默认全开。可选键：bullets/rec/trend/bull/strat/yaogu/avoid/money/cold/gaps/
-    # dry/nh/glue/sword/style/tail/wl
+    # dry/nh/glue/sword/style/tail/wl/recperf/lhb/risk/block/margin/etf/patsim
     _sec_cfg = (load_config() or {}).get("sections") or {}
 
     def _on(k):
@@ -1315,6 +1315,54 @@ def _fmt_close_compact(data, url="", mode="close"):
                     L.append("- %s" % x)
         except Exception:
             pass
+
+    # ---- 新引擎分区（统一：先收集 lines，标题只加一次；行已带 "- " 则不重复加）----
+    def _engine_sec(title, mod, key, cap=4):
+        d = data.get(key)
+        if not d:
+            return
+        try:
+            lines = mod.summary_lines(d) or []
+            if not lines:
+                return
+            L.append("")
+            L.append(title)
+            for ln in lines[:cap]:
+                L.append(ln if ln.startswith("- ") else "- %s" % ln)
+        except Exception:
+            pass
+
+    import recperf as _rpm
+    _engine_sec("**📈 推荐池胜率回溯**", _rpm, "recperf", cap=3)
+
+    if _on("style") and data.get("style_switch"):
+        try:
+            sb = data["style_switch"]
+            L.append("")
+            L.append("**🔁 风格切换回测**")
+            L.append("- 历史 %d 次切换，其后 %d 日上涨占比 **%s%%**（平均收益 %s%%）"
+                     % (sb["n"], sb["look"], sb["up_rate"], sb["avg_ret"]))
+            bt = sb.get("by_target") or {}
+            if bt:
+                top_bt = sorted(bt.items(), key=lambda kv: (kv[1]["up_rate"] or 0), reverse=True)[:2]
+                L.append("- 切换去向占优风格：" + "；".join(
+                    "%s（%s%% 涨）" % (stylereg.style_cn(k), v["up_rate"]) for k, v in top_bt))
+        except Exception:
+            pass
+
+    import lhbseats as _lhb
+    _engine_sec("**🏦 龙虎榜席位**", _lhb, "lhbseats", cap=5)
+    import riskcal as _rc
+    _engine_sec("**⚠️ 解禁/财报雷区**", _rc, "riskcal", cap=4)
+    import blocktrade as _bt
+    _engine_sec("**📜 大宗交易折价**", _bt, "blocktrade", cap=4)
+    import margin as _mg
+    _engine_sec("**💳 两融余额**", _mg, "margin", cap=2)
+    import etfflow as _ef
+    _engine_sec("**🧺 ETF 资金流**", _ef, "etfflow", cap=4)
+    import patsim as _ps
+    _engine_sec("**🧬 相似形态检索**", _ps, "patsim", cap=4)
+
     if mode == "close_again":
         hrep = data.get("holdings")
         alerts = (hrep or {}).get("alerts") or []

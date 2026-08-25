@@ -514,6 +514,139 @@
       h += card('⭐ 关注股雷达', wch, '自选（notify.json watch）与持仓关注股（holdings.json watch=true）的每日信号：涨停/跌停/炸板/破位为急讯，置顶展示');
     }
 
+    /* 推荐池胜率回溯 */
+    var RP = D.recperf;
+    if (RP && RP.dates && RP.dates.length) {
+      var _cum = RP.dates.map(function (d, i) { return { l: d, v: RP.cumulative[i] }; });
+      var _wr = RP.dates.map(function (d, i) { return { l: d, v: RP.win_rate[i] }; });
+      var rpBody = '<div class="chips" style="margin-bottom:8px">' +
+        '<span class="chip">回溯 <b>' + n2(RP.n_days) + '</b> 交易日</span>' +
+        '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + '">累计净值 <b>' + f(RP.final_cum, 2) + '</b></span>' +
+        '<span class="chip">近30日盈利占比 <b>' + (RP.recent30.win_rate != null ? RP.recent30.win_rate : '—') + '%</b></span>' +
+        '<span class="chip">均收益 <b>' + (RP.recent30.avg_pct != null ? RP.recent30.avg_pct : '—') + '%</b></span></div>';
+      if (RP.cumulative && RP.cumulative.length) {
+        rpBody += CH.svgLine(_cum, { w: 460, h: 150, color: C.up, fill: true, xlabels: 4 });
+      }
+      h += card('📈 推荐池胜率回溯', rpBody, '每日推荐标的 T+1 等权次日了结的累计净值曲线——回答「这系统长期到底准不准」');
+    }
+
+    /* 风格切换回测 */
+    var SB = D.style_switch;
+    if (SB && SB.n) {
+      var _SCN = { crowd_trend: '核心资产抱团趋势', big_weight: '大盘权重主导', dual_track: '双轨市', micro_theme: '小微盘题材轮动', mid_relay: '中小盘连板接力', balanced: '均衡混合' };
+      function style_cn(k) { return _SCN[k] || k; }
+      var sbBody = '<div class="chips" style="margin-bottom:8px">' +
+        '<span class="chip">历史切换 <b>' + n2(SB.n) + '</b> 次</span>' +
+        '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + '">后' + SB.look + '日上涨占比 <b>' + SB.up_rate + '%</b></span>' +
+        '<span class="chip">均收益 <b>' + (SB.avg_ret >= 0 ? '+' : '') + SB.avg_ret + '%</b></span></div>';
+      var btl = [];
+      for (var _k in (SB.by_target || {})) {
+        var _v = SB.by_target[_k];
+        btl.push('<tr><td>' + E(style_cn(_k)) + '</td><td class="r">' + n2(_v.n) + '</td><td class="r" style="color:' + C.up + '">' + _v.up_rate + '%</td><td class="r">' + ( _v.avg_ret >= 0 ? '+' : '') + _v.avg_ret + '%</td></tr>');
+      }
+      if (btl.length) {
+        sbBody += table([{ t: '切换去向风格' }, { t: '次数', a: 'r' }, { t: '上涨占比', a: 'r' }, { t: '平均收益', a: 'r' }], btl);
+      }
+      h += card('🔁 风格切换回测', sbBody, '统计历史上每次风格切换（如小微盘→权重）后 ' + SB.look + ' 日市场表现，给「切换日该怎么做」提供实证依据');
+    }
+
+    /* 龙虎榜席位 */
+    var LB = D.lhbseats;
+    if (LB && LB.n) {
+      var lbBody = '<div class="chips" style="margin-bottom:8px">' +
+        '<span class="chip">上榜 <b>' + n2(LB.n) + '</b> 只</span>' +
+        ((LB.reasons || []).length ? '<span class="chip">主因 ' + E((LB.reasons[0][0] || '').slice(0, 12)) + '</span>' : '') +
+        '</div>';
+      var lbRows = (LB.top || []).slice(0, 6).map(function (t) {
+        return '<tr><td><b>' + E(t.name) + '</b> <span class="muted">' + E(t.code) + '</span></td>' +
+          '<td class="r" style="color:' + C.up + '">净买 ' + f(t.net_yi, 2) + '亿</td>' +
+          '<td class="r" style="color:' + (t.chg >= 0 ? C.up : C.down) + '">' + f(t.chg, 2) + '%</td>' +
+          '<td class="muted" style="font-size:11px">' + E(t.reason || '') + '</td></tr>';
+      });
+      if (lbRows.length) lbBody += table([{ t: '个股' }, { t: '净买入', a: 'r' }, { t: '涨幅', a: 'r' }, { t: '上榜原因' }], lbRows);
+      h += card('🏦 龙虎榜席位', lbBody, '今日上榜股净买额 TOP + 上榜原因：判断资金合力与性质（机构接力/游资对倒/散户抢筹）');
+    }
+
+    /* 雷区日历 */
+    var RC = D.riskcal;
+    if (RC && (RC.unlock_top && RC.unlock_top.length || RC.fin_due && RC.fin_due.length)) {
+      var rcBody = '';
+      if (RC.unlock_top && RC.unlock_top.length) {
+        rcBody += '<div class="kv" style="margin:4px 0"><b style="color:var(--muted);font-size:12px">未来 ' + RC.horizon + ' 日解禁 TOP</b></div>';
+        rcBody += RC.unlock_top.slice(0, 6).map(function (u) {
+          return '<span class="bd" style="border-color:' + C.danger + ';color:' + C.danger + ';margin:2px 4px 2px 0;display:inline-block">' +
+            E(u.name) + ' ' + E(u.day) + ' · ' + f(u.mv_yi, 1) + '亿(' + f(u.ratio, 1) + '%)</span>';
+        }).join('');
+      }
+      if (RC.fin_due && RC.fin_due.length) {
+        rcBody += '<div class="kv" style="margin:8px 0 4px"><b style="color:var(--muted);font-size:12px">财报披露临近（' + RC.fin_due.length + ' 只）</b></div>';
+        rcBody += RC.fin_due.slice(0, 6).map(function (u) {
+          return '<span class="bd" style="border-color:' + C.warn + ';color:' + C.warn + ';margin:2px 4px 2px 0;display:inline-block">' +
+            E(u.name) + ' ' + E(u.day) + '</span>';
+        }).join('');
+      }
+      h += card('⚠️ 解禁/财报雷区', rcBody, '未来两周限售解禁金额 TOP + 财报披露日，提前规避「好票突然暴雷」');
+    }
+
+    /* 大宗交易折价 */
+    var BT = D.blocktrade;
+    if (BT && BT.top && BT.top.length) {
+      var btRows = BT.top.slice(0, 6).map(function (d) {
+        return '<tr><td><b>' + E(d.name) + '</b> <span class="muted">' + E(d.code) + '</span></td>' +
+          '<td class="r" style="color:' + C.down + '">折价 ' + f(d.discount, 2) + '%</td>' +
+          '<td class="r">' + f(d.amt_yi, 2) + '亿</td></tr>';
+      });
+      h += card('📜 大宗交易折价', table([{ t: '个股' }, { t: '折价率', a: 'r' }, { t: '金额', a: 'r' }], btRows),
+        '当日大宗交易中折价≥5% 的标的——折价率越高越偏出货/减持信号');
+    }
+
+    /* 两融余额 */
+    var MG = D.margin;
+    if (MG && MG.latest_yi != null) {
+      var dlt = MG.delta_yi || 0;
+      var mgBody = '<div class="chips" style="margin-bottom:8px">' +
+        '<span class="chip">两融余额 <b>' + n2(MG.latest_yi) + '亿</b></span>' +
+        '<span class="chip" style="border-color:' + (dlt >= 0 ? C.up : C.down) + ';color:' + (dlt >= 0 ? C.up : C.down) + '">较前日 ' + (dlt >= 0 ? '+' : '') + f(dlt, 1) + '亿</span>' +
+        '<span class="chip">杠杆情绪' + (dlt >= 0 ? '回升' : '回落') + '</span></div>';
+      if (MG.series && MG.series.length) {
+        mgBody += CH.svgLine(MG.series.map(function (s) { return { l: s.date, v: s.total_yi }; }),
+          { w: 460, h: 130, color: C.gold, fill: true, xlabels: 4 });
+      }
+      h += card('💳 两融余额', mgBody, '全市场融资融券余额趋势——杠杆资金的情绪温度计');
+    }
+
+    /* ETF 资金流 */
+    var EF = D.etfflow;
+    if (EF && EF.top && EF.top.length) {
+      var efBody = '<div class="chips" style="margin-bottom:8px"><span class="chip">全市场净流入 <b>' + f(EF.total_net_yi, 1) + '亿</b></span></div>';
+      var efRows = EF.top.slice(0, 6).map(function (t) {
+        return '<tr><td><b>' + E(t.name) + '</b> <span class="muted">' + E(t.code) + '</span></td>' +
+          '<td class="r" style="color:' + C.up + '">净流入 ' + f(t.net_yi, 2) + '亿</td>' +
+          '<td class="r" style="color:' + (t.chg >= 0 ? C.up : C.down) + '">' + f(t.chg, 0) + '%</td></tr>';
+      });
+      efBody += table([{ t: 'ETF' }, { t: '净流入', a: 'r' }, { t: '涨跌', a: 'r' }], efRows);
+      h += card('🧺 ETF 资金流', efBody, '宽基/行业 ETF 份额与成交额变化——增量资金借道指数进场的风向标，亦作风格判定的第五维');
+    }
+
+    /* 相似形态检索 */
+    var PS = D.patsim;
+    if (PS && PS.items && PS.items.length) {
+      var psRows = PS.items.slice(0, 8).map(function (it) {
+        var top = (it.matches || [])[0];
+        var sim = top ? ('≈ ' + E(top.name) + (top.fwd10 != null ? (' · 其后10日' + (top.fwd10 >= 0 ? '+' : '') + f(top.fwd10, 1) + '%') : '')) : '—';
+        return '<tr><td><b>' + E(it.name) + '</b></td><td>' + sim + '</td>' +
+          '<td class="r">' + it.matches_up + '/' + (it.matches ? it.matches.length : 0) + ' 涨</td></tr>';
+      });
+      h += card('🧬 相似形态检索', table([{ t: '焦点股' }, { t: '最相似标的/后续' }, { t: '10日上涨', a: 'r' }], psRows),
+        '把焦点股近 20 日形态与全市场比对，找出历史上最像的标的并回看其后续表现（形态基因映射）');
+    }
+
+    /* 关注股网页化管理：仅 owner 显示入口 */
+    if (window.__SA_USER__ === 'owner') {
+      h += '<div class="sa-mgmt-actions" style="margin:6px 0 18px"><button class="mbtn mbtn-p" id="wlMgrBtn">⭐ 管理关注股</button>' +
+        '<span class="muted">增删自选，保存后写回云端并重建（需管理密钥/令牌）</span></div>';
+    }
+
     /* 市场可视化：温度走势(双线) + 板块涨停 TOP10 */
     var VZ = D.viz;
     if (VZ && VZ.temp && VZ.temp.length) {
@@ -3031,6 +3164,103 @@
     });
   }
 
+  /* ---------------- 关注股网页管理：写回 WATCH_JSON 密钥 ---------------- */
+  var WL_POS = [];
+  function wlOpen() {
+    ensureMgmtStyle();
+    var cur = (D.watch_meta && D.watch_meta.length) ? D.watch_meta : [];
+    WL_POS = cur.map(function (d) { return { code: d.code, name: d.name || '' }; });
+    if (!WL_POS.length) WL_POS.push({ code: '', name: '' });
+    var ov = document.createElement('div'); ov.className = 'sa-mgmt-ov'; ov.id = 'wlOv';
+    ov.innerHTML = '<div class="sa-mgmt"><div class="sa-mgmt-h"><span>⭐ 管理关注股（网页可编辑自选池）</span>' +
+      '<span class="sa-mgmt-x" onclick="var o=this.closest(\'.sa-mgmt-ov\');if(o)o.remove()">✕</span></div>' +
+      '<div class="sa-mgmt-b" id="wlBody"></div></div>';
+    document.body.appendChild(ov);
+    ov.addEventListener('click', function (e) { if (e.target === ov) ov.parentNode.removeChild(ov); });
+    wlRender();
+  }
+  function wlRender() {
+    var b = document.getElementById('wlBody'); if (!b) return;
+    var rows = WL_POS.map(function (p, i) {
+      return '<tr>' +
+        '<td><input class="mu-in" style="width:90px" data-i="' + i + '" data-k="code" value="' + E(p.code) + '"></td>' +
+        '<td><input class="mu-in" style="width:110px" data-i="' + i + '" data-k="name" value="' + E(p.name) + '"></td>' +
+        '<td><button class="mbtn mbtn-d" data-rm="' + i + '">删</button></td>' +
+        '</tr>';
+    }).join('');
+    b.innerHTML = '<div class="sa-mgmt-note info" style="margin-bottom:10px">这里的自选池会进入「关注股雷达」每日推送提醒。保存后加密写回云端密钥并触发重建，手机上也能随时管理。改动需管理密钥/令牌（仅本机会话保存）。</div>' +
+      '<div class="sa-mgmt-add">' +
+      '<input id="wlNewCode" placeholder="代码 如 600396" style="width:130px">' +
+      '<input id="wlNewName" placeholder="名称(可选)" style="width:120px">' +
+      '<button class="mbtn mbtn-p" id="wlAddBtn">+ 添加</button></div>' +
+      (WL_POS.length ? '<table class="sa-mgmt-t"><thead><tr><th>代码</th><th>名称</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+        : '<div class="sa-mgmt-empty">还没有关注股，添加一只试试。</div>') +
+      '<div class="sa-mgmt-actions">' +
+      '<button class="mbtn mbtn-p" id="wlSaveBtn">保存并部署</button>' +
+      '<button class="mbtn mbtn-ghost" id="wlCancelBtn">取消</button></div>' +
+      '<div class="sa-mgmt-note" id="wlNote"></div>';
+    b.querySelectorAll('input[data-i]').forEach(function (inp) {
+      inp.addEventListener('input', function () { WL_POS[+inp.dataset.i][inp.dataset.k] = inp.value.trim(); });
+    });
+    b.querySelectorAll('button[data-rm]').forEach(function (btn) {
+      btn.addEventListener('click', function () { WL_POS.splice(+btn.dataset.rm, 1); if (!WL_POS.length) WL_POS.push({ code: '', name: '' }); wlRender(); });
+    });
+    var add = document.getElementById('wlAddBtn');
+    if (add) add.addEventListener('click', function () {
+      var c = (document.getElementById('wlNewCode').value || '').trim();
+      var nm = (document.getElementById('wlNewName').value || '').trim();
+      if (!/^\d{6}$/.test(c)) { wlNote('代码须为 6 位数字', 'err'); return; }
+      WL_POS.push({ code: c, name: nm }); wlRender();
+    });
+    var save = document.getElementById('wlSaveBtn'); if (save) save.addEventListener('click', wlSave);
+    var cancel = document.getElementById('wlCancelBtn');
+    if (cancel) cancel.addEventListener('click', function () { var o = document.getElementById('wlOv'); if (o) o.remove(); });
+  }
+  function wlNote(m, t) { var n = document.getElementById('wlNote'); if (n) { n.textContent = m; n.className = 'sa-mgmt-note ' + (t || ''); } }
+  function wlPayload() {
+    var out = [];
+    WL_POS.forEach(function (p) { if (/^\d{6}$/.test(p.code || '')) out.push({ code: p.code, name: p.name || '' }); });
+    return { watch: out };
+  }
+  function wlSave() {
+    var haveKey = muWorkerUrl() ? MU.adminKey : muRecallToken();
+    if (!haveKey) {
+      var b = document.getElementById('wlBody'); if (!b) return;
+      if (document.getElementById('wlTokIn')) { wlNote(muWorkerUrl() ? '请先输入管理密钥' : '请先输入令牌', 'err'); return; }
+      var gate = document.createElement('div');
+      if (muWorkerUrl()) {
+        gate.innerHTML = '<label class="mu-lb">管理密钥<span class="muted">（Worker 的 ADMIN_KEY，仅本机会话保存）</span></label>' +
+          '<input class="mu-in" id="wlTokIn" type="password" placeholder="ADMIN_KEY">' +
+          '<label class="mu-ck"><input type="checkbox" id="wlTokKeep">记住管理密钥</label>';
+      } else {
+        gate.innerHTML = '<label class="mu-lb">GitHub 令牌<span class="muted">（repo 权限，仅本机会话保存）</span></label>' +
+          '<input class="mu-in" id="wlTokIn" type="password" placeholder="ghp_… / github_pat_…">' +
+          '<label class="mu-ck"><input type="checkbox" id="wlTokKeep">记住令牌</label>';
+      }
+      b.insertBefore(gate, b.firstChild);
+      wlNote(muWorkerUrl() ? '需要管理密钥才能写回关注池密钥' : '需要 GitHub 令牌才能写回关注池密钥', 'info');
+      var go = document.getElementById('wlSaveBtn');
+      if (go) go.textContent = '确认保存';
+      go.onclick = function () {
+        var t = (document.getElementById('wlTokIn').value || '').trim();
+        if (!t) { wlNote('请填写密钥', 'err'); return; }
+        if (muWorkerUrl()) { MU.adminKey = t; try { if (document.getElementById('wlTokKeep').checked) localStorage.setItem(MU_ADMIN_KEY, t); else sessionStorage.setItem(MU_ADMIN_KEY, t); } catch (e2) {} }
+        else { MU.token = t; try { if (document.getElementById('wlTokKeep').checked) localStorage.setItem(MU_TOKEN_KEY, t); else sessionStorage.setItem(MU_TOKEN_KEY, t); } catch (e2) {} }
+        gate.remove(); go.textContent = '保存并部署'; go.onclick = null; wlSave();
+      };
+      return;
+    }
+    wlNote('正在加密写回 GitHub 密钥…', 'info');
+    var btn = document.getElementById('wlSaveBtn'); if (btn) btn.disabled = true;
+    muLoadNacl().then(function () { return muGetPubKey(); }).then(function (pk) {
+      if (!pk || !pk.key || !pk.key_id) throw new Error('未取得仓库公钥');
+      var sealed = window.SA_SEAL(JSON.stringify(wlPayload()), pk.key);
+      return muSecretWrite('WATCH_JSON', sealed, pk.key_id);
+    }).then(function () { wlNote('关注池已写入密钥，正在触发重建…', 'info'); return muDispatchBuild(); }).then(function () {
+      if (btn) btn.disabled = false; wlNote('已提交 ✅ 云端重建约 2 分钟，刷新即可看到更新', 'ok');
+    }).catch(function (e) { if (btn) btn.disabled = false; wlNote('失败：' + ((e && e.message) || e), 'err'); });
+  }
+
   /* ---------------- 启动 ---------------- */
   function boot() {
     if (!D) {
@@ -3071,6 +3301,10 @@
     }
     initBackdrop();
     startFreshnessWatch();
+    /* owner 专属：总览页「管理关注股」入口（动态渲染的按钮用委托） */
+    document.addEventListener('click', function (e) {
+      if (e.target && e.target.id === 'wlMgrBtn') { e.preventDefault(); wlOpen(); }
+    });
     var views = { overview: viewOverview, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings };
     var done = {};
     function show(k) {

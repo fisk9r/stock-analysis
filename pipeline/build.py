@@ -28,6 +28,13 @@ import trendsword
 import stylereg
 import tailraid
 import watchlist
+import recperf
+import patsim
+import lhbseats
+import riskcal
+import blocktrade
+import margin
+import etfflow
 import holdings
 import data_guard
 
@@ -679,6 +686,87 @@ def run(date_override=None, dedup_close=False):
         log("  关注股雷达失败（不影响主流程）：%r" % e)
         data["watch"] = None
 
+    # 关注池清单（供前端「网页管理」读取/编辑）——仅 code/name，不含任何私密数据
+    try:
+        _wc, _wn = watchlist.load_watch_codes()
+        data["watch_meta"] = [{"code": c, "name": _wn.get(c, "")} for c in _wc]
+    except Exception:
+        data["watch_meta"] = []
+
+    # ---- 推荐池历史胜率曲线（纯本地，可验证）----
+    try:
+        data["recperf"] = recperf.build(con)
+        rp = data["recperf"]
+        if rp:
+            log("  推荐胜率：回溯 %d 日，近30日盈利占比 %s%%" % (rp["n_days"], rp["recent30"]["win_rate"]))
+    except Exception as e:
+        log("  推荐胜率失败（不影响主流程）：%r" % e)
+        data["recperf"] = None
+
+    # ---- 风格切换历史回测（纯本地）----
+    try:
+        data["style_switch"] = stylereg.switch_backtest(u)
+        sb = data["style_switch"]
+        if sb:
+            log("  风格切换回测：历史 %d 次切换，后%d日上涨占比 %s%%" % (sb["n"], sb["look"], sb["up_rate"]))
+    except Exception as e:
+        log("  风格切换回测失败（不影响主流程）：%r" % e)
+        data["style_switch"] = None
+
+    # ---- K线相似形态检索（纯本地）----
+    try:
+        data["patsim"] = patsim.scan(u, date)
+        ps = data["patsim"]
+        if ps:
+            log("  相似形态：焦点 %d 只，命中 %d 只可回溯" % (ps.get("focus_n", 0), len(ps.get("items", []))))
+    except Exception as e:
+        log("  相似形态失败（不影响主流程）：%r" % e)
+        data["patsim"] = None
+
+    # ---- 东财数据中心引擎（接口均已实证；失败自动跳过）----
+    try:
+        data["lhbseats"] = lhbseats.scan(date)
+        if data["lhbseats"]:
+            log("  龙虎榜席位：上榜 %d 只，净买TOP %s"
+                % (data["lhbseats"]["n"],
+                   (data["lhbseats"]["top"] or [{}])[0].get("name", "—")))
+    except Exception as e:
+        log("  龙虎榜席位失败（无网/解析异常，跳过）：%r" % e)
+        data["lhbseats"] = None
+
+    try:
+        data["riskcal"] = riskcal.scan(date)
+        if data["riskcal"]:
+            log("  雷区日历：解禁 %d 笔 / 财报 %d 只（未来%d日）"
+                % (len(data["riskcal"]["unlock_top"]), len(data["riskcal"]["fin_due"]), data["riskcal"]["horizon"]))
+    except Exception as e:
+        log("  雷区日历失败（无网/解析异常，跳过）：%r" % e)
+        data["riskcal"] = None
+
+    try:
+        data["blocktrade"] = blocktrade.scan(date)
+        if data["blocktrade"]:
+            log("  大宗交易：%d 笔，折价≥5%% 的 %d 笔" % (data["blocktrade"]["n"], data["blocktrade"]["discount_n"]))
+    except Exception as e:
+        log("  大宗交易失败（无网/解析异常，跳过）：%r" % e)
+        data["blocktrade"] = None
+
+    try:
+        data["margin"] = margin.scan(date)
+        if data["margin"]:
+            log("  两融余额：%.0f 亿（前日 %+.0f）" % (data["margin"]["latest_yi"], data["margin"]["delta_yi"]))
+    except Exception as e:
+        log("  两融失败（无网/解析异常，跳过）：%r" % e)
+        data["margin"] = None
+
+    try:
+        data["etfflow"] = etfflow.scan(date)
+        if data["etfflow"]:
+            log("  ETF 资金流：净流入 %.1f 亿" % data["etfflow"]["total_net_yi"])
+    except Exception as e:
+        log("  ETF 资金流失败（无网/解析异常，跳过）：%r" % e)
+        data["etfflow"] = None
+
 
     # ---- 持股监测：预测未来 + 持续跟踪（无持仓配置则为空）----
     try:
@@ -1060,6 +1148,15 @@ def _anomaly_focused(s, new_codes, url, demon_map=None):
             main_s = ("主力净流入 %.1f亿" % (main / 1e8)) if abs(main) >= 1e7 else "主力净流出 %.1f亿" % (abs(main) / 1e8)
             L.append("- **%s**(/%s) +%.2f%% ｜ 换手%.1f%% ｜ %s" % (name, code, pct, hs, main_s))
         L.append("")
+    # 关注股盘中异动（网页自选池：涨停/跌停/急拉急跌）
+    n_wl = [w for w in (s.get("watch") or []) if str(w.get("c")) in newset]
+    if n_wl:
+        L.append("### ⭐ 关注股盘中异动（%d）" % len(n_wl))
+        for w in n_wl[:10]:
+            pct = w.get("pct") or 0
+            L.append("- **%s**(/%s) %s%% ｜ 现价 %s"
+                     % (w.get("n"), w.get("c"), ("+" if pct >= 0 else "") + ("%.2f" % pct), w.get("price")))
+        L.append("")
     # 题材联动：本轮新增涨停按行业聚合，≥3 只同板块即视为题材爆发
     from collections import Counter
     sec = Counter((it.get("hybk") or "—") for it in n_zt
@@ -1207,6 +1304,39 @@ def _crash_section():
         return False, "> 盘面恐慌监控暂不可用：%s" % str(e)[:40]
 
 
+def _live_watch_movers(threshold=3.0):
+    """关注股盘中实时异动：对关注池（notify/watch.json/holdings）实时报价，挑出 |涨跌幅|≥阈值
+    或触及涨停/跌停的标的。走东财 push2（CI 有网）；任一失败仅跳过该只。"""
+    import em_api
+    try:
+        codes, names = watchlist.load_watch_codes()
+    except Exception:
+        return []
+    if not codes:
+        return []
+    out = []
+    for c in codes:
+        m = 1 if c[0] in "69" else (0 if c[0] in "023" else None)
+        if m is None:
+            continue
+        secid = "%d.%s" % (m, c)
+        try:
+            j = em_api.push2_json(
+                "/api/qt/stock/get?secid=%s&fields=f43,f57,f58,f170&_=%d" % (secid, int(time.time() * 1000)))
+            d = (j or {}).get("data") or {}
+            pct = d.get("f170")
+            try:
+                pct = float(pct) if pct not in (None, "-", "--", "") else 0.0
+            except Exception:
+                pct = 0.0
+            if abs(pct) >= threshold or abs(pct) >= 9.8:
+                out.append({"c": c, "n": d.get("f58") or names.get(c) or c,
+                            "pct": round(pct, 2), "price": d.get("f43")})
+        except Exception:
+            continue
+    return out
+
+
 def _live_anomaly_summary(url):
     """实时异动：涨停池 + 涨幅榜急拉，生成 Markdown。
     各数据源独立容错：某一路失败仅跳过该段，其余仍实时呈现；全部失败才上抛。"""
@@ -1269,14 +1399,28 @@ def _live_anomaly_summary(url):
     if trig:
         L.append("")
         L.append(md)
+    # 关注股盘中实时异动（独立于涨停池/涨幅榜，单独成段）
+    wm = []
+    try:
+        wm = _live_watch_movers()
+    except Exception:
+        wm = []
+    if wm:
+        L.append("")
+        L.append("### ⭐ 关注股盘中异动（%d）" % len(wm))
+        for w in wm:
+            L.append("- **%s**(/%s) %s%% ｜ 现价 %s" % (w.get("n"), w.get("c"),
+                      ("+" if w.get("pct", 0) >= 0 else "") + str(w.get("pct")),
+                      w.get("price")))
     if url:
         L.append("---")
         L.append("完整数据看板：%s" % url)
     return {"title": "A股盘中异动提醒 %s" % now, "text": "\n".join(L),
-            "zt": zt_sorted, "movers": movers,
+            "zt": zt_sorted, "movers": movers, "watch": wm,
             "codes": [str(it.get("c")) for it in zt_sorted]
-                      + [str(m.get("f12")) for m in movers],
-            "has_signal": bool(zt_sorted) or bool(movers)}
+                      + [str(m.get("f12")) for m in movers]
+                      + [str(w.get("c")) for w in wm],
+            "has_signal": bool(zt_sorted) or bool(movers) or bool(wm)}
 
 
 def _deploy_url():
