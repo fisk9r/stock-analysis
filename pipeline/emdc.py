@@ -18,16 +18,16 @@ HOST = "datacenter-web.eastmoney.com"
 REFERER = "https://data.eastmoney.com/"
 
 
-def get(report, columns=None, flt=None, page_size=200, sort=None, extra=None):
+def get(report, columns=None, flt=None, page_size=200, sort=None, extra=None, page=1):
     """通用数据中心 GET。
     report: reportName；flt: 过滤表达式（自动 URL 编码，实证：不编码会 HTTP 400）
-    sort=None 时默认 TRADE_DATE 倒序。
+    sort=None 时默认 TRADE_DATE 倒序；page: 页码（席位明细等大结果集需翻页）。
     """
     import urllib.parse
     parts = [
         "/api/data/v1/get?reportName=%s" % report,
         "pageSize=%d" % page_size,
-        "pageNumber=1",
+        "pageNumber=%d" % max(1, int(page)),
         "source=WEB&client=WEB",
     ]
     if sort:

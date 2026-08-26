@@ -397,7 +397,8 @@ def _norm_narrative(v, label):
 def generate_narrative_backup(data, preferred=None):
     """HY3 叙事文件不可用时，用外部模型生成同格式叙事。
 
-    优先级：preferred（默认 kimi，或在 config/models.json 的 narrative_backup 列表指定）
+    优先级：preferred，或 config/models.json 的 narrative_backup 列表；
+    未配置时默认 GLM(zhipu) 优先 → kimi 次之 → 其余（2026-08-25 用户拍板）。
     置顶，其余按预设顺序逐个尝试；首个成功即返回，全部失败返回 None（调用方保留模板）。
 
     返回结构含 headline/bullets/outlook/generated_by/ai_generated/source。
@@ -405,8 +406,9 @@ def generate_narrative_backup(data, preferred=None):
     cfg = load_model_config()
     if preferred is None:
         nb = cfg.get("narrative_backup")
-        # 默认保底链：kimi 主用 → zhipu(GLM 免费档) 兜底（云端无 models.json 时同样生效）
-        pref_list = nb if isinstance(nb, list) and nb else ["kimi", "zhipu"]
+        # 默认保底链（2026-08-25 用户拍板）：Hy3 不可用时 GLM 优先 → kimi 次之 → 其余
+        # （云端无 models.json 时同样生效；config 里显式配了 narrative_backup 列表则尊重配置）
+        pref_list = nb if isinstance(nb, list) and nb else ["zhipu", "kimi"]
     elif isinstance(preferred, str):
         pref_list = [preferred]
     else:

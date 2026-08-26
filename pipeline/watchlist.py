@@ -27,9 +27,24 @@ URGENT = ("涨停", "跌停", "炸板", "趋势破位")
 
 
 def load_watch_codes():
-    """合并 notify.json watch 与 holdings.json watch==true"""
+    """合并 notify.json watch + holdings.json watch==true + config/watch.json（网页管理写回）"""
     codes, names = [], {}
     root = store.ROOT
+    # 1) 网页管理的关注池（WATCH_JSON 密钥 → CI 还原为 config/watch.json）
+    wp = os.path.join(root, "config", "watch.json")
+    try:
+        wj = json.load(open(wp, encoding="utf-8")) or {}
+        for x in (wj.get("watch") or []):
+            if isinstance(x, str) and x.strip():
+                c = x.strip().zfill(6)
+                if c not in names:
+                    codes.append(c); names[c] = ""
+            elif isinstance(x, dict) and x.get("code"):
+                c = str(x["code"]).zfill(6)
+                if c not in names:
+                    codes.append(c); names[c] = x.get("name") or ""
+    except Exception:
+        pass
     np = os.path.join(root, "config", "notify.json")
     try:
         w = (json.load(open(np, encoding="utf-8")) or {}).get("watch") or []

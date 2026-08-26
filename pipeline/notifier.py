@@ -1363,6 +1363,15 @@ def _fmt_close_compact(data, url="", mode="close"):
     import patsim as _ps
     _engine_sec("**🧬 相似形态检索**", _ps, "patsim", cap=4)
 
+    import seats as _st
+    _engine_sec("**🐉 游资席位画像**", _st, "seats", cap=5)
+    import theme as _th
+    _engine_sec("**🧭 题材主线**", _th, "theme", cap=4)
+    import signals as _sg
+    _engine_sec("**📡 连续信号**", _sg, "signals", cap=5)
+    import chanlun as _cl
+    _engine_sec("**🌀 缠论结构**", _cl, "chanlun", cap=6)
+
     if mode == "close_again":
         hrep = data.get("holdings")
         alerts = (hrep or {}).get("alerts") or []

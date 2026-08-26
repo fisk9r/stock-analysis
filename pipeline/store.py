@@ -42,6 +42,21 @@ CREATE TABLE IF NOT EXISTS global_market(
   region TEXT, code TEXT, name TEXT, price REAL, pct REAL,
   fetched_at TEXT, PRIMARY KEY(region, code)
 );
+CREATE TABLE IF NOT EXISTS engine_snapshots(
+  k TEXT NOT NULL, date TEXT NOT NULL, payload TEXT,
+  PRIMARY KEY(k, date)
+);
+CREATE TABLE IF NOT EXISTS seat_daily(
+  date TEXT NOT NULL, dept_code TEXT NOT NULL, label TEXT,
+  code TEXT NOT NULL, name TEXT,
+  net_yi REAL, act_buy_yi REAL, act_sell_yi REAL, chg REAL DEFAULT NULL,
+  PRIMARY KEY(date, dept_code, code)
+);
+CREATE INDEX IF NOT EXISTS idx_seat_label ON seat_daily(label);
+CREATE TABLE IF NOT EXISTS theme_daily(
+  date TEXT NOT NULL, theme TEXT NOT NULL, n INTEGER,
+  PRIMARY KEY(date, theme)
+);
 """
 
 
@@ -204,3 +219,65 @@ def upsert_global(con, region, code, name, price, pct, fetched_at):
 def global_rows(con):
     return con.execute(
         "SELECT region,code,name,price,pct,fetched_at FROM global_market").fetchall()
+
+
+# ---------------------------------------------------------------- 引擎历史快照
+def save_snapshot(con, k, date, payload):
+    """引擎当日摘要 JSON 落库（margin/etfflow/lhbseats/themes...），同日重跑覆盖"""
+    con.execute(
+        "INSERT OR REPLACE INTO engine_snapshots(k,date,payload) VALUES(?,?,?)",
+        (k, date, json.dumps(payload, ensure_ascii=False)))
+
+
+def snapshot_history(con, k, days=20):
+    """取某引擎最近 N 天快照，按日期正序返回 [(date, payload_dict)]"""
+    rows = con.execute(
+        "SELECT date,payload FROM engine_snapshots WHERE k=? ORDER BY date DESC LIMIT ?",
+        (k, days)).fetchall()
+    out = []
+    for d, p in reversed(rows):
+        try:
+            out.append((d, json.loads(p)))
+        except Exception:
+            pass
+    return out
+
+
+def upsert_seats(con, date, rows):
+    for r in rows:
+        con.execute(
+            "INSERT OR REPLACE INTO seat_daily(date,dept_code,label,code,name,"
+            "net_yi,act_buy_yi,act_sell_yi,chg) VALUES(?,?,?,?,?,?,?,?,?)",
+            (date, r["dept_code"], r["label"], r["code"], r["name"],
+             r.get("net_yi"), r.get("act_buy_yi"), r.get("act_sell_yi"), r.get("chg")))
+
+
+def seats_history(con, days=90):
+    return con.execute(
+        "SELECT date,dept_code,label,code,name,net_yi FROM seat_daily "
+        "WHERE date>=? ORDER BY date", (_days_ago(days),)).fetchall()
+
+
+def upsert_themes(con, date, counts):
+    """counts: {theme: n}"""
+    con.execute("DELETE FROM theme_daily WHERE date=?", (date,))
+    for theme, n in counts.items():
+        if n:
+            con.execute("INSERT INTO theme_daily(date,theme,n) VALUES(?,?,?)",
+                        (date, theme, n))
+
+
+def themes_series(con, days=30):
+    """返回 {theme: [(date, n)]} 按日期正序"""
+    rows = con.execute(
+        "SELECT date,theme,n FROM theme_daily WHERE date>=? ORDER BY date",
+        (_days_ago(days),)).fetchall()
+    out = {}
+    for d, t, n in rows:
+        out.setdefault(t, []).append((d, n))
+    return out
+
+
+def _days_ago(days):
+    import datetime
+    return (datetime.date.today() - datetime.timedelta(days=days)).isoformat()

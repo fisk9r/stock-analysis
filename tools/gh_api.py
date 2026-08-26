@@ -122,10 +122,14 @@ def push_files(message, paths, branch="main"):
         if not os.path.isfile(ab):
             print("⚠ 跳过不存在的文件：%s" % rel)
             continue
+        # Git 树路径必须用正斜杠。Windows 上 glob/os.path 会产生反斜杠，
+        # 若原样提交，Git 会把 "pipeline\x.py" 当作仓库根目录下一个「文件名含反斜杠」
+        # 的文件，真正的 pipeline/x.py 不会被更新（历史踩坑，务必保留此规范化）。
+        gitpath = rel.replace("\\", "/").lstrip("./")
         with open(ab, "rb") as f:
             content = f.read()
         sha = _blob(content)
-        tree.append({"path": rel, "mode": "100644", "type": "blob", "sha": sha})
+        tree.append({"path": gitpath, "mode": "100644", "type": "blob", "sha": sha})
     if not tree:
         raise SystemExit("没有可推送的文件")
     # 4. 新树（以旧树为基底，覆盖同名文件）
@@ -157,6 +161,8 @@ def delete_files(message, paths, branch="main"):
     st, body = api("GET", "/repos/%s/%s/git/commits/%s" % (OWNER, REPO, base_sha))
     base_tree = json.loads(body)["tree"]["sha"]
     # sha 为 null 表示删除该路径（GitHub Git Data API 约定）
+    # 注意：删除时不做 \\ -> / 规范化，因为仓库里可能真的存在「名字含反斜杠」的
+    # 历史垃圾文件（Windows 误推产物），需要按原样精确删除。
     tree = [{"path": p, "mode": "100644", "type": "blob", "sha": None} for p in paths]
     st, body = api("POST", "/repos/%s/%s/git/trees" % (OWNER, REPO),
                    {"base_tree": base_tree, "tree": tree})

@@ -202,6 +202,66 @@ def style_cn(k):
     return _STYLE_CN.get(k, k)
 
 
+def _mavg(u, d):
+    """当日全市场平均涨跌幅（广度代理）"""
+    rows = u.by_date.get(d) or []
+    ps = [b.get("pct") or 0 for _, b in rows if b.get("pct") is not None]
+    return sum(ps) / len(ps) if ps else 0.0
+
+
+def switch_backtest(u, look=5):
+    """历史风格切换后的真实市场表现：检测每次切换，统计其后 look 日累计平均涨跌。
+
+    输出：切换总次数、后 look 日上涨占比、按「切换去向风格」分组的胜率/平均收益。
+    用途：推送里给出「历史上每次风格切换后 5 日，XX 风格占优概率 N%」的实证支撑。
+    """
+    ds = u.dates
+    if len(ds) < look + 5:
+        return None
+    verdicts = {}
+    for d in ds:
+        m = metrics_for_date(u, d)
+        if m:
+            verdicts[d] = verdict_of(m)["style"]
+    switches = []
+    for d in ds:
+        if d not in verdicts:
+            continue
+        p = u.prev_date(d)
+        if p and p in verdicts and verdicts[p] != verdicts[d]:
+            switches.append((d, verdicts[p], verdicts[d]))
+    if len(switches) < 5:
+        return None
+    stats = {}
+    for d, frm, to in switches:
+        idx = ds.index(d)
+        cum = 0.0
+        for k in range(1, look + 1):
+            if idx + k < len(ds):
+                cum += _mavg(u, ds[idx + k])
+        s = stats.setdefault(to, {"n": 0, "up": 0, "sum": 0.0, "rets": []})
+        s["n"] += 1
+        if cum > 0:
+            s["up"] += 1
+        s["sum"] += cum
+        s["rets"].append(round(cum, 2))
+    by_to = {}
+    for to, s in stats.items():
+        by_to[to] = {
+            "n": s["n"],
+            "up_rate": round(100.0 * s["up"] / s["n"], 1) if s["n"] else None,
+            "avg_ret": round(s["sum"] / s["n"], 2) if s["n"] else None,
+        }
+    all_cum = [sum(s["rets"]) for s in stats.values()]
+    return {
+        "n": len(switches),
+        "look": look,
+        "up_rate": round(100.0 * sum(s["up"] for s in stats.values()) / len(switches), 1),
+        "avg_ret": round(sum(all_cum) / len(switches), 2),
+        "by_target": by_to,
+    }
+
+
 def summary_lines(sty):
     """推送用紧凑摘要"""
     if not sty:

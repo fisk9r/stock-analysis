@@ -37,6 +37,11 @@ import margin
 import etfflow
 import holdings
 import data_guard
+import seats
+import theme
+import signals
+import chanlun
+import signal_backtest
 
 ROOT = store.ROOT
 DIST = os.path.join(ROOT, "dist")
@@ -766,6 +771,69 @@ def run(date_override=None, dedup_close=False):
     except Exception as e:
         log("  ETF 资金流失败（无网/解析异常，跳过）：%r" % e)
         data["etfflow"] = None
+
+    # ---- 引擎快照落库（供连续信号/席位画像积累历史）----
+    try:
+        if data.get("margin"):
+            store.save_snapshot(con, "margin", data["margin"])
+        if data.get("etfflow"):
+            store.save_snapshot(con, "etfflow", data["etfflow"])
+        if data.get("lhbseats"):
+            store.save_snapshot(con, "lhbseats", data["lhbseats"])
+        if data.get("riskcal"):
+            store.save_snapshot(con, "riskcal", data["riskcal"])
+    except Exception as e:
+        log("  引擎快照落库失败（不影响主流程）：%r" % e)
+
+    # ---- 游资席位画像（东财席位明细，实证可用；失败跳过）----
+    try:
+        data["seats"] = seats.scan(date)
+        if data["seats"]:
+            store.upsert_seats(con, date, data["seats"]["hits"])
+            stats = seats.win_rates(con) if con else {}
+            data["seats"]["stats"] = stats
+            log("  游资席位：命中 %d 条知名席位动作" % data["seats"]["n_hits"])
+    except Exception as e:
+        log("  游资席位失败（无网/解析异常，跳过）：%r" % e)
+        data["seats"] = None
+
+    # ---- 题材主线识别（基于涨停股概念/行业聚类）----
+    try:
+        data["theme"] = theme.scan(date, data.get("limit_ups") or [])
+        if data["theme"]:
+            theme.persist(con, date, data["theme"])
+            sig = theme.theme_signal(con)
+            data["theme"]["signal"] = sig
+            log("  题材主线：%s（%d 只贡献）" % (data["theme"]["main_theme"], int(data["theme"]["main_n"])))
+    except Exception as e:
+        log("  题材主线失败（不影响主流程）：%r" % e)
+        data["theme"] = None
+
+    # ---- 连续信号（两融/ETF/龙虎榜/席位重复扫货的历史硬信号）----
+    try:
+        data["signals"] = signals.compute_all(con)
+        if data["signals"]:
+            log("  连续信号：%d 类有效" % len(data["signals"]))
+    except Exception as e:
+        log("  连续信号失败（不影响主流程）：%r" % e)
+        data["signals"] = None
+
+    # ---- 缠论结构（对推荐池/涨停股跑笔-中枢-背驰-买卖点）----
+    try:
+        rec_codes = [it.get("code") for it in (data.get("recommend", {}).get("all") or [])]
+        lu_codes = [it.get("code") for it in (data.get("limit_ups") or [])]
+        cl_codes = list(dict.fromkeys(rec_codes + lu_codes))[:60]
+        if cl_codes:
+            data["chanlun"] = chanlun.scan(u, con, cl_codes, top_n=12)
+            if data["chanlun"]:
+                nb = len(data["chanlun"].get("buys") or [])
+                log("  缠论：分析 %d 只，买点候选 %d 只"
+                    % (data["chanlun"]["n_analyzed"], nb))
+        else:
+            data["chanlun"] = None
+    except Exception as e:
+        log("  缠论分析失败（不影响主流程）：%r" % e)
+        data["chanlun"] = None
 
 
     # ---- 持股监测：预测未来 + 持续跟踪（无持仓配置则为空）----

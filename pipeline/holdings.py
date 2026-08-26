@@ -34,6 +34,28 @@ CREATE TABLE IF NOT EXISTS holdings_track(
 
 
 # ============================================================== 持仓读取
+def _norm_pos(it):
+    """把一条持仓记录归一化为标准 dict；非法则返回 None。"""
+    if not isinstance(it, dict):
+        return None
+    code = str(it.get("code") or "").strip()
+    if not code.isdigit() or len(code) != 6:
+        return None
+    try:
+        cost = float(it.get("cost") or 0) or None
+    except Exception:
+        cost = None
+    try:
+        shares = float(it.get("shares") or 0) or None
+    except Exception:
+        shares = None
+    return {"code": code, "name": (it.get("name") or "").strip(),
+            "cost": cost, "shares": shares,
+            "date": (it.get("date") or "").strip(),
+            "note": (it.get("note") or "").strip(),
+            "watch": bool(it.get("watch")) or cost is None}
+
+
 def load_positions():
     """-> [{code,name,cost,shares,date,note,watch}]，容错：缺字段自动补全。"""
     raw = None
@@ -54,27 +76,7 @@ def load_positions():
     items = raw.get("positions") if isinstance(raw, dict) else raw
     if not isinstance(items, list):
         return []
-    out = []
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        code = str(it.get("code") or "").strip()
-        if not code.isdigit() or len(code) != 6:
-            continue
-        try:
-            cost = float(it.get("cost") or 0) or None
-        except Exception:
-            cost = None
-        try:
-            shares = float(it.get("shares") or 0) or None
-        except Exception:
-            shares = None
-        out.append({"code": code, "name": (it.get("name") or "").strip(),
-                    "cost": cost, "shares": shares,
-                    "date": (it.get("date") or "").strip(),
-                    "note": (it.get("note") or "").strip(),
-                    "watch": bool(it.get("watch")) or cost is None})
-    return out
+    return [p for p in (_norm_pos(it) for it in items) if p]
 
 
 # ============================================================== 状态分桶 + 实测前瞻
@@ -364,14 +366,27 @@ def history(con, code=None, limit=60):
 
 
 # ============================================================== 主入口
-def monitor(u, date, con, code2boards=None):
-    pos = load_positions()
+def monitor(u, date, con, positions=None, code2boards=None, persist=True):
+    """持仓体检主入口。
+
+    positions: 外部传入的持仓列表（用户级个性化推送用）；为 None 时回退到
+                load_positions()（共享 config/holdings.json 或 HOLDINGS_JSON）。
+    persist:   True 时把当日快照写入 holdings_track（共享默认持仓用，用于跨日预警）；
+               False 时仅计算展示（用户级个性化推送用，避免不同用户的持仓互相覆盖 track 表）。
+    """
+    if positions is None:
+        pos = load_positions()
+    else:
+        pos = [p for p in (_norm_pos(it) for it in positions) if p]
     if not pos:
         return {"date": date, "enabled": False, "n": 0, "items": [],
                 "msg": "未配置持仓（config/holdings.json 为空或不存在）"}
     fwd = forward_stats(u, con)
     rows = [diagnose(u, date, p, fwd, code2boards) for p in pos]
-    alerts, prev_date = _track(con, date, rows)
+    if persist:
+        alerts, prev_date = _track(con, date, rows)
+    else:
+        alerts, prev_date = [], None
     good = [r for r in rows if r.get("ok")]
     held = [r for r in good if not r.get("watch")]
     tot_mv = sum(r["mv"] for r in held if r.get("mv")) or None
