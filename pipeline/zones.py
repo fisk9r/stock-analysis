@@ -198,9 +198,9 @@ def analyze_one(code, name, bars, cost=None):
     }
 
 
-def scan(u, date, codes=None, extra_names=None, costs=None, top_n=24):
+def scan(u, date, codes=None, extra_names=None, costs=None, top_n=30):
     """对给定代码（默认=关注池）跑区间分析。u 需提供 .bars 与 .stocks。
-    costs: {code: 成本价}，可选；有成本者输出盈亏提示。"""
+    costs: {code: 成本价}，可选；有成本者输出盈亏提示，且**永不截断丢弃**。"""
     if codes is None:
         import watchlist
         codes, extra_names = watchlist.load_watch_codes()
@@ -219,6 +219,11 @@ def scan(u, date, codes=None, extra_names=None, costs=None, top_n=24):
     order = {"破位卖出": 0, "加仓提示": 1, "回踩买入区": 2,
              "跌破警示": 3, "逼近卖出": 4, "突破持有": 5, "正常持有": 6}
     items.sort(key=lambda x: (order.get(x["action"], 9), -(x.get("pct") or 0)))
+    # 带持仓成本的股票（用户自选）永远保留，不因 top_n 截断丢弃
+    prio = [x for x in items if x.get("cost")]
+    others = [x for x in items if not x.get("cost")][:max(0, top_n - len(prio))]
+    kept = prio + others
+    kept.sort(key=lambda x: (order.get(x["action"], 9), -(x.get("pct") or 0)))
     alerts = {
         "sell": [x for x in items if x["action"] == "破位卖出"],
         "add": [x for x in items if x["action"] in ("加仓提示", "回踩买入区")],
@@ -227,7 +232,7 @@ def scan(u, date, codes=None, extra_names=None, costs=None, top_n=24):
     return {
         "date": date,
         "n": len(items),
-        "items": items[:top_n],
+        "items": kept,
         "alerts": alerts,
         "alert_n": len(alerts["sell"]) + len(alerts["add"]),
     }
@@ -261,8 +266,15 @@ def summary_lines(zr):
         out.append("🎯 逼近卖点：" + "；".join(
             "%s 卖区 %s~%s" % (tag(x), x["sell_zone"][0], x["sell_zone"][1])
             for x in tps[:4]))
+    costed = [x for x in (zr.get("items") or []) if x.get("cost")]
+    if costed:
+        out.append("📌 自选持仓：" + "；".join(
+            "%s 现%.2f 成本%.2f %+.1f%%（买%s~%s/卖%s~%s）"
+            % (x["name"], x["close"], x["cost"], x.get("pnl_pct") or 0,
+               x["buy_zone"][0], x["buy_zone"][1], x["sell_zone"][0], x["sell_zone"][1])
+            for x in costed[:4]))
     normal = [x for x in (zr.get("items") or [])
-              if x["action"] == "正常持有"][:3]
+              if x["action"] == "正常持有" and not x.get("cost")][:3]
     if normal and not out:
         out.append("🎯 区间速览：" + "、".join(
             "%s 买%s~%s/卖%s~%s" % (tag(x), x["buy_zone"][0], x["buy_zone"][1],
