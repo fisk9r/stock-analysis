@@ -1592,6 +1592,19 @@ def _fmt_close_compact(data, url="", mode="close"):
     _engine_sec("**🎯 买卖区间与操作提示**", _zn, "zones", cap=6,
                 mark=(_MARK_ZN, _MARK_ZN_END))
 
+    # 数据完整性体检（仅异常时告警，健康时静默，避免刷屏）
+    ig = data.get("integrity")
+    if ig and not ig.get("ok") and (ig.get("warnings") or ig.get("scale_anomalies")):
+        L.append("")
+        L.append("**🔍 数据完整性告警**")
+        for w in (ig.get("warnings") or [])[:6]:
+            L.append("- ⚠ %s" % w)
+        sa = ig.get("scale_anomalies") or []
+        if sa:
+            L.append("- 量纲错乱交易日：%s" % ",".join(b.get("date", "?") for b in sa[:8]))
+        L.append("- 样本 %s 天，最新 %s 覆盖 %s 只"
+                 % (ig.get("trade_days"), ig.get("last_date"), ig.get("last_day_rows")))
+
     if mode == "close_again":
         hrep = data.get("holdings")
         alerts = (hrep or {}).get("alerts") or []

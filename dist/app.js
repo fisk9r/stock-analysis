@@ -235,6 +235,22 @@
     h += narrativeCard();
     h += qualityCard();
 
+    /* 数据完整性体检（构建期自检：覆盖度/量纲错乱/价格异常） */
+    var IG = D.integrity;
+    if (IG) {
+      var igOk = IG.ok;
+      var igCol = igOk ? C.up : C.down;
+      var igWarn = (IG.warnings || []).map(function (w) {
+        return '<div class="kv" style="margin:3px 0">⚠ ' + E(w) + '</div>';
+      }).join('');
+      var igBody = '<div style="margin-bottom:8px"><span class="bd" style="background:' + igCol + '22;color:' + igCol + ';border-color:' + igCol + '">' +
+        (igOk ? '✅ 数据完整性体检通过' : '⚠️ 数据完整性告警') + '</span></div>' +
+        '<div class="kv" style="margin-bottom:6px">交易日样本 <b>' + n2(IG.trade_days) + '</b> 天 ｜ 最新交易日 <b>' + E(IG.last_date || '—') + '</b> ｜ 覆盖 <b>' + n2(IG.last_day_rows) + '</b> 只' +
+        (IG.scale_anomalies && IG.scale_anomalies.length ? ' ｜ 量纲异常 <b style="color:' + C.down + '">' + IG.scale_anomalies.length + '</b> 日' : '') + '</div>' +
+        (igWarn || '<div class="note" style="color:var(--muted)">覆盖度、量纲、价格校验均正常</div>');
+      h += card('🔍 数据完整性体检', igBody, '构建期自动自检：最新交易日覆盖度、量纲错乱(股/手·分/元混用放大百倍)、价格异常(收盘≤0/高<低)。异常会污染量比/热度/持仓缩量判断，发现即告警');
+    }
+
     /* KPI */
     var lus = D.limit_ups || [];
     var maxlb = lus.reduce(function (a, b) { return Math.max(a, b.streak || 0); }, 0);
