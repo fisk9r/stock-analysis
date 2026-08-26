@@ -514,6 +514,40 @@
       h += card('⭐ 关注股雷达', wch, '自选（notify.json watch）与持仓关注股（holdings.json watch=true）的每日信号：涨停/跌停/炸板/破位为急讯，置顶展示');
     }
 
+    /* 买卖区间与操作提示 */
+    var ZN = D.zones;
+    if (ZN && ZN.items && ZN.items.length) {
+      var AL = ZN.alerts || {};
+      var zActCol = function (a) {
+        return a === '破位卖出' ? C.down
+          : (a === '加仓提示' || a === '回踩买入区') ? C.up
+          : (a === '逼近卖出' || a === '突破持有') ? C.warn : '';
+      };
+      var zch = '<div class="chips" style="margin-bottom:8px">' +
+        '<span class="chip">覆盖 <b>' + n2(ZN.n) + '</b> 只</span>' +
+        (AL.sell && AL.sell.length ? '<span class="chip" style="border-color:' + C.down + ';color:' + C.down + '">🛑 破位 <b>' + AL.sell.length + '</b></span>' : '') +
+        (AL.add && AL.add.length ? '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + '">➕ 加仓 <b>' + AL.add.length + '</b></span>' : '') +
+        (AL.take_profit && AL.take_profit.length ? '<span class="chip" style="border-color:' + C.warn + ';color:' + C.warn + '">🎯 逼近卖点 <b>' + AL.take_profit.length + '</b></span>' : '') +
+        '</div>';
+      var zRows = ZN.items.map(function (z1) {
+        var ac = zActCol(z1.action);
+        var zoneCell = function (zz) {
+          return '<td class="r" style="font-variant-numeric:tabular-nums">' + f(zz[0], 2) + ' ~ ' + f(zz[1], 2) + '</td>';
+        };
+        var reasonHtml = (z1.reasons || []).slice(0, 2).map(function (r9) { return E(r9); }).join('；');
+        return '<tr><td><b>' + E(z1.name || '') + '</b> <span class="muted">' + E(z1.code) + '</span>' +
+          (z1.chanlun_buy ? ' <span class="bd" style="border-color:' + C.up + ';color:' + C.up + ';font-size:10px;padding:0 4px">缠论' + E(z1.chanlun_buy) + '</span>' : '') + '</td>' +
+          '<td class="r"><b>' + f(z1.close, 2) + '</b> <span class="muted" style="font-size:10px">' + (z1.pct >= 0 ? '+' : '') + f(z1.pct, 2) + '%</span></td>' +
+          zoneCell(z1.buy_zone) +
+          zoneCell(z1.sell_zone) +
+          '<td class="r" style="color:' + C.down + '">' + f(z1.stop, 2) + '</td>' +
+          '<td><span class="bd" style="' + (ac ? 'border-color:' + ac + ';color:' + ac + ';' : '') + 'font-size:10px;padding:0 4px;white-space:nowrap">' + E(z1.action) + '</span>' +
+          (reasonHtml ? '<div class="muted" style="font-size:10px;margin-top:2px">' + reasonHtml + '</div>' : '') + '</td></tr>';
+      });
+      zch += table([{ t: '标的' }, { t: '现价', a: 'r' }, { t: '买入区间', a: 'r' }, { t: '卖出区间', a: 'r' }, { t: '止损', a: 'r' }, { t: '操作提示' }], zRows);
+      h += card('🎯 买卖区间', zch, '买入区间=关键支撑（缠论中枢下沿/MA20/MA60/近20日低点）±扰动带；卖出区间=关键压力（中枢上沿/近60日高点）±扰动带。破位卖出与加仓提示置顶，止损=min(买区下沿, 近10日低点)。区间为技术参考，非投资建议');
+    }
+
     /* 推荐池胜率回溯 */
     var RP = D.recperf;
     if (RP && RP.dates && RP.dates.length) {

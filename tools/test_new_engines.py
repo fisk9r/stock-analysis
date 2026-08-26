@@ -229,6 +229,86 @@ def main():
     check("有历史时 compute_all 走通非空路径",
           sig2 is None or isinstance(sig2, dict), "-> %s" % (list(sig2) if sig2 else sig2))
 
+    # ---------------- 7. 买卖区间与操作提示 ----------------
+    print("\n[7] 买卖区间 zones")
+    import zones
+
+    def mk_bars(closes, vols=None):
+        out = []
+        for i, c in enumerate(closes):
+            prev = closes[i - 1] if i else c
+            out.append({"d": "d%03d" % i, "o": prev, "h": max(prev, c) * 1.005,
+                        "l": min(prev, c) * 0.995, "c": c,
+                        "v": (vols[i] if vols else 1000)})
+        return out
+
+    # 7a 结构不变量：真实数据上跑 30 只
+    rs = []
+    for c in codes[:30]:
+        bs = bars_map.get(c)
+        if not bs or len(bs) < 40:
+            continue
+        r = zones.analyze_one(c, "T" + c, bs[-120:])
+        if r:
+            rs.append(r)
+    check("zones.analyze_one 出结果", len(rs) >= 20, "-> %d/30" % len(rs))
+    ok_struct = all(
+        r["buy_zone"][0] < r["buy_zone"][1]
+        and r["sell_zone"][0] < r["sell_zone"][1]
+        and r["stop"] <= r["buy_zone"][0]
+        and r["action"] in ("破位卖出", "加仓提示", "回踩买入区", "跌破警示",
+                            "逼近卖出", "突破持有", "正常持有")
+        for r in rs)
+    check("区间结构不变量(买区/卖区有序、止损≤买区下沿)", ok_struct)
+    acts = {}
+    for r in rs:
+        acts[r["action"]] = acts.get(r["action"], 0) + 1
+    print("      动作分布:", acts)
+
+    # 7b 构造性破位：高位横盘后连续放量下杀 → 必触发「破位卖出」
+    base = [10.0 + (0.15 if i % 3 == 0 else -0.12) for i in range(55)]
+    crash = [9.6, 9.2, 8.7, 8.4]
+    bars_crash = mk_bars(base + crash,
+                         vols=[1000] * 55 + [1800, 2200, 2600, 3000])
+    rc = zones.analyze_one("TEST1", "破位样本", bars_crash)
+    check("放量下杀必判「破位卖出」", bool(rc) and rc["action"] == "破位卖出",
+          "-> %s %s" % (rc and rc["action"], rc and rc["reasons"][:2]))
+    check("破位时止损位为有效保护线(≤买区下沿)",
+          bool(rc) and rc["stop"] <= rc["buy_zone"][0], "-> stop=%s" % (rc and rc["stop"]))
+
+    # 7c 缩量回踩：上升后缩量小回调 → 不应误报「破位卖出」
+    up = [10 * (1 + 0.004 * i) for i in range(50)]
+    pull = [up[-1] * 0.995, up[-1] * 0.99, up[-1] * 0.985]
+    bars_pull = mk_bars(up + pull, vols=[2000] * 50 + [1500, 1300, 1100])
+    rp_ = zones.analyze_one("TEST2", "回踩样本", bars_pull)
+    check("缩量回踩不误报破位",
+          bool(rp_) and rp_["action"] in ("加仓提示", "回踩买入区", "跌破警示", "正常持有"),
+          "-> %s" % (rp_ and rp_["action"],))
+
+    # 7d 数据不足容错
+    check("K线<40 返回 None", zones.analyze_one("T3", "x", mk_bars([10] * 20)) is None)
+
+    # 7e scan 整体 + summary_lines
+    class _FakeU:
+        bars = {c: (bars_map.get(c) or []) for c in codes[:8]}
+        stocks = {}
+    zr = zones.scan(_FakeU(), "9999-12-31", codes[:8],
+                    extra_names={codes[0]: "甲"})
+    check("zones.scan 返回结构完整",
+          bool(zr) and set(["items", "alerts", "alert_n"]) <= set(zr),
+          "-> n=%s" % (zr and zr["n"]))
+    named = [x for x in (zr.get("items") or []) if x["code"] == codes[0]]
+    check("extra_names 名称注入生效", bool(named) and named[0]["name"] == "甲",
+          "-> %s" % (named and named[0]["name"],))
+    lines_z = zones.summary_lines(zr)
+    check("summary_lines 非空列表", isinstance(lines_z, list) and bool(lines_z),
+          "-> %s" % lines_z[:2])
+
+    # 7f 渲染层冒烟：app.js 已含新卡片关键字（文件级断言）
+    appjs = open(os.path.join(ROOT, "dist", "app.js"), encoding="utf-8").read()
+    for kw in ["买卖区间", "D.zones", "buy_zone", "sell_zone"]:
+        check("app.js 含 %s" % kw, kw in appjs)
+
     print("\n================ 结果 ================")
     print("PASS=%d  FAIL=%d" % (PASS, FAIL))
     return 0 if FAIL == 0 else 1

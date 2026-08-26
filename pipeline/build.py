@@ -42,6 +42,7 @@ import theme
 import signals
 import chanlun
 import signal_backtest
+import zones
 
 ROOT = store.ROOT
 DIST = os.path.join(ROOT, "dist")
@@ -837,6 +838,23 @@ def run(date_override=None, dedup_close=False):
     except Exception as e:
         log("  缠论分析失败（不影响主流程）：%r" % e)
         data["chanlun"] = None
+
+    # ---- 买卖区间与操作提示（关注池优先，其次推荐池头部）----
+    try:
+        import watchlist as _wl
+        w_codes, w_names = _wl.load_watch_codes()
+        rec_codes_z = [it.get("code") for it in (data.get("recommend", {}).get("all") or [])]
+        z_codes = list(dict.fromkeys((w_codes or []) + (rec_codes_z or [])))[:40]
+        data["zones"] = zones.scan(u, date, z_codes, extra_names=w_names) if z_codes else None
+        if data["zones"]:
+            log("  买卖区间：覆盖 %d 只，破位 %d / 加仓 %d / 逼近卖点 %d"
+                % (data["zones"]["n"],
+                   len(data["zones"]["alerts"].get("sell") or []),
+                   len(data["zones"]["alerts"].get("add") or []),
+                   len(data["zones"]["alerts"].get("take_profit") or [])))
+    except Exception as e:
+        log("  买卖区间失败（不影响主流程）：%r" % e)
+        data["zones"] = None
 
 
     # ---- 持股监测：预测未来 + 持续跟踪（无持仓配置则为空）----

@@ -1371,6 +1371,8 @@ def _fmt_close_compact(data, url="", mode="close"):
     _engine_sec("**📡 连续信号**", _sg, "signals", cap=5)
     import chanlun as _cl
     _engine_sec("**🌀 缠论结构**", _cl, "chanlun", cap=6)
+    import zones as _zn
+    _engine_sec("**🎯 买卖区间与操作提示**", _zn, "zones", cap=6)
 
     if mode == "close_again":
         hrep = data.get("holdings")
