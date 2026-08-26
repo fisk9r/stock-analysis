@@ -1,0 +1,14 @@
+{
+  "name": "A股盘后复盘分析系统",
+  "short_name": "盘后复盘",
+  "description": "零依赖 A 股盘后分析：13 视图 + 全天候市场监测",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#0b0f1a",
+  "theme_color": "#0b0f1a",
+  "orientation": "portrait-primary",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
