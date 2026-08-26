@@ -845,16 +845,45 @@ def run(date_override=None, dedup_close=False):
         w_codes, w_names = _wl.load_watch_codes()
         rec_codes_z = [it.get("code") for it in (data.get("recommend", {}).get("all") or [])]
         z_codes = list(dict.fromkeys((w_codes or []) + (rec_codes_z or [])))[:40]
-        # 成本映射：来自持仓配置（如 owen 的中化国际 cost=7.18）
-        z_costs = {}
+        # 持仓配置：成本映射 + 周期标注 + 建仓锚点（用于时间到期预警）
+        z_costs, z_horizons, z_elapsed = {}, {}, {}
         try:
-            for p in (holdings.load_positions() or []):
-                if p.get("code") and p.get("cost"):
-                    z_costs[p["code"]] = p["cost"]
+            poss = holdings.load_positions() or []
+            # 确保 holdings_track 表存在，便于按首条记录取锚点（空表返回 None 不报错）
+            try:
+                con.executescript(holdings.TRACK_SCHEMA)
+            except Exception:
+                pass
+            for p in poss:
+                c = p.get("code")
+                if not c:
+                    continue
+                if p.get("cost"):
+                    z_costs[c] = p["cost"]
+                if p.get("horizon") in ("短线", "中线", "长线"):
+                    z_horizons[c] = p["horizon"]
+                # 锚点：建仓日期优先；否则 holdings_track 首条日期
+                anchor = p.get("date")
+                if not anchor:
+                    try:
+                        r = con.execute(
+                            "SELECT MIN(date) FROM holdings_track WHERE code=?", (c,)).fetchone()
+                        anchor = r[0] if r else None
+                    except Exception:
+                        anchor = None
+                if anchor:
+                    try:
+                        el = sum(1 for d in u.dates if anchor <= d <= date) - \
+                             (1 if anchor in u.dates else 0)
+                        if el > 0:
+                            z_elapsed[c] = el
+                    except Exception:
+                        pass
         except Exception:
             pass
         data["zones"] = (zones.scan(u, date, z_codes, extra_names=w_names,
-                                    costs=z_costs) if z_codes else None)
+                                    costs=z_costs, horizons=z_horizons,
+                                    elapsed_map=z_elapsed) if z_codes else None)
         if data["zones"]:
             log("  买卖区间：覆盖 %d 只，破位 %d / 加仓 %d / 逼近卖点 %d"
                 % (data["zones"]["n"],

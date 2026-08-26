@@ -53,6 +53,7 @@ def _norm_pos(it):
             "cost": cost, "shares": shares,
             "date": (it.get("date") or "").strip(),
             "note": (it.get("note") or "").strip(),
+            "horizon": (it.get("horizon") or "").strip(),
             "watch": bool(it.get("watch")) or cost is None}
 
 

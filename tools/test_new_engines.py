@@ -316,6 +316,60 @@ def main():
     check("深亏触发预警语", bool(rc2) and any("预警线" in x for x in rc2["reasons"]),
           "-> %s" % (rc2 and rc2["reasons"][:1],))
 
+    # ---------------- 9. 周期标注 / 多周期目标 / 时间到期预警 ----------------
+    print("\n[9] 周期标注与多周期目标 zones")
+    r9 = zones.analyze_one(codes[0], "T9", bars_map[codes[0]][-120:])
+    check("analyze_one 含 horizon/targets",
+          bool(r9) and r9.get("horizon") in zones.HORIZONS
+          and set(["短线", "中线", "长线"]) <= set((r9.get("targets") or {})),
+          "-> horizon=%s" % (r9 and r9.get("horizon")))
+    tk = (r9 or {}).get("targets") or {}
+    check("三档目标价格>0且时间窗正确",
+          tk.get("短线", {}).get("price", 0) > 0
+          and tk.get("中线", {}).get("price", 0) > 0
+          and tk.get("长线", {}).get("price", 0) > 0
+          and tk["短线"]["days"] == 5 and tk["中线"]["days"] == 15
+          and tk["长线"]["days"] == 60,
+          "-> 短%.2f/中%.2f/长%.2f" % (tk["短线"]["price"], tk["中线"]["price"], tk["长线"]["price"]))
+
+    # 9b 自动建议周期合法
+    hv = [10 * (1 + 0.03 * ((i % 2) * 2 - 1)) for i in range(60)]
+    rhv = zones.analyze_one("THV", "高波动", mk_bars(hv))
+    check("自动建议周期合法", bool(rhv) and rhv["horizon"] in zones.HORIZONS,
+          "-> %s" % (rhv and rhv["horizon"]))
+
+    # 9c _time_status 单测（已达/破位/到期/观察/无锚点）
+    tg = {"短线": {"price": 10.0, "days": 5, "pct": 5},
+          "中线": {"price": 12.0, "days": 15, "pct": 20},
+          "长线": {"price": 15.0, "days": 60, "pct": 50}}
+    s_ok, a_ok = zones._time_status("短线", tg, 10.5, 9.0, 2)
+    check("时间状态-已达目标", "✅" in (s_ok or ""))
+    s_br, a_br = zones._time_status("短线", tg, 8.5, 9.0, 2)
+    check("时间状态-破位优先", "🛑" in (s_br or ""))
+    s_exp, a_exp = zones._time_status("短线", tg, 9.5, 9.0, 6)
+    check("时间状态-到期未达", "⏰" in (s_exp or ""))
+    s_obs, a_obs = zones._time_status("短线", tg, 9.5, 9.0, 2)
+    check("时间状态-观察中(非提醒)", "⏳" in (s_obs or "") and not a_obs)
+    s_none, a_none = zones._time_status("短线", tg, 9.5, 9.0, None)
+    check("无锚点返回 None", s_none is None and a_none is False)
+
+    # 9d scan 透传 horizon/elapsed -> 到期进入 alerts.time
+    class _FU:
+        bars = {c: (bars_map.get(c) or []) for c in codes[:6]}
+        stocks = {}
+        dates = []
+    zr9 = zones.scan(_FU(), "9999-12-31", codes[:6],
+                     costs={codes[0]: 10.0}, horizons={codes[0]: "短线"},
+                     elapsed_map={codes[0]: 99})
+    check("scan 返回含 alerts.time", bool(zr9) and "time" in zr9["alerts"])
+    check("到期票进入 alerts.time", bool(zr9["alerts"]["time"]),
+          "-> %d 条" % len(zr9["alerts"]["time"]))
+
+    # 9e 渲染关键字
+    sl9 = zones.summary_lines(zr9)
+    check("summary_lines 含周期/目标", isinstance(sl9, list) and bool(sl9)
+          and any(("目标" in l or "[" in l) for l in sl9), "-> %s" % sl9[:2])
+
     # ================= 8. 分用户推送路由（notifier 纯函数，离线可测） =================
     print("\n---- 8. 分用户推送路由 ----")
     sys.path.insert(0, os.path.join(ROOT, "pipeline"))

@@ -526,18 +526,29 @@
       var zch = '<div class="chips" style="margin-bottom:8px">' +
         '<span class="chip">覆盖 <b>' + n2(ZN.n) + '</b> 只</span>' +
         (AL.sell && AL.sell.length ? '<span class="chip" style="border-color:' + C.down + ';color:' + C.down + '">🛑 破位 <b>' + AL.sell.length + '</b></span>' : '') +
+        (AL.time && AL.time.length ? '<span class="chip" style="border-color:' + C.warn + ';color:' + C.warn + '">⏰ 周期到期 <b>' + AL.time.length + '</b></span>' : '') +
         (AL.add && AL.add.length ? '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + '">➕ 加仓 <b>' + AL.add.length + '</b></span>' : '') +
         (AL.take_profit && AL.take_profit.length ? '<span class="chip" style="border-color:' + C.warn + ';color:' + C.warn + '">🎯 逼近卖点 <b>' + AL.take_profit.length + '</b></span>' : '') +
         '</div>';
+      var HCOL = { '短线': C.warn, '中线': C.up, '长线': '#5b9bff' };
       var zRows = ZN.items.map(function (z1) {
         var ac = zActCol(z1.action);
+        var hc = HCOL[z1.horizon] || '';
         var zoneCell = function (zz) {
           return '<td class="r" style="font-variant-numeric:tabular-nums">' + f(zz[0], 2) + ' ~ ' + f(zz[1], 2) + '</td>';
         };
-        var reasonHtml = (z1.reasons || []).slice(0, 2).map(function (r9) { return E(r9); }).join('；');
+        var t = z1.targets || {};
+        var tgtLine = '<div class="muted" style="font-size:10px;margin-top:2px">目标 ' +
+          (t['短线'] ? '短' + f(t['短线'].price, 2) + '(' + t['短线'].days + 'd) ' : '') +
+          (t['中线'] ? '中' + f(t['中线'].price, 2) + '(' + t['中线'].days + 'd) ' : '') +
+          (t['长线'] ? '长' + f(t['长线'].price, 2) + '(' + t['长线'].days + 'd)' : '') + '</div>';
+        var tsColor = z1.time_alert ? C.warn : C.muted || '#9aa';
+        var tsLine = z1.time_status ? '<div style="font-size:10px;margin-top:2px;color:' + tsColor + '">' + E(z1.time_status) + '</div>' : '';
+        var reasonHtml = (z1.reasons || []).slice(0, 1).map(function (r9) { return E(r9); }).join('；');
         var costHtml = (z1.cost ? '<div style="font-size:10px;margin-top:2px">成本 ' + f(z1.cost, 2) +
           ' <span style="color:' + (z1.pnl_pct >= 0 ? C.up : C.down) + '">' + (z1.pnl_pct >= 0 ? '+' : '') + f(z1.pnl_pct, 1) + '%</span></div>' : '');
         return '<tr><td><b>' + E(z1.name || '') + '</b> <span class="muted">' + E(z1.code) + '</span>' +
+          (z1.horizon ? ' <span class="bd" style="border-color:' + hc + ';color:' + hc + ';font-size:10px;padding:0 4px">' + E(z1.horizon) + '</span>' : '') +
           (z1.chanlun_buy ? ' <span class="bd" style="border-color:' + C.up + ';color:' + C.up + ';font-size:10px;padding:0 4px">缠论' + E(z1.chanlun_buy) + '</span>' : '') +
           costHtml + '</td>' +
           '<td class="r"><b>' + f(z1.close, 2) + '</b> <span class="muted" style="font-size:10px">' + (z1.pct >= 0 ? '+' : '') + f(z1.pct, 2) + '%</span></td>' +
@@ -545,10 +556,11 @@
           zoneCell(z1.sell_zone) +
           '<td class="r" style="color:' + C.down + '">' + f(z1.stop, 2) + '</td>' +
           '<td><span class="bd" style="' + (ac ? 'border-color:' + ac + ';color:' + ac + ';' : '') + 'font-size:10px;padding:0 4px;white-space:nowrap">' + E(z1.action) + '</span>' +
+          tgtLine + tsLine +
           (reasonHtml ? '<div class="muted" style="font-size:10px;margin-top:2px">' + reasonHtml + '</div>' : '') + '</td></tr>';
       });
-      zch += table([{ t: '标的' }, { t: '现价', a: 'r' }, { t: '买入区间', a: 'r' }, { t: '卖出区间', a: 'r' }, { t: '止损', a: 'r' }, { t: '操作提示' }], zRows);
-      h += card('🎯 买卖区间', zch, '买入区间=关键支撑（缠论中枢下沿/MA20/MA60/近20日低点）±扰动带；卖出区间=关键压力（中枢上沿/近60日高点）±扰动带。破位卖出与加仓提示置顶，止损=min(买区下沿, 近10日低点)。区间为技术参考，非投资建议');
+      zch += table([{ t: '标的' }, { t: '现价', a: 'r' }, { t: '买入区间', a: 'r' }, { t: '卖出区间', a: 'r' }, { t: '止损', a: 'r' }, { t: '操作/周期目标' }], zRows);
+      h += card('🎯 买卖区间', zch, '每只标注短线/中线/长线周期；目标价：短线=卖出区上沿(~5交易日)、中线=量度涨幅(~15日)、长线=长期高位(~60日)。「时间状态」对已持仓且建仓锚点可溯的票生效：到期未达目标或破位会提示了结/减仓，达目标提示止盈。区间为技术参考，非投资建议');
     }
 
     /* 推荐池胜率回溯 */

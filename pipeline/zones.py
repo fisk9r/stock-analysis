@@ -18,6 +18,18 @@
 - 突破持有：放量站上卖出区间上沿（让利润奔跑，但记录止盈线已抬升）
 - 正常持有：其余
 
+周期标注（短线/中线/长线）+ 多周期目标价 + 时间到期预警（核心增强）：
+- 每只股票标注周期：持仓可显式指定 horizon（holdings.json）；否则按波动率/趋势自动建议。
+- 三档技术目标价（时间窗）：
+    短线目标 = 卖出区间上沿（即时压力）         ~5  交易日
+    中线目标 = 当前价 + (60日振幅)×0.618 或前高   ~15 交易日
+    长线目标 = 250日高（无则60日高×1.2）或×1.3  ~60 交易日
+- 时间状态 time_status（仅对「有建仓锚点且为持仓」的票计算 elapsed 后生效）：
+    已达目标：现价≥目标×0.99 → ✅ 可分批止盈
+    破位优先：现价≤止损 → 🛑 按周期纪律审视/减仓
+    到期未达：elapsed ≥ 时间窗 → ⏰ 建议限期了结/降仓释放资金
+    观察中  ：其余 → ⏳ 目标X，剩N天
+
 纯标准库 + 复用 pipeline.chanlun。
 """
 import os
@@ -27,6 +39,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chanlun  # noqa: E402
 
 ACTION_URGENT = ("破位卖出", "加仓提示")
+HORIZONS = ("短线", "中线", "长线")
+# 各周期默认时间窗（交易日）
+HORIZON_DAYS = {"短线": 5, "中线": 15, "长线": 60}
 
 
 def _sma(closes, n):
@@ -58,9 +73,68 @@ def _pick_level(cands, close, direction, min_gap=0.02):
     return (t + "(已越)", v)
 
 
-def analyze_one(code, name, bars, cost=None):
-    """bars: [{d,o,h,l,c,v,...}] 升序；cost: 持仓成本价（可选，带出盈亏提示）。
-    返回区间字典或 None（数据不足）。"""
+def suggest_horizon(close, ma20, ma60, amp20, slope60, cur_pct):
+    """按波动率/趋势自动建议周期（用于无显式标注的票）。"""
+    if amp20 is None:
+        amp20 = 0.0
+    if ma20 and close >= ma20 and (amp20 > 0.18 or (slope60 or 0) > 0.12):
+        return "短线"
+    if amp20 < 0.09 and abs(slope60 or 0) < 0.05:
+        return "长线"
+    return "中线"
+
+
+def compute_targets(close, ma20, slope60, hi60, lo20, hi250, sell_hi):
+    """返回三档技术目标价 {周期: {price, days, pct}}。"""
+    short = round(sell_hi, 2)
+    amp = (hi60 - lo20) if (hi60 and lo20) else close * 0.15
+    mid = close + amp * 0.618
+    if (slope60 or 0) < 0:  # 弱势只看前高收复
+        mid = max(mid, hi60)
+    mid = max(mid, hi60 * 1.02) if hi60 else mid
+    base = hi250 if hi250 else (hi60 * 1.2 if hi60 else close * 1.2)
+    long = max(base, close * 1.3)
+    if long < mid:
+        long = mid  # 保证长线目标不低于中线目标
+    return {
+        "短线": {"price": short, "days": HORIZON_DAYS["短线"],
+                 "pct": round((short / close - 1) * 100, 1) if close else 0},
+        "中线": {"price": round(mid, 2), "days": HORIZON_DAYS["中线"],
+                 "pct": round((mid / close - 1) * 100, 1) if close else 0},
+        "长线": {"price": round(long, 2), "days": HORIZON_DAYS["长线"],
+                 "pct": round((long / close - 1) * 100, 1) if close else 0},
+    }
+
+
+def _time_status(horizon, targets, close, stop, elapsed):
+    """生成时间状态字符串与是否需提醒。elapsed 为 None 时返回 (None, False)。"""
+    if elapsed is None:
+        return (None, False)
+    t = targets.get(horizon) or {}
+    th = t.get("price")
+    dh = t.get("days")
+    if not th or not dh:
+        return (None, False)
+    if close >= th * 0.99:
+        return ("✅ 已达%s目标 %.2f，可分批止盈" % (horizon, th), True)
+    if stop is not None and close <= stop * 1.005:
+        return ("🛑 已破位（%.2f≤止损%.2f），按%s纪律应审视/减仓"
+                % (close, stop, horizon), True)
+    if elapsed >= dh:
+        return ("⏰ %s预期到期（持有%d天）：目标%.2f未达，建议限期了结/降仓释放资金"
+                % (horizon, elapsed, th), True)
+    return ("⏳ %s观察中：目标%.2f（剩%d天），现价%.2f"
+            % (horizon, th, dh - elapsed, close), False)
+
+
+def analyze_one(code, name, bars, cost=None, horizon=None, elapsed=None):
+    """bars: [{d,o,h,l,c,v,...}] 升序；cost: 持仓成本价（可选）；
+    horizon: 显式周期（"短线"/"中线"/"长线"，可选，缺省自动建议）；
+    elapsed: 建仓锚点起已持有交易日数（可选，用于时间到期预警）。
+
+    返回区间字典或 None（数据不足）。新增字段：
+      horizon, targets{短/中/长}, elapsed, time_status, time_alert。
+    """
     if not bars or len(bars) < 40 or not bars[-1].get("c"):
         return None
     cur = bars[-1]
@@ -76,6 +150,14 @@ def analyze_one(code, name, bars, cost=None):
     vols = [float(b.get("v") or 0) for b in bars]
     v5 = sum(vols[-6:-1]) / 5 if sum(vols[-6:-1]) else 0
     vol_ratio = (vols[-1] / v5) if v5 else None
+
+    # 目标位所需的高/低/振幅
+    hi60 = max(float(b["h"]) for b in bars[-60:]) if len(bars) >= 2 else close
+    lo20 = min(float(b["l"]) for b in bars[-20:]) if len(bars) >= 2 else close
+    hi250 = max(float(b["h"]) for b in bars[-250:]) if len(bars) >= 250 else None
+    amp20 = ((max(float(b["h"]) for b in bars[-20:]) -
+              min(float(b["l"]) for b in bars[-20:])) / close) if close else 0
+    slope60 = ((ma20 - ma60) / ma60) if (ma20 and ma60) else 0
 
     # 缠论中枢（可选增强，失败不影响区间生成）
     zs_up = zs_low = None
@@ -178,6 +260,20 @@ def analyze_one(code, name, bars, cost=None):
         else:
             reasons.insert(0, "成本 %.2f，浮盈 %+.1f%%" % (cost, pnl_pct))
 
+    # ---- 周期标注 + 多周期目标价 + 时间到期预警 ----
+    horizon_explicit = horizon in HORIZONS
+    final_horizon = horizon if horizon_explicit else suggest_horizon(
+        close, ma20, ma60, amp20, slope60, cur.get("pct") or 0)
+    targets = compute_targets(close, ma20, slope60, hi60, lo20, hi250, sell_hi)
+    # 时间到期预警仅对「持仓」（有成本 或 显式标注周期）生效，
+    # 避免对纯关注股误发「了结/降仓」建议。
+    if elapsed is not None and (cost is not None or horizon_explicit):
+        time_status, time_alert = _time_status(final_horizon, targets, close, stop, elapsed)
+    else:
+        time_status, time_alert = None, False
+    if time_alert and time_status:
+        reasons.append(time_status)
+
     return {
         "code": code, "name": name,
         "close": round(close, 2),
@@ -195,23 +291,35 @@ def analyze_one(code, name, bars, cost=None):
         "action": action,
         "urgent": urgent,
         "reasons": reasons,
+        # ---- 新增：周期 / 多目标 / 时间状态 ----
+        "horizon": final_horizon,
+        "targets": targets,
+        "elapsed": elapsed,
+        "time_status": time_status,
+        "time_alert": time_alert,
     }
 
 
-def scan(u, date, codes=None, extra_names=None, costs=None, top_n=30):
+def scan(u, date, codes=None, extra_names=None, costs=None,
+         horizons=None, elapsed_map=None, top_n=30):
     """对给定代码（默认=关注池）跑区间分析。u 需提供 .bars 与 .stocks。
-    costs: {code: 成本价}，可选；有成本者输出盈亏提示，且**永不截断丢弃**。"""
+    costs: {code: 成本价}，可选；有成本者输出盈亏提示，且**永不截断丢弃**。
+    horizons: {code: "短线"/"中线"/"长线"} 显式周期（可选）。
+    elapsed_map: {code: int} 建仓锚点起已持有交易日数（可选，用于时间到期预警）。"""
     if codes is None:
         import watchlist
         codes, extra_names = watchlist.load_watch_codes()
     extra_names = extra_names or {}
     costs = costs or {}
+    horizons = horizons or {}
+    elapsed_map = elapsed_map or {}
     items = []
     for c in codes:
         bs = [b for b in (u.bars.get(c) or []) if b["d"] <= date]
         name = extra_names.get(c) or (u.stocks.get(c, {}) or {}).get("name") or ""
         try:
-            r = analyze_one(c, name, bs, cost=costs.get(c))
+            r = analyze_one(c, name, bs, cost=costs.get(c),
+                            horizon=horizons.get(c), elapsed=elapsed_map.get(c))
         except Exception:
             r = None
         if r:
@@ -228,36 +336,55 @@ def scan(u, date, codes=None, extra_names=None, costs=None, top_n=30):
         "sell": [x for x in items if x["action"] == "破位卖出"],
         "add": [x for x in items if x["action"] in ("加仓提示", "回踩买入区")],
         "take_profit": [x for x in items if x["action"] in ("逼近卖出", "突破持有")],
+        "time": [x for x in items if x.get("time_alert")],
     }
     return {
         "date": date,
         "n": len(items),
         "items": kept,
         "alerts": alerts,
-        "alert_n": len(alerts["sell"]) + len(alerts["add"]),
+        "alert_n": len(alerts["sell"]) + len(alerts["add"]) + len(alerts["time"]),
     }
 
 
 def summary_lines(zr):
-    """收盘推送用摘要：先急讯后常规。"""
+    """收盘推送用摘要：先急讯后常规。含周期/多目标/时间到期提示。"""
     if not zr:
         return []
 
     def tag(x):
-        """名称后附持仓盈亏（有成本者）。"""
+        """名称后附周期与持仓盈亏（有成本者）。"""
         p = x.get("pnl_pct")
-        return "%s(成本%.2f %+.1f%%)" % (x["name"], x["cost"], p) \
-            if x.get("cost") and p is not None else x["name"]
+        seg = x["name"]
+        if x.get("horizon"):
+            seg += "[%s]" % x["horizon"]
+        if x.get("cost") and p is not None:
+            seg += "(成本%.2f %+.1f%%)" % (x["cost"], p)
+        return seg
+
+    def tgt_str(x):
+        t = x.get("targets") or {}
+        parts = []
+        for h in HORIZONS:
+            d = t.get(h)
+            if d:
+                parts.append("%s%.2f(%d日)" % (h[0], d["price"], d["days"]))
+        return "/".join(parts)
 
     out = []
     al = zr.get("alerts") or {}
     sells = al.get("sell") or []
     adds = al.get("add") or []
     tps = al.get("take_profit") or []
+    times = al.get("time") or []
     if sells:
         out.append("🛑 破位卖出：" + "；".join(
             "%s 破 %.2f，止损 %.2f" % (tag(x), x["buy_zone"][0], x["stop"])
             for x in sells[:4]))
+    if times:
+        out.append("⏰ 周期到期/达标：" + "；".join(
+            "%s %s" % (tag(x), (x.get("time_status") or "").replace("⏰ ", "").replace("✅ ", ""))
+            for x in times[:4]))
     if adds:
         out.append("➕ 加仓提示：" + "；".join(
             "%s 买区 %s~%s" % (tag(x), x["buy_zone"][0], x["buy_zone"][1])
@@ -269,16 +396,15 @@ def summary_lines(zr):
     costed = [x for x in (zr.get("items") or []) if x.get("cost")]
     if costed:
         out.append("📌 自选持仓：" + "；".join(
-            "%s 现%.2f 成本%.2f %+.1f%%（买%s~%s/卖%s~%s）"
-            % (x["name"], x["close"], x["cost"], x.get("pnl_pct") or 0,
-               x["buy_zone"][0], x["buy_zone"][1], x["sell_zone"][0], x["sell_zone"][1])
+            "%s 现%.2f %+.1f%% 目标[%s]" % (tag(x), x["close"], x.get("pnl_pct") or 0,
+                                           tgt_str(x))
             for x in costed[:4]))
     normal = [x for x in (zr.get("items") or [])
               if x["action"] == "正常持有" and not x.get("cost")][:3]
     if normal and not out:
         out.append("🎯 区间速览：" + "、".join(
-            "%s 买%s~%s/卖%s~%s" % (tag(x), x["buy_zone"][0], x["buy_zone"][1],
-                                    x["sell_zone"][0], x["sell_zone"][1])
+            "%s[%s] 买%s~%s/卖%s~%s" % (tag(x), x.get("horizon"), x["buy_zone"][0],
+                                        x["buy_zone"][1], x["sell_zone"][0], x["sell_zone"][1])
             for x in normal))
     if not out:
         out.append("关注池暂无有效区间数据")

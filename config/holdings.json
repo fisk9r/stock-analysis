@@ -1,0 +1,9 @@
+{
+  "positions": [
+    {"code": "600396", "name": "华电辽能", "watch": true, "note": "冷后领涨观察"},
+    {"code": "002580", "name": "圣阳股份", "watch": true, "note": "趋势跟踪"},
+    {"code": "003032", "name": "传智教育", "watch": true, "note": "异动跟踪"},
+    {"code": "600721", "name": "百花医药", "watch": true, "note": "冷后轮动观察"},
+    {"code": "600500", "name": "中化国际", "cost": 7.18, "watch": true, "owner": "owen", "horizon": "中线", "note": "owen自选·购入价7.18·中线回血型"}
+  ]
+}
