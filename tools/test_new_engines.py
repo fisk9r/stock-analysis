@@ -316,6 +316,53 @@ def main():
     check("深亏触发预警语", bool(rc2) and any("预警线" in x for x in rc2["reasons"]),
           "-> %s" % (rc2 and rc2["reasons"][:1],))
 
+    # ================= 8. 分用户推送路由（notifier 纯函数，离线可测） =================
+    print("\n---- 8. 分用户推送路由 ----")
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    import notifier as _nf
+
+    marked = ("📊 **市场概览**\n- 上证 +0.5%\n\n"
+              + _nf._MARK_WL + "\n**⭐ 关注股雷达**\n- 中化国际 涨停\n" + _nf._MARK_WL_END
+              + "\n\n🔥 **推荐 Top3**\n- ✅ **1. 甲**(主板) · 价值 **80分**\n\n"
+              + _nf._MARK_ZN + "\n**🎯 买卖区间与操作提示**\n🛑 破位卖出：中化国际\n"
+              + _nf._MARK_ZN_END + "\n\n📡 **连续信号**\n- 两融连续3日流出\n")
+    stripped = _nf._strip_personal_sections(marked)
+    check("剥离个人分区", "中化国际" not in stripped
+          and "关注股雷达" not in stripped and "买卖区间" not in stripped)
+    check("保留公共分区", "市场概览" in stripped and "推荐 Top3" in stripped
+          and "连续信号" in stripped)
+    check("无残留控制符", "\x01" not in stripped)
+    check("无标记文本原样返回",
+          _nf._strip_personal_sections("普通\n- 行") == "普通\n- 行")
+
+    zx = {"items": [{"code": "600500", "name": "中化国际", "close": 5.32, "cost": 7.18,
+                     "pnl_pct": -25.9, "buy_zone": [5.10, 5.32],
+                     "sell_zone": [6.20, 6.45], "stop": 4.95, "action": "破位卖出"}]}
+    appx = _nf._personal_appendix({"zones": zx}, {"600500"})
+    check("附录含自选与破位提示", "你的自选跟踪" in appx and "中化国际" in appx
+          and "破位卖出" in appx)
+    check("无关代码不生成附录", _nf._personal_appendix({"zones": zx}, {"000001"}) == "")
+
+    recs_t = [{"worth_score": 30, "p_continue": 40},
+              {"worth_score": 85, "p_continue": 70},
+              {"worth_score": 60, "p_continue": 55},
+              {"worth_score": 75, "p_continue": 65}]
+    order = [x["worth_score"] for x in sorted(
+        recs_t, key=lambda x: (0 if _nf._dual_ok(x) else 1,
+                               -(x.get("worth_score") or 0),
+                               -(x.get("p_continue") or 0)))]
+    check("推荐排序 双确认置顶+分数降序", order == [85, 75, 60, 30], "-> %s" % order)
+
+    check("_chan_user 绑定解析",
+          _nf._chan_user({"key": "K", "user": "owner"}) == "owner"
+          and _nf._chan_user({"key": "K"}) is None
+          and _nf._chan_user("SCTxxx") is None)
+    check("_bound_uids 汇集绑定",
+          _nf._bound_uids({"wechat_serverchan": {"sendkey": [
+              {"key": "A", "user": "owner"}, {"key": "B"}]},
+              "wechat_pushplus": {"token": [{"token": "T", "user": "mmmmmm"}]}})
+          == {"owner", "mmmmmm"})
+
     print("\n================ 结果 ================")
     print("PASS=%d  FAIL=%d" % (PASS, FAIL))
     return 0 if FAIL == 0 else 1

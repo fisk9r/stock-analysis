@@ -336,7 +336,11 @@ def send_wechat_pushplus(cfg, title, text):
     ok_list, fail_list = [], []
     for token in tokens:
         try:
-            payload = {"token": token, "title": title, "content": text}
+            payload = {"token": token, "title": title, "content": text,
+                       # 关键：默认 html 模板会把 **粗体**、- 列表当纯文本裸显（极难读）；
+                       # 切到 markdown 模板后分区标题/加粗/列表全部正常渲染。
+                       # 可在 notify.json wechat_pushplus.template 覆盖。
+                       "template": cfg.get("template") or "markdown"}
             # topic 为群组编码，缺省走一对一推送；配置了才带上
             topic = cfg.get("topic")
             if topic:
@@ -562,9 +566,11 @@ def _recently_pushed(mode, cooldown_min):
 def load_users():
     """读取 config/allowed_users.json（CI 运行时由 ALLOWED_USERS_JSON 密钥解密后写出，明文）。
 
-    返回 [ {id, name, sc, pp, holdings}, ... ]；忽略无关字段。无文件/解析失败返回 []。
+    返回 [ {id, name, sc, pp, holdings, watch}, ... ]；忽略无关字段。无文件/解析失败返回 []。
     sc = 该用户的 ServerChan 推送密钥；pp = 该用户的 PushPlus 令牌；
-    holdings = 该用户的个性化持仓列表（与 config/holdings.json 同构）。"""
+    holdings = 该用户的个性化持仓列表（与 config/holdings.json 同构）；
+    watch = 该用户自选关注股代码列表（6位数字字符串）——「谁关注谁收到」，管理员(owner)
+    的关注清单另从 config/holdings.json 的 watch=true 条目自动并入。"""
     p = os.path.join(ROOT, "config", "allowed_users.json")
     if not os.path.exists(p):
         return []
@@ -579,12 +585,18 @@ def load_users():
     for u in us:
         if not isinstance(u, dict):
             continue
+        _watch = []
+        for c in (u.get("watch") if isinstance(u.get("watch"), list) else []):
+            s = str(c).strip()
+            if s.isdigit() and len(s) == 6:
+                _watch.append(s)
         out.append({
             "id": u.get("id"),
             "name": u.get("name") or u.get("id"),
             "sc": (u.get("sc") or "").strip(),
             "pp": (u.get("pp") or "").strip(),
             "holdings": u.get("holdings") if isinstance(u.get("holdings"), list) else None,
+            "watch": _watch,
         })
     return out
 
@@ -614,6 +626,147 @@ def _log_personal_send(pmode, title):
                     "mode": pmode, "title": title})
 
 
+# ===================== 分用户推送路由（2026-08-26 用户拍板） =====================
+# 规则：管理员(owner)关注的股票只推给管理员自己；其余用户只收到自己关注股票的提示。
+# 实现通道绑定：notify.json 里的 sendkey/token 条目可加 "user":"<id>" 字段，
+#   如 {"key":"SCTxxx","name":"我","user":"owner"}。
+# 绑定通道收到的正文 = 公共盘面（剥离 ⭐关注股雷达 / 🎯买卖区间 两个个人分区）
+#                   + 「📌 你的自选跟踪」专属附录（按该用户 watch∪holdings 过滤）。
+# 未绑定通道照旧收完整广播（兼容旧配置）；完全无绑定时行为与旧版一致。
+ADMIN_UID = "owner"
+
+# 个人分区哨兵标记（不可见控制字符包裹，仅内部使用；_strip_personal_sections 按此成对删除）
+_MARK_WL = "\x01SAWL\x02"
+_MARK_WL_END = "\x01/SAWL\x02"
+_MARK_ZN = "\x01SAZN\x02"
+_MARK_ZN_END = "\x01/SAZN\x02"
+
+
+def _chan_user(entry):
+    """读取通道条目的可选 user 绑定（notify.json 中 {"key":...,"name":...,"user":"owner"}）。"""
+    if isinstance(entry, dict):
+        v = entry.get("user")
+        return str(v).strip() if v else None
+    return None
+
+
+def _bound_uids(cfg):
+    """notify.json 中所有绑定了 user 的通道对应的用户 id 集合。"""
+    out = set()
+    sc = (cfg or {}).get("wechat_serverchan") or {}
+    for field in ("sendkey", "sendkeys"):
+        v = sc.get(field)
+        for x in (v if isinstance(v, list) else [v] if v else []):
+            u = _chan_user(x)
+            if u:
+                out.add(u)
+    pp = (cfg or {}).get("wechat_pushplus") or {}
+    tv = pp.get("token")
+    for x in (tv if isinstance(tv, list) else [tv] if tv else []):
+        u = _chan_user(x)
+        if u:
+            out.add(u)
+    return out
+
+
+def _has_any_binding(cfg):
+    """notify.json 中是否存在至少一条绑定了 user 的通道。"""
+    sc = (cfg or {}).get("wechat_serverchan") or {}
+    for field in ("sendkey", "sendkeys"):
+        v = sc.get(field)
+        for x in (v if isinstance(v, list) else [v] if v else []):
+            if _chan_user(x):
+                return True
+    pp = (cfg or {}).get("wechat_pushplus") or {}
+    tv = pp.get("token")
+    for x in (tv if isinstance(tv, list) else [tv] if tv else []):
+        if _chan_user(x):
+            return True
+    return False
+
+
+def _strip_personal_sections(text):
+    """按哨兵标记剥离个人分区（⭐关注股雷达 / 🎯买卖区间），并清掉孤立标记行。
+    无标记的正文（如 ServerChan 精简版）原样返回——它本就不含这两个分区。"""
+    if not text or "\x01" not in text:
+        return text
+    import re as _re
+    _m1, _m1e = _re.escape(_MARK_WL), _re.escape(_MARK_WL_END)
+    _m2, _m2e = _re.escape(_MARK_ZN), _re.escape(_MARK_ZN_END)
+    out = _re.sub(_m1 + r"[\s\S]*?" + _m1e + r"\n?", "", text)
+    out = _re.sub(_m2 + r"[\s\S]*?" + _m2e + r"\n?", "", out)
+    out = _re.sub(r"\x01/?SA(?:WL|ZN)\x02\n?", "", out)  # 孤立标记兜底
+    out = _re.sub(r"\n{3,}", "\n\n", out)
+    return out.rstrip() + "\n" if out.strip() else ""
+
+
+def _admin_watch_codes():
+    """管理员关注清单 = config/holdings.json 里 watch=true 的代码（含持仓观察）。"""
+    try:
+        import holdings as _hd
+        pos = _hd.load_positions() or []
+        out = []
+        for p in pos:
+            if isinstance(p, dict) and p.get("code") and (
+                    p.get("watch") or p.get("enabled")):
+                s = str(p["code"]).strip()
+                if s.isdigit() and len(s) == 6:
+                    out.append(s)
+        return out
+    except Exception:
+        return []
+
+
+def _effective_watch(uu):
+    """用户的完整关注集：ALLOWED_USERS_JSON 的 watch ∪ holdings 代码；owner 额外并入
+    config/holdings.json 的管理员关注清单。"""
+    codes = set(uu.get("watch") or [])
+    for c in (uu.get("holdings") or []):
+        s = c.strip() if isinstance(c, str) else \
+            (str(c.get("code")) if isinstance(c, dict) and c.get("code") else "")
+        if s.isdigit() and len(s) == 6:
+            codes.add(s)
+    if (uu.get("id") or "") == ADMIN_UID:
+        codes.update(_admin_watch_codes())
+    return codes
+
+
+def _personal_appendix(data, codes):
+    """按用户关注集过滤 zones 区间提示，拼「📌 你的自选跟踪」附录；无命中返回空串。"""
+    if not codes:
+        return ""
+    z = (data or {}).get("zones") or {}
+    items = [x for x in (z.get("items") or []) if x.get("code") in codes]
+    if not items:
+        return ""
+    try:
+        import zones as _zmod
+        al = {"sell": [x for x in items if x.get("action") == "破位卖出"],
+              "add": [x for x in items if x.get("action") in ("加仓提示", "回踩买入区")],
+              "take_profit": [x for x in items if x.get("action") == "逼近卖出"]}
+        z2 = dict(z)
+        z2["items"], z2["alerts"] = items, al
+        lines = list(_zmod.summary_lines(z2) or [])
+    except Exception:
+        lines = []
+    normal = [x for x in items if x.get("action") == "正常持有"][:3]
+    for x in normal:
+        if len(lines) >= 8:
+            break
+        try:
+            lines.append("%s(%s) 收%s · 买%s~%s / 卖%s~%s / 止损%s [%s]"
+                         % (x.get("name"), x["code"], x["close"],
+                            x["buy_zone"][0], x["buy_zone"][1],
+                            x["sell_zone"][0], x["sell_zone"][1],
+                            x["stop"], x["action"]))
+        except Exception:
+            pass
+    if not lines:
+        return ""
+    return "\n\n📌 **你的自选跟踪**（仅推送给你）\n" + \
+        "\n".join("- " + l for l in lines[:8])
+
+
 def _push_personalized(data, mode, users, analysis_date, results):
     """为每个『配置了专属通道 + 持股』的用户单独发送个性化消息（市場概述 + 其本人持股体检）。
 
@@ -634,6 +787,9 @@ def _push_personalized(data, mode, users, analysis_date, results):
         positions = uu.get("holdings")
         if isinstance(positions, str):
             positions = [positions]
+        if not isinstance(positions, list) or not positions:
+            # 只有自选清单（watch）而无持仓记录的用户，同样按其自选做个性化跟踪
+            positions = uu.get("watch")
         if not isinstance(positions, list) or not positions:
             continue
         # 归一化：前端/ALLOWED_USERS_JSON 里 holdings 是「代码字符串列表」（如 ["600519","000001"]），
@@ -761,6 +917,21 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
     _claimed_pp = {u["pp"] for u in _users_with_pos if u.get("pp")}
     _personal_modes = (mode in ("close", "close_again"))
     cfg_shared = _filter_claimed(cfg, _claimed_sc, _claimed_pp) if _personal_modes else cfg
+    # ---- 分用户路由准备：绑定用户表 + 是否剥离广播中的个人分区 ----
+    _users_by_id = {}
+    for _u in _users:
+        if _u.get("id"):
+            _users_by_id[_u["id"]] = _u
+    _uids = _bound_uids(cfg)
+    for _uid in _uids:
+        if _uid not in _users_by_id:
+            _users_by_id[_uid] = {"id": _uid, "name": _uid,
+                                  "watch": [], "holdings": None}
+    # 只有存在「绑定了且确有自选」的通道才剥离个人分区；否则保持旧版完整广播不丢信息。
+    # 剥离后：未绑定通道收纯盘面，绑定通道各自附加「📌 你的自选跟踪」（见发送循环）。
+    _strip_personal = bool(_uids) and mode in (
+        "close", "close_again", "preauction", "auction", "weekend") \
+        and any(_effective_watch(_users_by_id[u]) for u in _uids)
     title = summary.get("title", "A股盘后复盘")
     text = summary.get("text", "")
     results = []
@@ -783,11 +954,12 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
         print("[notifier] 文件痕迹写入失败：%r" % e)
 
     # 2) 通道推送（按 mode 路由）：
-    #    ServerChan 固定 2~3 条/工作日 = 盘前(preauction) + 收盘(close)，
-    #    均为关键节点，占 ServerChan 单 key 5 条/天额度中的 2 条；
-    #    PushPlus 随时推送（200 条/天几乎不限）：盘中异动(anomaly)、竞价(auction)、
-    #    竞价后开盘前异动(open_anomaly)、周末发酵(weekend)、止损(stoploss)、复盘补发(close_again)
-    #    ——个股/关注股类检测推送全部走 PushPlus（用户拍板：绝不挤占 SC 关键节点名额）。
+    #    ServerChan 固定 4 条/工作日 = 盘前(preauction) + 竞价(auction) + 收盘(close)
+    #    + 复盘补发(close_again)，占单 key 5 条/天额度、余 1 条机动；周末(weekend)在
+    #    周日发、独立计额度。2026-08-26 用户拍板：这四类全部以 SC 为主通道。
+    #    PushPlus 随时推送（200 条/天几乎不限）：盘中异动(anomaly)、竞价后开盘前异动
+    #    (open_anomaly)、恐慌(panic)、妖股(yaogu)、止损(stoploss)
+    #    ——个股/关注股类检测推送全部走 PushPlus（绝不挤占 SC 关键节点名额）。
     _all = [
         ("wechat_serverchan", send_wechat_serverchan, cfg_shared.get("wechat_serverchan")),
         ("wechat_pushplus", send_wechat_pushplus, cfg_shared.get("wechat_pushplus")),
@@ -795,21 +967,15 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
         ("telegram", send_telegram, cfg_shared.get("telegram")),
         ("email", send_email, cfg_shared.get("email")),
     ]
-    if mode == "close_again":
-        # 复盘补发让出 ServerChan 额度（单 key 5条/天）：复盘非生死节点，
-        # 优先走 PushPlus/企微，把 SC 名额留给盘前/竞价/收盘这 3 个关键节点；
-        # 仅当这些通道都未配置时才退回 SC，避免漏发。
-        _has_alt = any(cfg_shared.get(n) for n in ("wechat_pushplus", "wecom", "telegram", "email"))
-        _prefer = (["wechat_pushplus", "wecom", "telegram", "email"]
-                   if _has_alt else
-                   ["wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"])
-    elif mode in ("anomaly", "auction", "open_anomaly", "weekend", "panic", "yaogu", "stoploss"):
-        # 盘中异动 / 竞价确认 / 竞价后开盘前异动 / 周末发酵 / 止损即时：
+    if mode in ("anomaly", "open_anomaly", "panic", "yaogu", "stoploss"):
+        # 盘中异动 / 竞价后开盘前异动 / 恐慌 / 妖股 / 止损即时：
         # 全部走 PushPlus 系（200 条/天几乎不限），绝不占 ServerChan 的固定额度。
         # open_anomaly 属个股竞价异动检测——用户拍板：个股/关注股检测一律 PushPlus。
         _prefer = ["wechat_pushplus", "wecom", "telegram", "email"]
     else:
-        # 盘前 / 收盘：ServerChan 为主（关键节点），PushPlus 冗余兜底。
+        # 盘前 / 竞价确认 / 收盘 / 复盘补发 / 周末发酵：ServerChan 为主（2026-08-26 用户拍板：
+        # 工作日固定 4 条 = 盘前+竞价+收盘+复盘，占单 key 5 条/天额度、余 1 条机动；
+        # 周末消息在周日发，独立计额度不冲突），PushPlus 冗余兜底。
         _prefer = ["wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"]
     dispatchers = [(n, fn, c) for (n, fn, c) in _all if n in _prefer and c]
     for name, fn, c in dispatchers:
@@ -825,8 +991,47 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
                     body = sc_text
                 if len(body) > SC_CAP:
                     body = body[:SC_CAP - 120].rstrip() + "\n…（完整版见 PushPlus 与站点看板）"
-            ok, msg = fn(c, title, body)
-            results.append("%s:%s" % (name, msg))
+            if _strip_personal:
+                # 分用户逐条发送：未绑定通道收纯盘面；绑定通道 = 盘面 + 本人自选跟踪。
+                base_body = _strip_personal_sections(body)
+                if name == "wechat_serverchan":
+                    entries = []
+                    for field in ("sendkey", "sendkeys"):
+                        v = c.get(field)
+                        entries += (v if isinstance(v, list) else [v] if v else [])
+                else:
+                    v = c.get("token")
+                    entries = (v if isinstance(v, list) else [v] if v else [])
+                ok_n, tot, parts = 0, 0, []
+                for x in entries:
+                    if not x:
+                        continue
+                    tot += 1
+                    uid = _chan_user(x)
+                    sub_body = base_body
+                    if uid and uid in _users_by_id:
+                        sub_body = base_body + _personal_appendix(
+                            data, _effective_watch(_users_by_id[uid]))
+                    if name == "wechat_serverchan":
+                        if len(sub_body) > SC_CAP:
+                            sub_body = sub_body[:SC_CAP - 120].rstrip() + \
+                                "\n…（完整版见 PushPlus 与站点看板）"
+                        sub_cfg = {"sendkey": [x]}
+                    else:
+                        sub_cfg = {"token": [x]}
+                        if isinstance(c, dict) and c.get("topic"):
+                            sub_cfg["topic"] = c["topic"]
+                    ok1, m1 = fn(sub_cfg, title, sub_body)
+                    if ok1:
+                        ok_n += 1
+                    lbl = (x.get("name") if isinstance(x, dict) else None) or "?"
+                    parts.append("%s:%s" % (lbl, "OK" if ok1 else str(m1)[-40:]))
+                    time.sleep(1)  # 同通道逐条间隔，防频控
+                results.append("%s:分用户路由 成功%d/%d（%s）"
+                               % (name, ok_n, tot, "；".join(parts)))
+            else:
+                ok, msg = fn(c, title, body)
+                results.append("%s:%s" % (name, msg))
         except Exception as e:
             results.append("%s:失败 %r" % (name, e))
     if not any(r.startswith(("wechat", "wecom", "telegram", "email")) for r in results):
@@ -1130,7 +1335,11 @@ def _fmt_close_compact(data, url="", mode="close"):
     # ---- 推荐 Top5（双重认证前置：评分+晋级率双达标排前并打 ✅，未认证殿后） ----
     L.append("")
     recs = _top_recs(rec.get("core"), rec.get("relay"), rec.get("all"), 5) if _on("rec") else []
-    recs = sorted(recs, key=lambda x: 0 if _dual_ok(x) else 1)
+    # 双确认置顶；组内严格按买入价值分降序、再按晋级率降序
+    # （修复：此前只分组不排序，组内保持 core→relay 原始顺序，出现「低分在前」的分数错乱）
+    recs = sorted(recs, key=lambda x: (0 if _dual_ok(x) else 1,
+                                       -(x.get("worth_score") or 0),
+                                       -(x.get("p_continue") or 0)))
     if recs:
         n_gated = sum(1 for x in recs if _dual_ok(x))
         L.append("🔥 **推荐 Top%d**%s"
@@ -1310,14 +1519,17 @@ def _fmt_close_compact(data, url="", mode="close"):
             wlines = _wlmod.summary_lines(wl) if wl else []
             if wlines:
                 L.append("")
+                L.append(_MARK_WL)
                 L.append("**⭐ 关注股雷达**")
                 for x in wlines[:3]:
                     L.append("- %s" % x)
+                L.append(_MARK_WL_END)
         except Exception:
             pass
 
     # ---- 新引擎分区（统一：先收集 lines，标题只加一次；行已带 "- " 则不重复加）----
-    def _engine_sec(title, mod, key, cap=4):
+    # mark=(起标记, 止标记)：个人分区（zones）用，供 _strip_personal_sections 成对剥离
+    def _engine_sec(title, mod, key, cap=4, mark=None):
         d = data.get(key)
         if not d:
             return
@@ -1326,9 +1538,13 @@ def _fmt_close_compact(data, url="", mode="close"):
             if not lines:
                 return
             L.append("")
+            if mark:
+                L.append(mark[0])
             L.append(title)
             for ln in lines[:cap]:
                 L.append(ln if ln.startswith("- ") else "- %s" % ln)
+            if mark:
+                L.append(mark[1])
         except Exception:
             pass
 
@@ -1372,7 +1588,8 @@ def _fmt_close_compact(data, url="", mode="close"):
     import chanlun as _cl
     _engine_sec("**🌀 缠论结构**", _cl, "chanlun", cap=6)
     import zones as _zn
-    _engine_sec("**🎯 买卖区间与操作提示**", _zn, "zones", cap=6)
+    _engine_sec("**🎯 买卖区间与操作提示**", _zn, "zones", cap=6,
+                mark=(_MARK_ZN, _MARK_ZN_END))
 
     if mode == "close_again":
         hrep = data.get("holdings")
