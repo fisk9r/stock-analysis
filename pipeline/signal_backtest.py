@@ -34,6 +34,13 @@ def _bars_between(con, code, d0, d1):
     return rows
 
 
+def _bars_forward(con, code, date, fwd):
+    """自 date（含）起取 fwd+1 根K线，只取所需条数，避免全表扫到末日。"""
+    return con.execute(
+        "SELECT date,close FROM bars WHERE code=? AND date>=? ORDER BY date LIMIT ?",
+        (code, date, fwd + 1)).fetchall()
+
+
 def backtest_events(con, events, fwd=1, min_n=8):
     """events: [(date, code), ...]；fwd: 持有 N 个交易日。
     返回 {n, win_rate, avg_ret, win_n, loss_n} 或 None（样本不足）。
@@ -45,9 +52,8 @@ def backtest_events(con, events, fwd=1, min_n=8):
         c0 = _close_on(con, code, date)
         if c0 is None or c0 <= 0:
             continue
-        # 取 date 之后第 fwd 个交易日的收盘价
-        rows = _bars_between(con, code, date, "2999-12-31")
-        # rows 含 date 本身，需跳过自身取第 fwd+1 个
+        # 取 date 之后第 fwd 个交易日的收盘价（rows 含 date 本身）
+        rows = _bars_forward(con, code, date, fwd)
         if len(rows) <= fwd:
             continue
         c1 = rows[fwd][1]

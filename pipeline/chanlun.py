@@ -113,18 +113,52 @@ def build_bi(fractals):
     return [tuple(b) for b in bi]
 
 
+def bi_segments(bi):
+    """笔端点序列 → 每一笔所张成的价格区间 [(high, low), ...]。
+
+    注意：bi 的元素是「端点」（idx,type,price,high,low），其 high==low==分型价，
+    单个端点是退化的点，不构成区间。一笔 = 相邻两个端点之间的线段，
+    其区间为 [min(两端价), max(两端价)]。中枢必须基于线段区间求重叠。
+    """
+    segs = []
+    for i in range(len(bi) - 1):
+        a, b = bi[i][2], bi[i + 1][2]
+        segs.append((max(a, b), min(a, b)))
+    return segs
+
+
+def _overlap(segs):
+    """若给定线段区间全部重叠，返回 (upper, lower)，否则 None。"""
+    upper = min(s[0] for s in segs)
+    lower = max(s[1] for s in segs)
+    return (upper, lower) if lower < upper else None
+
+
 def find_zhongshu(bi):
-    """取末尾若干笔，求首个≥3笔区间重叠 → (upper, lower) 或 None。窗口 3~7 笔。"""
-    for size in (3, 4, 5, 6, 7):
-        if len(bi) < size:
+    """最近一个笔中枢：≥3 笔线段区间的公共重叠 → (upper, lower) 或 None。
+
+    先看末尾 3 段是否重叠；若重叠则尽量向前扩展（最多 7 段）以得到完整中枢；
+    若末尾 3 段不重叠（说明刚离开中枢），则向前滑动窗口最多 4 次寻找最近中枢。
+    """
+    segs = bi_segments(bi)
+    if len(segs) < 3:
+        return None
+    for back in range(0, 5):                     # 窗口末端向前滑动
+        end = len(segs) - back
+        if end < 3:
+            break
+        base = _overlap(segs[end - 3:end])
+        if not base:
             continue
-        sub = bi[len(bi) - size:]
-        highs = [b[3] for b in sub]
-        lows = [b[4] for b in sub]
-        upper = min(highs)
-        lower = max(lows)
-        if lower < upper:
-            return (round(upper, 2), round(lower, 2))
+        best = base
+        for size in range(4, 8):                 # 能扩展就扩展
+            if end - size < 0:
+                break
+            ext = _overlap(segs[end - size:end])
+            if not ext:
+                break
+            best = ext
+        return (round(best[0], 2), round(best[1], 2))
     return None
 
 
