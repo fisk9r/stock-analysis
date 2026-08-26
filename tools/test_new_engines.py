@@ -370,6 +370,53 @@ def main():
     check("summary_lines 含周期/目标", isinstance(sl9, list) and bool(sl9)
           and any(("目标" in l or "[" in l) for l in sl9), "-> %s" % sl9[:2])
 
+    # 9f 关注股优化提示（止损/更换/割肉 + 更换建议）
+    pool = [{"code": "A001", "name": "强A", "worth_score": 80, "p_continue": 60},
+            {"code": "A002", "name": "强B", "worth_score": 70, "p_continue": 55},
+            {"code": "A003", "name": "强C", "worth_score": 60, "p_continue": 50}]
+    # 破位 -> 止损 + 更换建议（排除自身）
+    rz_crash = zones.analyze_one("TEST1", "破位样本", bars_crash,
+                                 replace_pool=pool, exclude={"TEST1"})
+    check("破位触发止损", bool(rz_crash) and rz_crash["rotate"] == "止损",
+          "-> %s" % (rz_crash and rz_crash["rotate"],))
+    check("破位给出更换建议且排除自身", bool(rz_crash) and len(rz_crash["replace"]) == 3
+          and all(s["code"] != "TEST1" for s in rz_crash["replace"]),
+          "-> %s" % [s["code"] for s in (rz_crash or {}).get("replace", [])])
+    # 短线停滞 -> 更换（60根平盘，显式短线）
+    flat = [10.0 + 0.001 * ((i % 2) * 2 - 1) for i in range(60)]
+    bars_flat = mk_bars(flat)
+    rz_flat = zones.analyze_one("TF", "死水样本", bars_flat, horizon="短线",
+                                replace_pool=pool, exclude={"TF"})
+    check("短线停滞触发更换", bool(rz_flat) and rz_flat["rotate"] == "更换",
+          "-> %s | %s" % (rz_flat and rz_flat["rotate"],
+                          rz_flat and rz_flat["rotate_reason"]))
+    # 中线下跌趋势 -> 割肉（温和下行，MA20<MA60，但未破位）
+    down = [12.0 - 0.03 * i for i in range(60)]
+    bars_down = mk_bars(down)
+    rz_down = zones.analyze_one("TD", "下跌样本", bars_down, horizon="中线")
+    check("中线下跌趋势触发割肉", bool(rz_down) and rz_down["rotate"] == "割肉",
+          "-> %s" % (rz_down and rz_down["rotate"],))
+    # 更换建议排除关注池（exclude 含 A001）
+    rz_exc = zones.analyze_one("TEST1", "破位样本", bars_crash,
+                               replace_pool=pool, exclude={"TEST1", "A001"})
+    check("更换建议排除关注池A001", bool(rz_exc)
+          and "A001" not in [s["code"] for s in rz_exc["replace"]],
+          "-> %s" % [s["code"] for s in (rz_exc or {}).get("replace", [])])
+    # scan 汇总 alerts.rotate + summary_lines
+    class _FUR:
+        bars = {"TEST1": bars_crash, "TF": bars_flat, "TD": bars_down}
+        stocks = {}
+        dates = []
+    zr_rot = zones.scan(_FUR(), "d999", ["TEST1", "TF", "TD"],
+                        horizons={"TEST1": "短线", "TF": "短线", "TD": "中线"},
+                        replace_pool=pool, exclude_codes={"TEST1", "TF", "TD"})
+    check("scan 汇总 alerts.rotate", bool(zr_rot)
+          and len(zr_rot["alerts"]["rotate"]) == 3,
+          "-> %d 条" % (zr_rot and len(zr_rot["alerts"]["rotate"])))
+    sl_rot = zones.summary_lines(zr_rot)
+    check("summary_lines 含关注股优化段", any("关注股优化" in l for l in sl_rot),
+          "-> %s" % [l for l in sl_rot if "优化" in l][:1])
+
     # ================= 8. 分用户推送路由（notifier 纯函数，离线可测） =================
     print("\n---- 8. 分用户推送路由 ----")
     sys.path.insert(0, os.path.join(ROOT, "pipeline"))

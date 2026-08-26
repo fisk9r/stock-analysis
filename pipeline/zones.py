@@ -127,7 +127,31 @@ def _time_status(horizon, targets, close, stop, elapsed):
             % (horizon, th, dh - elapsed, close), False)
 
 
-def analyze_one(code, name, bars, cost=None, horizon=None, elapsed=None):
+def _volatility(bars, close, n=8):
+    """近 n 日 的振幅(range) 与 净漂移(drift)，返回 (range_pct, drift_pct)。"""
+    w = bars[-n:]
+    if len(w) < 3 or not close:
+        return None, None
+    hi = max(float(b.get("h") or b["c"]) for b in w)
+    lo = min(float(b.get("l") or b["c"]) for b in w)
+    rng = (hi - lo) / close
+    drift = abs(float(w[-1]["c"]) - float(w[0]["c"])) / close
+    return rng, drift
+
+
+def _trend_state(close, ma20, ma60, slope60):
+    """粗判趋势方向：'down' / 'up' / 'side'，供中长线割肉判定。"""
+    if ma20 and ma60 and ma20 < ma60:
+        return "down"
+    if (slope60 or 0) < -0.04 and ma20 and close < ma20:
+        return "down"
+    if (slope60 or 0) > 0.04 and ma20 and close > ma20:
+        return "up"
+    return "side"
+
+
+def analyze_one(code, name, bars, cost=None, horizon=None, elapsed=None,
+                replace_pool=None, exclude=None):
     """bars: [{d,o,h,l,c,v,...}] 升序；cost: 持仓成本价（可选）；
     horizon: 显式周期（"短线"/"中线"/"长线"，可选，缺省自动建议）；
     elapsed: 建仓锚点起已持有交易日数（可选，用于时间到期预警）。
@@ -274,6 +298,44 @@ def analyze_one(code, name, bars, cost=None, horizon=None, elapsed=None):
     if time_alert and time_status:
         reasons.append(time_status)
 
+    # ---- 关注股优化提示（离场/更换/止损/割肉 + 更换建议）----
+    # 你最关心的「跟着做」：短线不浮动/波动小→离场换更强；已破位→止损；
+    # 中长线趋势向下→割肉。破位优先于一切；止损/更换/割肉时附强势备选池 Top3。
+    rotate = None
+    rotate_reason = ""
+    replace = []
+    if action == "破位卖出":
+        rotate = "止损"
+        rotate_reason = "已跌破关键支撑且收于MA20之下，应果断止损离场、避免深套"
+    elif final_horizon == "短线":
+        rng8, drift8 = _volatility(bars, close, 8)
+        hi8 = max(float(b["h"]) for b in bars[-8:])
+        # 近8日振幅≤6%（波动小）或 净漂移≤2%（不浮动）；仍在上升蓄势（净移>3%且贴近高点）则不算死水
+        is_stagnant = ((rng8 is not None and rng8 < 0.06)
+                       or (drift8 is not None and drift8 < 0.02))
+        still_strong = (drift8 or 0) > 0.03 and close >= hi8 * 0.97
+        if is_stagnant and not still_strong:
+            rotate = "更换"
+            rotate_reason = ("短线标的近8日振幅%.1f%%、净移%.1f%%，原地踏步无弹性，"
+                             "建议离场换更强标的" % (rng8 * 100 if rng8 else 0,
+                                                   drift8 * 100 if drift8 else 0))
+    else:  # 中线/长线
+        if _trend_state(close, ma20, ma60, slope60) == "down":
+            rotate = "割肉"
+            rotate_reason = ("中长线趋势已向下（MA20<MA60 或 斜率%.0f%%），"
+                             "应止损割肉控制回撤，待重新走平再加回" % ((slope60 or 0) * 100))
+    # 更换建议：仅当发出离场/止损/割肉时，从强势备选池挑 Top3（排除自身与关注池）
+    if rotate in ("止损", "更换", "割肉") and replace_pool:
+        ex = set(exclude or [])
+        ex.add(code)
+        cands = [x for x in (replace_pool or [])
+                 if x.get("code") and x["code"] not in ex
+                 and (x.get("worth_score") or 0) > 0]
+        cands.sort(key=lambda x: (x.get("worth_score") or 0), reverse=True)
+        replace = [{"code": c["code"], "name": c.get("name") or "",
+                    "score": c.get("worth_score"),
+                    "p_continue": c.get("p_continue")} for c in cands[:3]]
+
     return {
         "code": code, "name": name,
         "close": round(close, 2),
@@ -297,15 +359,22 @@ def analyze_one(code, name, bars, cost=None, horizon=None, elapsed=None):
         "elapsed": elapsed,
         "time_status": time_status,
         "time_alert": time_alert,
+        # ---- 新增：关注股优化提示 ----
+        "rotate": rotate,
+        "rotate_reason": rotate_reason,
+        "replace": replace,
     }
 
 
 def scan(u, date, codes=None, extra_names=None, costs=None,
-         horizons=None, elapsed_map=None, top_n=30):
+         horizons=None, elapsed_map=None, top_n=30,
+         replace_pool=None, exclude_codes=None):
     """对给定代码（默认=关注池）跑区间分析。u 需提供 .bars 与 .stocks。
     costs: {code: 成本价}，可选；有成本者输出盈亏提示，且**永不截断丢弃**。
     horizons: {code: "短线"/"中线"/"长线"} 显式周期（可选）。
-    elapsed_map: {code: int} 建仓锚点起已持有交易日数（可选，用于时间到期预警）。"""
+    elapsed_map: {code: int} 建仓锚点起已持有交易日数（可选，用于时间到期预警）。
+    replace_pool: [{code,name,worth_score,p_continue}] 强势备选池，用于离场/止损/割肉时
+        给出「更换建议」；exclude_codes: 不参与更换建议的代码集合（关注池自身）。"""
     if codes is None:
         import watchlist
         codes, extra_names = watchlist.load_watch_codes()
@@ -313,37 +382,44 @@ def scan(u, date, codes=None, extra_names=None, costs=None,
     costs = costs or {}
     horizons = horizons or {}
     elapsed_map = elapsed_map or {}
+    exclude_codes = set(exclude_codes or [])
     items = []
     for c in codes:
         bs = [b for b in (u.bars.get(c) or []) if b["d"] <= date]
         name = extra_names.get(c) or (u.stocks.get(c, {}) or {}).get("name") or ""
         try:
             r = analyze_one(c, name, bs, cost=costs.get(c),
-                            horizon=horizons.get(c), elapsed=elapsed_map.get(c))
+                            horizon=horizons.get(c), elapsed=elapsed_map.get(c),
+                            replace_pool=replace_pool, exclude=exclude_codes)
         except Exception:
             r = None
         if r:
             items.append(r)
     order = {"破位卖出": 0, "加仓提示": 1, "回踩买入区": 2,
              "跌破警示": 3, "逼近卖出": 4, "突破持有": 5, "正常持有": 6}
-    items.sort(key=lambda x: (order.get(x["action"], 9), -(x.get("pct") or 0)))
+    # 关注股优化提示（止损/更换/割肉）置顶，确保离场类建议最显眼
+    items.sort(key=lambda x: (0 if x.get("rotate") else 1,
+                              order.get(x["action"], 9), -(x.get("pct") or 0)))
     # 带持仓成本的股票（用户自选）永远保留，不因 top_n 截断丢弃
     prio = [x for x in items if x.get("cost")]
     others = [x for x in items if not x.get("cost")][:max(0, top_n - len(prio))]
     kept = prio + others
-    kept.sort(key=lambda x: (order.get(x["action"], 9), -(x.get("pct") or 0)))
+    kept.sort(key=lambda x: (0 if x.get("rotate") else 1,
+                             order.get(x["action"], 9), -(x.get("pct") or 0)))
     alerts = {
         "sell": [x for x in items if x["action"] == "破位卖出"],
         "add": [x for x in items if x["action"] in ("加仓提示", "回踩买入区")],
         "take_profit": [x for x in items if x["action"] in ("逼近卖出", "突破持有")],
         "time": [x for x in items if x.get("time_alert")],
+        "rotate": [x for x in items if x.get("rotate")],
     }
     return {
         "date": date,
         "n": len(items),
         "items": kept,
         "alerts": alerts,
-        "alert_n": len(alerts["sell"]) + len(alerts["add"]) + len(alerts["time"]),
+        "alert_n": len(alerts["sell"]) + len(alerts["add"]) + len(alerts["time"])
+        + len(alerts["rotate"]),
     }
 
 
@@ -377,6 +453,18 @@ def summary_lines(zr):
     adds = al.get("add") or []
     tps = al.get("take_profit") or []
     times = al.get("time") or []
+    rotates = al.get("rotate") or []
+    if rotates:
+        out.append("🔄 关注股优化（离场/更换/止损/割肉）：" + "；".join(
+            "%s[%s] %s：%s" % (tag(x), x.get("horizon"), x["rotate"],
+                               (x.get("rotate_reason") or "")[:46])
+            for x in rotates[:5]))
+        for x in rotates[:3]:
+            rp = x.get("replace") or []
+            if rp:
+                out.append("   ↳ %s 可换：%s" % (
+                    x["name"], "、".join(
+                        "%s(%.0f分)" % (s["name"], s["score"] or 0) for s in rp)))
     if sells:
         out.append("🛑 破位卖出：" + "；".join(
             "%s 破 %.2f，止损 %.2f" % (tag(x), x["buy_zone"][0], x["stop"])

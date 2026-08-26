@@ -545,11 +545,15 @@
         (AL.time && AL.time.length ? '<span class="chip" style="border-color:' + C.warn + ';color:' + C.warn + '">⏰ 周期到期 <b>' + AL.time.length + '</b></span>' : '') +
         (AL.add && AL.add.length ? '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + '">➕ 加仓 <b>' + AL.add.length + '</b></span>' : '') +
         (AL.take_profit && AL.take_profit.length ? '<span class="chip" style="border-color:' + C.warn + ';color:' + C.warn + '">🎯 逼近卖点 <b>' + AL.take_profit.length + '</b></span>' : '') +
+        (AL.rotate && AL.rotate.length ? '<span class="chip" style="border-color:' + C.down + ';color:' + C.down + '">🔄 优化 <b>' + AL.rotate.length + '</b></span>' : '') +
         '</div>';
       var HCOL = { '短线': C.warn, '中线': C.up, '长线': '#5b9bff' };
       var zRows = ZN.items.map(function (z1) {
         var ac = zActCol(z1.action);
         var hc = HCOL[z1.horizon] || '';
+        // 关注股优化提示三色：止损/割肉=跌色、更换=警示色
+        var RC = { '止损': C.down, '割肉': C.down, '更换': C.warn };
+        var rc = RC[z1.rotate] || '';
         var zoneCell = function (zz) {
           return '<td class="r" style="font-variant-numeric:tabular-nums">' + f(zz[0], 2) + ' ~ ' + f(zz[1], 2) + '</td>';
         };
@@ -561,6 +565,19 @@
         var tsColor = z1.time_alert ? C.warn : C.muted || '#9aa';
         var tsLine = z1.time_status ? '<div style="font-size:10px;margin-top:2px;color:' + tsColor + '">' + E(z1.time_status) + '</div>' : '';
         var reasonHtml = (z1.reasons || []).slice(0, 1).map(function (r9) { return E(r9); }).join('；');
+        var rotHtml = '';
+        if (z1.rotate) {
+          rotHtml += '<div style="font-size:10px;margin-top:3px;color:' + rc + ';font-weight:600">🔄 ' +
+            E(z1.rotate) + (z1.rotate_reason ? '：' + E(z1.rotate_reason) : '') + '</div>';
+          var rps = z1.replace || [];
+          if (rps.length) {
+            rotHtml += '<div style="font-size:10px;margin-top:1px;color:' + C.muted + '">↳ 可换：' +
+              rps.map(function (s) {
+                return '<span class="bd" style="border-color:' + C.up + ';color:' + C.up + ';margin:1px 3px 1px 0;display:inline-block;padding:0 4px">' +
+                  E(s.name) + '(' + (s.score || 0) + '分)</span>';
+              }).join('') + '</div>';
+          }
+        }
         var costHtml = (z1.cost ? '<div style="font-size:10px;margin-top:2px">成本 ' + f(z1.cost, 2) +
           ' <span style="color:' + (z1.pnl_pct >= 0 ? C.up : C.down) + '">' + (z1.pnl_pct >= 0 ? '+' : '') + f(z1.pnl_pct, 1) + '%</span></div>' : '');
         return '<tr><td><b>' + E(z1.name || '') + '</b> <span class="muted">' + E(z1.code) + '</span>' +
@@ -572,7 +589,8 @@
           zoneCell(z1.sell_zone) +
           '<td class="r" style="color:' + C.down + '">' + f(z1.stop, 2) + '</td>' +
           '<td><span class="bd" style="' + (ac ? 'border-color:' + ac + ';color:' + ac + ';' : '') + 'font-size:10px;padding:0 4px;white-space:nowrap">' + E(z1.action) + '</span>' +
-          tgtLine + tsLine +
+          (z1.rotate ? ' <span class="bd" style="border-color:' + rc + ';color:' + rc + ';font-size:10px;padding:0 4px;font-weight:600">' + E(z1.rotate) + '</span>' : '') +
+          tgtLine + tsLine + rotHtml +
           (reasonHtml ? '<div class="muted" style="font-size:10px;margin-top:2px">' + reasonHtml + '</div>' : '') + '</td></tr>';
       });
       zch += table([{ t: '标的' }, { t: '现价', a: 'r' }, { t: '买入区间', a: 'r' }, { t: '卖出区间', a: 'r' }, { t: '止损', a: 'r' }, { t: '操作/周期目标' }], zRows);

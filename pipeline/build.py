@@ -845,6 +845,15 @@ def run(date_override=None, dedup_close=False):
         w_codes, w_names = _wl.load_watch_codes()
         rec_codes_z = [it.get("code") for it in (data.get("recommend", {}).get("all") or [])]
         z_codes = list(dict.fromkeys((w_codes or []) + (rec_codes_z or [])))[:40]
+        # 强势备选池（用于破位/停滞/割肉时的「更换建议」）：取推荐池全量，含价值分与续板概率
+        z_replace = []
+        try:
+            for it in (data.get("recommend", {}).get("all") or []):
+                z_replace.append({"code": it.get("code"), "name": it.get("name"),
+                                  "worth_score": it.get("worth_score"),
+                                  "p_continue": it.get("p_continue")})
+        except Exception:
+            pass
         # 持仓配置：成本映射 + 周期标注 + 建仓锚点（用于时间到期预警）
         z_costs, z_horizons, z_elapsed = {}, {}, {}
         try:
@@ -883,13 +892,16 @@ def run(date_override=None, dedup_close=False):
             pass
         data["zones"] = (zones.scan(u, date, z_codes, extra_names=w_names,
                                     costs=z_costs, horizons=z_horizons,
-                                    elapsed_map=z_elapsed) if z_codes else None)
+                                    elapsed_map=z_elapsed,
+                                    replace_pool=z_replace or None,
+                                    exclude_codes=set(z_codes)) if z_codes else None)
         if data["zones"]:
-            log("  买卖区间：覆盖 %d 只，破位 %d / 加仓 %d / 逼近卖点 %d"
+            log("  买卖区间：覆盖 %d 只，破位 %d / 加仓 %d / 逼近卖点 %d / 优化提示 %d"
                 % (data["zones"]["n"],
                    len(data["zones"]["alerts"].get("sell") or []),
                    len(data["zones"]["alerts"].get("add") or []),
-                   len(data["zones"]["alerts"].get("take_profit") or [])))
+                   len(data["zones"]["alerts"].get("take_profit") or []),
+                   len(data["zones"]["alerts"].get("rotate") or [])))
     except Exception as e:
         log("  买卖区间失败（不影响主流程）：%r" % e)
         data["zones"] = None

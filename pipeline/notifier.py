@@ -744,7 +744,8 @@ def _personal_appendix(data, codes):
         al = {"sell": [x for x in items if x.get("action") == "破位卖出"],
               "add": [x for x in items if x.get("action") in ("加仓提示", "回踩买入区")],
               "take_profit": [x for x in items if x.get("action") == "逼近卖出"],
-              "time": [x for x in items if x.get("time_alert")]}
+              "time": [x for x in items if x.get("time_alert")],
+              "rotate": [x for x in items if x.get("rotate")]}
         z2 = dict(z)
         z2["items"], z2["alerts"] = items, al
         lines = list(_zmod.summary_lines(z2) or [])
