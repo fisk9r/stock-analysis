@@ -68,5 +68,12 @@
 </script>
 <!-- 登录门禁：解密后再按需加载 charts.js / app.js（顺序由 auth.js 控制） -->
 <script src="auth.js?v=20260810b"></script>
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("sw.js?v=20260825b").catch(function () {});
+    });
+  }
+</script>
 </body>
 </html>

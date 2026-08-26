@@ -628,6 +628,80 @@
       h += card('🧺 ETF 资金流', efBody, '宽基/行业 ETF 份额与成交额变化——增量资金借道指数进场的风向标，亦作风格判定的第五维');
     }
 
+    /* 游资席位画像 */
+    var ST = D.seats;
+    if (ST && ST.n_hits) {
+      var stBody = '<div class="chips" style="margin-bottom:8px"><span class="chip">知名席位动作 <b>' + n2(ST.n_hits) + '</b> 条</span></div>';
+      var stRows = (ST.hits || []).slice(0, 8).map(function (t) {
+        var wr = (ST.stats && ST.stats[t.label]) ? (' · 跟随胜率' + ST.stats[t.label].win_rate + '%(' + ST.stats[t.label].n + '次)') : '';
+        return '<tr><td><b>' + E(t.name) + '</b> <span class="muted">' + E(t.code) + '</span></td>' +
+          '<td class="muted" style="font-size:11px">' + E(t.label) + '</td>' +
+          '<td class="r" style="color:' + (t.net_yi >= 0 ? C.up : C.down) + '">净买 ' + f(t.net_yi, 2) + '亿</td>' +
+          '<td class="r muted" style="font-size:11px">' + E(wr) + '</td></tr>';
+      });
+      if (stRows.length) stBody += table([{ t: '个股' }, { t: '席位(坊间)' }, { t: '净买', a: 'r' }, { t: '跟随', a: 'r' }], stRows);
+      h += card('🐉 游资席位画像', stBody, '识别当日龙虎榜上的知名游资营业部（坊间归因，仅供参考），并给出其历史 T+1 跟随胜率，辅助判断是否值得跟');
+    }
+
+    /* 题材主线 */
+    var TH = D.theme;
+    if (TH && TH.main_theme) {
+      var thBody = '<div class="chips" style="margin-bottom:8px">' +
+        '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + '">主线 <b>' + E(TH.main_theme) + '</b></span>' +
+        '<span class="chip">' + n2(TH.main_n) + ' 只涨停贡献</span>' +
+        (TH.signal && TH.signal.streak >= 2 ? '<span class="chip" style="border-color:' + C.gold + ';color:' + C.gold + '">持续 ' + TH.signal.streak + ' 日</span>' : '') +
+        (TH.signal && TH.signal.verdict && TH.signal.verdict !== '主线延续' ? '<span class="chip" style="border-color:' + C.warn + ';color:' + C.warn + '">' + E(TH.signal.verdict) + '</span>' : '') +
+        '</div>';
+      var thRows = (TH.sub_themes || []).map(function (s) {
+        return '<tr><td><b>' + E(s.theme) + '</b></td><td class="r">' + n2(s.n) + '</td></tr>';
+      });
+      if (thRows.length) thBody += table([{ t: '支线题材' }, { t: '涨停数', a: 'r' }], thRows);
+      h += card('🧭 题材主线', thBody, '对涨停股概念聚类，判定当日主线/支线、主线持续天数与退潮预警，接入情绪分');
+    }
+
+    /* 连续信号 */
+    var SG = D.signals;
+    if (SG) {
+      var sgBody = '<div class="bullets">';
+      if (SG.margin && SG.margin.verdict && SG.margin.verdict !== '中性') sgBody += '<div class="b">💳 ' + E(SG.margin.verdict) + '</div>';
+      if (SG.etf && SG.etf.verdict && SG.etf.verdict !== '中性') sgBody += '<div class="b">🧺 ' + E(SG.etf.verdict) + '</div>';
+      if (SG.lhb && SG.lhb.verdict && SG.lhb.verdict !== '龙虎榜活跃度平稳') sgBody += '<div class="b">🏦 ' + E(SG.lhb.verdict) + '</div>';
+      (SG.seat_repeat || []).slice(0, 4).forEach(function (r) {
+        sgBody += '<div class="b">🐉 ' + E(r.name) + ' 被知名席位反复净买 ' + r.times + ' 次（' + r.labels.slice(0, 2).map(E).join('、') + '）</div>';
+      });
+      sgBody += '</div>';
+      var sgHas = (SG.margin && SG.margin.verdict && SG.margin.verdict !== '中性') ||
+        (SG.etf && SG.etf.verdict && SG.etf.verdict !== '中性') ||
+        (SG.lhb && SG.lhb.verdict && SG.lhb.verdict !== '龙虎榜活跃度平稳') ||
+        (SG.seat_repeat && SG.seat_repeat.length);
+      h += card('📡 连续信号', sgHas ? sgBody : '<div class="empty">样本积累中（连续信号需多日历史）</div>',
+        '跨日硬信号：两融/ETF 连续净流入、龙虎榜活跃度、知名席位重复扫货——单日快照看不到，靠历史序列提炼');
+    }
+
+    /* 缠论结构 */
+    var CL = D.chanlun;
+    if (CL && CL.candidates && CL.candidates.length) {
+      var buys = CL.buys || [];
+      var clBody = '<div class="chips" style="margin-bottom:8px"><span class="chip">分析 <b>' + n2(CL.n_analyzed) + '</b> 只</span>' +
+        '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + '">买点候选 <b>' + n2(buys.length) + '</b> 只</span></div>';
+      var clRows = buys.slice(0, 8).map(function (c) {
+        var cc = c.signal === '一买' ? C.up : c.signal === '二买' ? C.gold : c.signal === '三买' ? C.blue : C.muted;
+        var extra = (c.zhongshu ? (' · 中枢[' + c.zhongshu[0] + ',' + c.zhongshu[1] + ']') : '') + (c.beichi ? (' · ' + (c.beichi === 'down' ? '底背驰' : '顶背驰')) : '');
+        return '<tr><td><b>' + E(c.name) + '</b> <span class="muted">' + E(c.code) + '</span></td>' +
+          '<td class="r" style="color:' + cc + ';font-weight:bold">' + E(c.signal) + '</td>' +
+          '<td class="muted" style="font-size:11px">' + E(c.reason || '') + E(extra) + '</td></tr>';
+      });
+      if (!clRows.length) {
+        clRows = CL.candidates.slice(0, 8).map(function (c) {
+          return '<tr><td><b>' + E(c.name) + '</b> <span class="muted">' + E(c.code) + '</span></td>' +
+            '<td class="r">' + E(c.last_dir) + '</td>' +
+            '<td class="muted" style="font-size:11px">' + E(c.signal) + (c.beichi ? ' · 背驰' : '') + '</td></tr>';
+        });
+      }
+      clBody += table([{ t: '个股' }, { t: '信号', a: 'r' }, { t: '结构' }], clRows);
+      h += card('🌀 缠论结构', clBody, '笔-中枢-背驰框架：对推荐池/涨停股跑缠论，标出一/二/三买点与底背驰——结构化择时参照（算法遵循标准缠论定义）');
+    }
+
     /* 相似形态检索 */
     var PS = D.patsim;
     if (PS && PS.items && PS.items.length) {

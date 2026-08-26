@@ -1,54 +1,33 @@
-/* stock-analysis Service Worker（PWA 离线壳）
- * 策略：
- *   · 静态壳（index/app/styles/charts/nacl/manifest/icon）→ 缓存优先，后台更新（stale-while-revalidate）
- *   · 数据（data.js / data/*.bin / ai_narrative.json / users.json / meta.json）→ 网络优先，失败回退缓存
- *     ——保证有网时永远看最新复盘，断网时仍能看最后一次数据。
- * 版本号随部署手动递增以清空旧静态缓存。
- */
-const VER = 'sa-pwa-v1';
-const SHELL = [
-  './', './index.html', './app.js', './styles.css', './charts.js', './nacl.js',
-  './manifest.webmanifest', './icon.svg'
-];
-const NET_FIRST = [/data\.js/, /\/data\//, /ai_narrative\.json/, /users\.json/, /meta\.json/];
+/* 极简 PWA 离线缓存：仅缓存应用外壳，data.js 始终走网络（保证数据最新）。 */
+const CACHE = "sa-shell-v1";
+const SHELL = ["index.html", "styles.css", "charts.js", "app.js", "auth.js",
+               "nacl.js", "users.json", "meta.json", "icon.svg", "manifest.webmanifest"];
 
-self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VER).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+self.addEventListener("install", function (e) {
+  e.waitUntil(caches.open(CACHE).then(function (c) { return c.addAll(SHELL); }).then(function () { return self.skipWaiting(); }));
 });
 
-self.addEventListener('activate', (e) => {
-  e.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== VER).map((k) => caches.delete(k)))
-    ).then(() => self.clients.claim())
-  );
+self.addEventListener("activate", function (e) {
+  e.waitUntil(caches.keys().then(function (ks) {
+    return Promise.all(ks.filter(function (k) { return k !== CACHE; }).map(function (k) { return caches.delete(k); }));
+  }).then(function () { return self.clients.claim(); }));
 });
 
-self.addEventListener('fetch', (e) => {
-  const url = new URL(e.request.url);
-  if (e.request.method !== 'GET' || url.origin !== location.origin) return;
-  const isData = NET_FIRST.some((re) => re.test(url.pathname));
-
-  if (isData) {
-    // 网络优先：拿到新数据就回填缓存；断网回退缓存
-    e.respondWith(
-      fetch(e.request).then((resp) => {
-        const copy = resp.clone();
-        caches.open(VER).then((c) => c.put(e.request, copy));
-        return resp;
-      }).catch(() => caches.match(e.request))
-    );
-  } else {
-    // 静态壳：缓存优先 + 后台刷新
-    e.respondWith(
-      caches.match(e.request).then((hit) => {
-        const net = fetch(e.request).then((resp) => {
-          const copy = resp.clone();
-          caches.open(VER).then((c) => c.put(e.request, copy));
-          return resp;
-        }).catch(() => hit);
-        return hit || net;
-      })
-    );
+self.addEventListener("fetch", function (e) {
+  var req = e.request;
+  if (req.method !== "GET") return;
+  var url = new URL(req.url);
+  // 动态数据（data.js / data/*.bin）永远走网络
+  if (/\/(data(\.js)?|.*\.bin)(\?|$)/.test(url.pathname)) {
+    return e.respondWith(fetch(req).catch(function () { return caches.match("index.html"); }));
   }
+  // 外壳资源：缓存优先，离线可用
+  e.respondWith(caches.match(req).then(function (hit) {
+    if (hit) return hit;
+    return fetch(req).then(function (res) {
+      var copy = res.clone();
+      caches.open(CACHE).then(function (c) { c.put(req, copy); });
+      return res;
+    });
+  }));
 });
