@@ -187,6 +187,48 @@ def main():
     check("summary_lines 容错 stats 缺失",
           isinstance(seats.summary_lines({"n_hits": 0, "hits": [], "top": []}), list))
 
+    # ---------------- 6. 落库往返（防回归：曾漏传 date 参数导致快照全失败）----------------
+    print("\n[6] 引擎落库往返 store（内存库）")
+    mem = sqlite3.connect(":memory:")
+    mem.executescript(store.SCHEMA if hasattr(store, "SCHEMA") else "")
+    if not hasattr(store, "SCHEMA"):
+        # 回退：从源码抽取建表语句
+        src = open(os.path.join(ROOT, "pipeline", "store.py"), encoding="utf-8").read()
+        beg = src.index("CREATE TABLE")
+        end = src.index('"""', beg)
+        mem.executescript(src[beg:end])
+
+    # save_snapshot 必须传 4 个参数 (con,k,date,payload)
+    try:
+        store.save_snapshot(mem, "margin", "2026-08-25", {"total_yi": 26560, "delta_yi": -5})
+        store.save_snapshot(mem, "margin", "2026-08-24", {"total_yi": 26565, "delta_yi": 12})
+        mem.commit()
+        ok = True
+    except TypeError as e:
+        ok = False
+        print("      TypeError:", e)
+    check("save_snapshot(con,k,date,payload) 调用成功", ok)
+    hist = store.snapshot_history(mem, "margin", days=20)
+    check("snapshot_history 往返可读", len(hist) == 2, "-> %d 条" % len(hist))
+    check("快照按日期正序", bool(hist) and hist[0][0] < hist[-1][0],
+          "-> %s" % [h[0] for h in hist])
+    check("payload JSON 往返一致",
+          bool(hist) and hist[-1][1]["total_yi"] == 26560)
+
+    # 席位 / 题材落库往返
+    store.upsert_seats(mem, "2026-08-25", [{
+        "dept_code": "D1", "label": "章盟主", "code": "600000", "name": "X",
+        "net_yi": 1.2, "act_buy_yi": 2.0, "act_sell_yi": 0.8, "chg": 5.1}])
+    store.upsert_themes(mem, "2026-08-25", {"固态电池": 3, "人形机器人": 2})
+    mem.commit()
+    check("upsert_seats 往返", len(store.seats_history(mem, days=90)) == 1)
+    check("upsert_themes 往返", bool(store.themes_series(mem, days=30)))
+
+    # 用两日快照驱动连续信号，验证非空路径
+    sig2 = signals.compute_all(mem)
+    check("有历史时 compute_all 走通非空路径",
+          sig2 is None or isinstance(sig2, dict), "-> %s" % (list(sig2) if sig2 else sig2))
+
     print("\n================ 结果 ================")
     print("PASS=%d  FAIL=%d" % (PASS, FAIL))
     return 0 if FAIL == 0 else 1

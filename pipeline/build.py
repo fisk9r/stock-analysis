@@ -774,14 +774,17 @@ def run(date_override=None, dedup_close=False):
 
     # ---- 引擎快照落库（供连续信号/席位画像积累历史）----
     try:
+        # 签名为 save_snapshot(con, k, date, payload)，date 不可省
         if data.get("margin"):
-            store.save_snapshot(con, "margin", data["margin"])
+            store.save_snapshot(con, "margin", date, data["margin"])
         if data.get("etfflow"):
-            store.save_snapshot(con, "etfflow", data["etfflow"])
+            store.save_snapshot(con, "etfflow", date, data["etfflow"])
         if data.get("lhbseats"):
-            store.save_snapshot(con, "lhbseats", data["lhbseats"])
+            store.save_snapshot(con, "lhbseats", date, data["lhbseats"])
         if data.get("riskcal"):
-            store.save_snapshot(con, "riskcal", data["riskcal"])
+            store.save_snapshot(con, "riskcal", date, data["riskcal"])
+        con.commit()
+        log("  引擎快照已落库（margin/etfflow/lhbseats/riskcal）")
     except Exception as e:
         log("  引擎快照落库失败（不影响主流程）：%r" % e)
 
