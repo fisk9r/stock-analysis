@@ -309,6 +309,13 @@ def main():
     for kw in ["买卖区间", "D.zones", "buy_zone", "sell_zone"]:
         check("app.js 含 %s" % kw, kw in appjs)
 
+    # 7g 成本价联动：带 cost 的股票输出盈亏字段与提示
+    rc2 = zones.analyze_one("TEST4", "成本样本", bars_crash, cost=10.0)
+    check("cost 传入输出 pnl_pct", bool(rc2) and rc2["pnl_pct"] is not None,
+          "-> %s" % (rc2 and rc2["pnl_pct"],))
+    check("深亏触发预警语", bool(rc2) and any("预警线" in x for x in rc2["reasons"]),
+          "-> %s" % (rc2 and rc2["reasons"][:1],))
+
     print("\n================ 结果 ================")
     print("PASS=%d  FAIL=%d" % (PASS, FAIL))
     return 0 if FAIL == 0 else 1

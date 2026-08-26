@@ -839,13 +839,22 @@ def run(date_override=None, dedup_close=False):
         log("  缠论分析失败（不影响主流程）：%r" % e)
         data["chanlun"] = None
 
-    # ---- 买卖区间与操作提示（关注池优先，其次推荐池头部）----
+    # ---- 买卖区间与操作提示（关注池优先，其次推荐池头部；带持仓成本盈亏）----
     try:
         import watchlist as _wl
         w_codes, w_names = _wl.load_watch_codes()
         rec_codes_z = [it.get("code") for it in (data.get("recommend", {}).get("all") or [])]
         z_codes = list(dict.fromkeys((w_codes or []) + (rec_codes_z or [])))[:40]
-        data["zones"] = zones.scan(u, date, z_codes, extra_names=w_names) if z_codes else None
+        # 成本映射：来自持仓配置（如 owen 的中化国际 cost=7.18）
+        z_costs = {}
+        try:
+            for p in (holdings.load_positions() or []):
+                if p.get("code") and p.get("cost"):
+                    z_costs[p["code"]] = p["cost"]
+        except Exception:
+            pass
+        data["zones"] = (zones.scan(u, date, z_codes, extra_names=w_names,
+                                    costs=z_costs) if z_codes else None)
         if data["zones"]:
             log("  买卖区间：覆盖 %d 只，破位 %d / 加仓 %d / 逼近卖点 %d"
                 % (data["zones"]["n"],

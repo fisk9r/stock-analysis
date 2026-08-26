@@ -58,8 +58,9 @@ def _pick_level(cands, close, direction, min_gap=0.02):
     return (t + "(已越)", v)
 
 
-def analyze_one(code, name, bars):
-    """bars: [{d,o,h,l,c,v,...}] 升序。返回区间字典或 None（数据不足）。"""
+def analyze_one(code, name, bars, cost=None):
+    """bars: [{d,o,h,l,c,v,...}] 升序；cost: 持仓成本价（可选，带出盈亏提示）。
+    返回区间字典或 None（数据不足）。"""
     if not bars or len(bars) < 40 or not bars[-1].get("c"):
         return None
     cur = bars[-1]
@@ -166,10 +167,23 @@ def analyze_one(code, name, bars):
         reasons.append("运行于买区上方、卖区下方")
         reasons.append("距卖点 %.1f%%、回踩买区 %.1f%%" % (gap_sell, -gap_buy))
 
+    # ---- 持仓成本联动（可选）：盈亏与摊薄提示 ----
+    cost = float(cost) if cost else None
+    pnl_pct = round((close / cost - 1) * 100, 2) if cost and close else None
+    if cost:
+        if pnl_pct <= -8:
+            reasons.insert(0, "成本 %.2f，浮亏 %.1f%%（已超 -8%% 预警线）" % (cost, pnl_pct))
+        elif pnl_pct < 0:
+            reasons.insert(0, "成本 %.2f，浮亏 %.1f%%；回踩买区可参考摊低" % (cost, pnl_pct))
+        else:
+            reasons.insert(0, "成本 %.2f，浮盈 %+.1f%%" % (cost, pnl_pct))
+
     return {
         "code": code, "name": name,
         "close": round(close, 2),
         "pct": round(cur.get("pct") or 0, 2),
+        "cost": cost,
+        "pnl_pct": pnl_pct,
         "ma20": round(ma20, 2) if ma20 else None,
         "buy_zone": [buy_lo, buy_hi],
         "sup_ref": "%s %.2f" % (key_sup_tag, key_sup),
@@ -184,18 +198,20 @@ def analyze_one(code, name, bars):
     }
 
 
-def scan(u, date, codes=None, extra_names=None, top_n=24):
-    """对给定代码（默认=关注池）跑区间分析。u 需提供 .bars 与 .stocks。"""
+def scan(u, date, codes=None, extra_names=None, costs=None, top_n=24):
+    """对给定代码（默认=关注池）跑区间分析。u 需提供 .bars 与 .stocks。
+    costs: {code: 成本价}，可选；有成本者输出盈亏提示。"""
     if codes is None:
         import watchlist
         codes, extra_names = watchlist.load_watch_codes()
     extra_names = extra_names or {}
+    costs = costs or {}
     items = []
     for c in codes:
         bs = [b for b in (u.bars.get(c) or []) if b["d"] <= date]
         name = extra_names.get(c) or (u.stocks.get(c, {}) or {}).get("name") or ""
         try:
-            r = analyze_one(c, name, bs)
+            r = analyze_one(c, name, bs, cost=costs.get(c))
         except Exception:
             r = None
         if r:
@@ -221,6 +237,13 @@ def summary_lines(zr):
     """收盘推送用摘要：先急讯后常规。"""
     if not zr:
         return []
+
+    def tag(x):
+        """名称后附持仓盈亏（有成本者）。"""
+        p = x.get("pnl_pct")
+        return "%s(成本%.2f %+.1f%%)" % (x["name"], x["cost"], p) \
+            if x.get("cost") and p is not None else x["name"]
+
     out = []
     al = zr.get("alerts") or {}
     sells = al.get("sell") or []
@@ -228,21 +251,21 @@ def summary_lines(zr):
     tps = al.get("take_profit") or []
     if sells:
         out.append("🛑 破位卖出：" + "；".join(
-            "%s(%s) 破 %.2f，止损 %.2f" % (x["name"], x["code"], x["buy_zone"][0], x["stop"])
+            "%s 破 %.2f，止损 %.2f" % (tag(x), x["buy_zone"][0], x["stop"])
             for x in sells[:4]))
     if adds:
         out.append("➕ 加仓提示：" + "；".join(
-            "%s(%s) 买区 %s~%s" % (x["name"], x["code"], x["buy_zone"][0], x["buy_zone"][1])
+            "%s 买区 %s~%s" % (tag(x), x["buy_zone"][0], x["buy_zone"][1])
             for x in adds[:4]))
     if tps:
         out.append("🎯 逼近卖点：" + "；".join(
-            "%s(%s) 卖区 %s~%s" % (x["name"], x["code"], x["sell_zone"][0], x["sell_zone"][1])
+            "%s 卖区 %s~%s" % (tag(x), x["sell_zone"][0], x["sell_zone"][1])
             for x in tps[:4]))
     normal = [x for x in (zr.get("items") or [])
               if x["action"] == "正常持有"][:3]
     if normal and not out:
         out.append("🎯 区间速览：" + "、".join(
-            "%s 买%s~%s/卖%s~%s" % (x["name"], x["buy_zone"][0], x["buy_zone"][1],
+            "%s 买%s~%s/卖%s~%s" % (tag(x), x["buy_zone"][0], x["buy_zone"][1],
                                     x["sell_zone"][0], x["sell_zone"][1])
             for x in normal))
     if not out:

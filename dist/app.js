@@ -535,8 +535,11 @@
           return '<td class="r" style="font-variant-numeric:tabular-nums">' + f(zz[0], 2) + ' ~ ' + f(zz[1], 2) + '</td>';
         };
         var reasonHtml = (z1.reasons || []).slice(0, 2).map(function (r9) { return E(r9); }).join('；');
+        var costHtml = (z1.cost ? '<div style="font-size:10px;margin-top:2px">成本 ' + f(z1.cost, 2) +
+          ' <span style="color:' + (z1.pnl_pct >= 0 ? C.up : C.down) + '">' + (z1.pnl_pct >= 0 ? '+' : '') + f(z1.pnl_pct, 1) + '%</span></div>' : '');
         return '<tr><td><b>' + E(z1.name || '') + '</b> <span class="muted">' + E(z1.code) + '</span>' +
-          (z1.chanlun_buy ? ' <span class="bd" style="border-color:' + C.up + ';color:' + C.up + ';font-size:10px;padding:0 4px">缠论' + E(z1.chanlun_buy) + '</span>' : '') + '</td>' +
+          (z1.chanlun_buy ? ' <span class="bd" style="border-color:' + C.up + ';color:' + C.up + ';font-size:10px;padding:0 4px">缠论' + E(z1.chanlun_buy) + '</span>' : '') +
+          costHtml + '</td>' +
           '<td class="r"><b>' + f(z1.close, 2) + '</b> <span class="muted" style="font-size:10px">' + (z1.pct >= 0 ? '+' : '') + f(z1.pct, 2) + '%</span></td>' +
           zoneCell(z1.buy_zone) +
           zoneCell(z1.sell_zone) +
