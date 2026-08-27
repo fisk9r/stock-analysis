@@ -1982,11 +1982,21 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
         pb0 = rk.get("p_break") or 80
         pc_adj = clamp(pc0 - hf * 100 * 0.45, 1, 99)
         pb_adj = clamp(pb0 + hf * 100 * 0.45, 1, 99)
+        # 负反馈校准 V2：p_break 高分位贡献已被历史回测证伪，压高分/抬低分位
+        try:
+            from recveto import calibrate_score as _calib
+        except Exception:
+            try:
+                from pipeline.recveto import calibrate_score as _calib
+            except Exception:
+                _calib = None
         score = (0.26 * r["quality"] + 0.24 * pc_adj * 1.6
                  + 0.18 * sec.get("strength", 30) + 0.14 * dm.get("score", 30)
                  + 0.09 * lerp_score(r["streak"], 0, 3, 7)
                  + 0.09 * (aq.get("auction_score") or 50))
         score = clamp(score * (0.75 + 0.25 * env_k) - hf * 35, 0, 100)
+        if _calib:
+            score = clamp(_calib(score, pb_adj), 0, 100)
         # 是否值得购入分值（0-100，越高越值得）：综合续板概率/质量/板块/妖股，扣减历史风险
         worth = clamp(0.46 * pc_adj + 0.20 * r["quality"] + 0.16 * sec.get("strength", 30)
                       + 0.18 * (dm.get("score") or 30) - hf * 55, 0, 100)
@@ -2007,6 +2017,7 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
             "similar": dm.get("similar", [])[:1],
             "yizi": r["yizi"], "seal_time": r.get("seal_time"), "zb_count": r.get("zb_count"),
             "gain20": r.get("gain20"),
+            "day_vol_ratio": r.get("day_vol_ratio"),
         })
         items[-1]["auction_pattern"] = aq.get("pattern")
         items[-1]["vol_anomaly"] = aq.get("vol_anomaly")
@@ -2080,6 +2091,28 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
         st = it.get("streak", 0) or 0
         sc = it.get("score", 0) or 0
         pb = it.get("p_break") or 100
+        # ── 负反馈闭环 V1：一票否决（历史回测 480 条确诊的高危画像）──
+        # p_break>=82 且 放量(非缩量) 且 非一字板 → 历史 T+1 胜率仅 33%，强制回避。
+        _vr = None
+        try:
+            from recveto import veto as _veto_fn
+        except Exception:
+            try:
+                from pipeline.recveto import veto as _veto_fn
+            except Exception:
+                _veto_fn = None
+        if _veto_fn is not None:
+            try:
+                _vr = _veto_fn(it)
+            except Exception:
+                _vr = None
+        if _vr:
+            it["tag"] = "高位风险"
+            it["veto_reason"] = _vr
+            if _vr not in (it["risks"] or []):
+                it["risks"] = ([_vr] + (it["risks"] or []))[:3]
+            avoid.append(it)
+            continue
         # 连板高度是推荐分层的稳健主信号（不受保守评分绝对值影响），保证板块不为空。
         if st >= 3 and pb >= 78:
             it["tag"] = "高位风险"

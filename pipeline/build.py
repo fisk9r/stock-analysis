@@ -290,6 +290,20 @@ def run(date_override=None, dedup_close=False):
     lus = engine.build_limit_ups(u, date, snap, code2boards, same_day)
     log("  涨停 %d 只，最高 %d 连板" % (len(lus), max([r["streak"] for r in lus], default=0)))
 
+    # 负反馈闭环特征：当日量/5日均量，供高位否决器判「放量接力 vs 缩量惜售」
+    try:
+        import recveto as recveto_mod
+        n_vr = 0
+        for r in lus:
+            bs_prev = [b for b in (u.bars.get(r["code"]) or []) if b["d"] < date]
+            vr = recveto_mod.day_vol_ratio(u.bar(r["code"], date) or {}, bs_prev)
+            r["day_vol_ratio"] = vr
+            if vr is not None:
+                n_vr += 1
+        log("  否决器量能特征注入 %d/%d 只" % (n_vr, len(lus)))
+    except Exception as e:
+        log("  否决器特征注入失败（不影响主流程）：%r" % e)
+
     log("竞价定调分析 ...")
     auction = engine.auction_profile(u, date, lus)
     ladder_hist = engine.ladder_history(u, date, 5)
@@ -1206,7 +1220,9 @@ def run(date_override=None, dedup_close=False):
     # HY3 引擎叙事未采用（脚本环境无宿主撰写文件 / 日期不符）→ 启用备用模型生成叙事
     if not data["narrative"].get("hy3_applied"):
         try:
-            backup = ai_judge.generate_narrative_backup(data, preferred="kimi")
+            # 2026-08-27 用户拍板：GLM-4.6 保底优先（Coding 端点免费）→ kimi 兜底。
+            # preferred=None 走 models.json 的 narrative_backup = ["zhipu","kimi"]。
+            backup = ai_judge.generate_narrative_backup(data, preferred=None)
             if backup:
                 data["narrative"]["headline"] = backup["headline"]
                 data["narrative"]["bullets"] = backup["bullets"]
@@ -1230,9 +1246,9 @@ def run(date_override=None, dedup_close=False):
             du = os.path.join(ROOT, "config", "deploy_url.txt")
             if os.path.exists(du):
                 deploy_url = open(du, encoding="utf-8").read().strip()
-            summary = notifier.format_stock_summary(data, deploy_url, mode="close")
+            summary = notifier.format_stock_summary(data, deploy_url, mode="close", con=con)
             # ServerChan 单条 desp ≤ 8192 字：附一份精简「只给结果」版，确保关键推送不静默丢失
-            summary["sc_text"] = notifier.format_sc(data, deploy_url, mode="close")["text"]
+            summary["sc_text"] = notifier.format_sc(data, deploy_url, mode="close", con=con)["text"]
             if dedup_close:
                 # 复盘补发(close_again)必须用独立的 mode，与 15:20 按时(mode="close")互不干扰，
                 # 否则会被 notifier 的 once-per-day 去重当成“今日已推送”直接吞掉
@@ -1242,7 +1258,7 @@ def run(date_override=None, dedup_close=False):
                 # 去重按『分析日(adate)』判定，避免前一日补发在零点后运行吞掉当日名额。
                 summary = dict(summary)
                 summary["title"] = summary["title"].replace("盘后复盘", "复盘补发")
-                summary["sc_text"] = notifier.format_sc(data, deploy_url, mode="close_again")["text"]
+                summary["sc_text"] = notifier.format_sc(data, deploy_url, mode="close_again", con=con)["text"]
                 notifier.push(summary, mode="close_again", analysis_date=date)
             else:
                 notifier.push(summary, mode="close", analysis_date=date)
@@ -1386,7 +1402,7 @@ def _push_with_store(mode):
     elif mode == "anomaly":
         summary = notifier.format_anomaly_summary(data, deploy_url, con)
     else:
-        summary = notifier.format_stock_summary(data, deploy_url, mode="close")
+        summary = notifier.format_stock_summary(data, deploy_url, mode="close", con=con)
     return notifier.push(summary, mode=mode)
 
 

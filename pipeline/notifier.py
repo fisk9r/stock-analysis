@@ -1268,7 +1268,7 @@ def _wd(date):
         return date
 
 
-def _fmt_close_compact(data, url="", mode="close"):
+def _fmt_close_compact(data, url="", mode="close", con=None):
     """全新简洁板式（ServerChan / PushPlus 统一）：一屏读完、只给结果。
 
     设计原则：盘面 4 行定调 → 要点 ≤3 条 → 推荐 ≤5 只 → 其余榜单一律单行内联，
@@ -1342,6 +1342,12 @@ def _fmt_close_compact(data, url="", mode="close"):
     recs = sorted(recs, key=lambda x: (0 if _dual_ok(x) else 1,
                                        -(x.get("worth_score") or 0),
                                        -(x.get("p_continue") or 0)))
+    # 负反馈闭环：被否决器拦下的不再出现在推荐位（数据源端已隔离，这里兜底再滤一次）
+    try:
+        import recveto as _rvt
+        recs = [x for x in recs if not _rvt.veto(x)]
+    except Exception:
+        pass
     if recs:
         n_gated = sum(1 for x in recs if _dual_ok(x))
         L.append("🔥 **推荐 Top%d**%s"
@@ -1437,10 +1443,23 @@ def _fmt_close_compact(data, url="", mode="close"):
     avoid = (rec.get("avoid") or []) if _on("avoid") else []
     if not avoid and _on("avoid") and rec.get("all"):
         avoid = sorted(rec["all"], key=lambda x: -(x.get("p_break") or 0))[:2]
+    # 负反馈闭环：高位回避行标注否决原因（放量接力高风险 vs 普通高位）
     _sec("🚫 高位回避", [
-        "**%s**(%s·断板%.0f%%)"
-        % (a.get("name", "?"), _board(a), a.get("p_break", 0) or 0)
+        "**%s**(%s·断板%.0f%%)%s"
+        % (a.get("name", "?"), _board(a), a.get("p_break", 0) or 0,
+           (" ⛔%s" % a["veto_reason"][:30] if a.get("veto_reason") else ""))
         for a in avoid[:3]])
+    # 负反馈闭环：历史胜率透明化（真实的过滤改造证据，随 rec_picks 增长自动更新）
+    if _on("rec"):
+        try:
+            import recveto as _rvt2
+            _hint = _rvt2.quality_hint(con)
+            if _hint:
+                L.append("")
+                L.append("🧪 **筛选改进实证**：%s（已剔除高位放量接力票——"
+                         "该画像历史胜率仅 33%%）" % _hint)
+        except Exception:
+            pass
     pn = data.get("panic") or {}
     if pn.get("level") in ("升温", "恐慌"):
         L.append("")
@@ -1657,7 +1676,7 @@ def _fmt_close_compact(data, url="", mode="close"):
     return "\n".join(L)
 
 
-def format_stock_summary(data, url="", mode="close"):
+def format_stock_summary(data, url="", mode="close", con=None):
     """ServerChan/PushPlus(markdown) 排版：盘面数据 / 复盘要点 / 推荐 / 风险，分区清晰、留白克制。
     mode='close' 收盘后；mode='preauction' 竞价前。"""
     m = data.get("meta", {})
@@ -1752,7 +1771,7 @@ def format_stock_summary(data, url="", mode="close"):
 
     # 收盘后复盘：统一走「简洁板式」（与 ServerChan 同源，一屏读完只给结果）
     return {"title": "A股盘后复盘 %s" % date,
-            "text": _fmt_close_compact(data, url, mode)}
+            "text": _fmt_close_compact(data, url, mode, con=con)}
 
 
 # ServerChan 免费档单条 desp 硬上限 8192 字，超长会被静默丢弃（导致收盘/复盘只到 PushPlus）。
@@ -1762,7 +1781,7 @@ def format_stock_summary(data, url="", mode="close"):
 SC_CAP = 8000
 
 
-def format_sc(data, url="", mode="close"):
+def format_sc(data, url="", mode="close", con=None):
     """ServerChan 专用精简版（只给结果、强结构、< 8K）。"""
     m = data.get("meta", {})
     date = m.get("date", "")
@@ -1817,7 +1836,7 @@ def format_sc(data, url="", mode="close"):
 
     # 收盘后复盘：与 PushPlus 共用同一简洁板式（天然远小于 8K 上限）
     _title = ("复盘补发 %s" % date) if mode == "close_again" else ("盘后复盘 %s" % date)
-    return {"title": _title, "text": _fmt_close_compact(data, url, mode)}
+    return {"title": _title, "text": _fmt_close_compact(data, url, mode, con=con)}
 
 
 def format_auction_summary(data, url="", con=None):
@@ -1838,13 +1857,33 @@ def format_auction_summary(data, url="", con=None):
     L.append("**外围定调**：%s" % _global_signal(g))
     L.append("")
 
-    strong, weak, newstrong, warn = [], [], [], []
+    strong, weak, newstrong, warn, lowopen = [], [], [], [], []
     for it in recs[:60]:
         code = it.get("code")
         aq = aitems.get(code) or {}
         pat = aq.get("pattern")
         va = aq.get("vol_anomaly") or {}
         is_prev = code in prev
+        # ── 负反馈闭环 G1：竞价纪律（回测实证）──
+        # 低开 → T+1 收红率仅 24%/-2.24%；不低开+龙头/缩量 → 78%/+5.50%
+        try:
+            import recveto as _rv
+            _gate = _rv.auction_gate(aq.get("open_pct"), {"tag": it.get("tag"),
+                                                          "vol_anomaly": va})
+        except Exception:
+            _gate = None
+        open_pct_v = aq.get("open_pct")
+        if _gate and _gate.get("action") == "avoid" and pat != "一字板":
+            # 一字竞价通常无成交量可判，除一字外低开一律进回避段
+            if open_pct_v is not None and open_pct_v < 0:
+                it2 = dict(it)
+                it2["gate_evidence"] = "竞价低开 %.1f%% · 历史 T+1 收红率仅 24%%/均值 -2.24%%" % open_pct_v
+                warn.append((it2, aq))
+                if is_prev:
+                    weak.append((it2, aq))
+                else:
+                    lowopen.append((it2, aq))
+                continue
         if va.get("warn") or pat == "强转弱":
             warn.append((it, aq))
             if is_prev:
@@ -1855,6 +1894,10 @@ def format_auction_summary(data, url="", con=None):
             strong.append((it, aq, tag))
         elif (not is_prev) and pat and pat not in ("强转弱",) and (aq.get("yizi") or pat in ("一字板", "弱转强", "高开高走")):
             newstrong.append((it, aq))
+
+    L.append("> **竞价纪律（480 笔历史推荐实测）**：低开票一律回避（收红率仅 24%）；"
+             "不低开 + 核心龙头或缩量板胜率 78% 均值 +5.5%。以下名单已按此执行。")
+    L.append("")
 
     L.append("### 续强确认（昨日推荐 · 今日竞价强）")
     if strong:
@@ -1891,6 +1934,12 @@ def format_auction_summary(data, url="", con=None):
         L.append("")
         L.append("> 强势标的较多，仅列前 %d 只；完整判定见看板。" % MAX_RECS)
     L.append("")
+    if lowopen:
+        L.append("### 🚫 今日低开回避（新面孔低开 · 历史收红率 24%）")
+        for it, aq in lowopen[:8]:
+            L.append("- **%s**(%s) %s" % (it.get("name"), _board(it),
+                                          it.get("gate_evidence", "竞价低开")))
+        L.append("")
     if warn:
         L.append("### 竞价异动预警（爆量派发 / 强转弱）")
         for it, aq in warn[:6]:
@@ -1899,7 +1948,7 @@ def format_auction_summary(data, url="", con=None):
             action = " → 疑似派发，回避" if va.get("warn") else " → 谨慎"
             L.append("- **%s**(%s) 竞价%s%s%s" % (it.get("name"), _board(it), aq.get("pattern", "-"), extra, action))
         L.append("")
-    if not (strong or weak or newstrong or warn):
+    if not (strong or weak or newstrong or warn or lowopen):
         L.append("竞价整体平稳，暂无明显续强/掉队/异动信号。")
         L.append("")
     if url:
