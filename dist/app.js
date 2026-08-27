@@ -539,10 +539,12 @@
           : (a === '加仓提示' || a === '回踩买入区') ? C.up
           : (a === '逼近卖出' || a === '突破持有') ? C.warn : '';
       };
+      var zbN = (ZN.items || []).filter(function (z) { return z.zhuiban; }).length;
       var zch = '<div class="chips" style="margin-bottom:8px">' +
         '<span class="chip">覆盖 <b>' + n2(ZN.n) + '</b> 只</span>' +
         (AL.sell && AL.sell.length ? '<span class="chip" style="border-color:' + C.down + ';color:' + C.down + '">🛑 破位 <b>' + AL.sell.length + '</b></span>' : '') +
         (AL.time && AL.time.length ? '<span class="chip" style="border-color:' + C.warn + ';color:' + C.warn + '">⏰ 周期到期 <b>' + AL.time.length + '</b></span>' : '') +
+        (zbN ? '<span class="chip" style="border-color:' + C.danger + ';color:' + C.danger + '">🚨 追板回落 <b>' + zbN + '</b></span>' : '') +
         (AL.add && AL.add.length ? '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + '">➕ 加仓 <b>' + AL.add.length + '</b></span>' : '') +
         (AL.take_profit && AL.take_profit.length ? '<span class="chip" style="border-color:' + C.warn + ';color:' + C.warn + '">🎯 逼近卖点 <b>' + AL.take_profit.length + '</b></span>' : '') +
         (AL.rotate && AL.rotate.length ? '<span class="chip" style="border-color:' + C.down + ';color:' + C.down + '">🔄 优化 <b>' + AL.rotate.length + '</b></span>' : '') +
@@ -578,6 +580,12 @@
               }).join('') + '</div>';
           }
         }
+        var zbHtml = '';
+        if (z1.zhuiban) {
+          zbHtml += '<div style="font-size:10px;margin-top:3px;color:' + C.danger + ';font-weight:600">🚨 追板回落：' +
+            E(z1.zhuiban.date) + ' 炸板收' + f(z1.zhuiban.close, 2) +
+            '（较涨停-' + z1.zhuiban.fallback_pct + '%、自高点-' + z1.zhuiban.from_high_pct + '%）→ 离场</div>';
+        }
         var costHtml = (z1.cost ? '<div style="font-size:10px;margin-top:2px">成本 ' + f(z1.cost, 2) +
           ' <span style="color:' + (z1.pnl_pct >= 0 ? C.up : C.down) + '">' + (z1.pnl_pct >= 0 ? '+' : '') + f(z1.pnl_pct, 1) + '%</span></div>' : '');
         return '<tr><td><b>' + E(z1.name || '') + '</b> <span class="muted">' + E(z1.code) + '</span>' +
@@ -590,7 +598,8 @@
           '<td class="r" style="color:' + C.down + '">' + f(z1.stop, 2) + '</td>' +
           '<td><span class="bd" style="' + (ac ? 'border-color:' + ac + ';color:' + ac + ';' : '') + 'font-size:10px;padding:0 4px;white-space:nowrap">' + E(z1.action) + '</span>' +
           (z1.rotate ? ' <span class="bd" style="border-color:' + rc + ';color:' + rc + ';font-size:10px;padding:0 4px;font-weight:600">' + E(z1.rotate) + '</span>' : '') +
-          tgtLine + tsLine + rotHtml +
+          (z1.zhuiban ? ' <span class="bd" style="border-color:' + C.danger + ';color:' + C.danger + ';font-size:10px;padding:0 4px;font-weight:600">追板回落</span>' : '') +
+          tgtLine + tsLine + rotHtml + zbHtml +
           (reasonHtml ? '<div class="muted" style="font-size:10px;margin-top:2px">' + reasonHtml + '</div>' : '') + '</td></tr>';
       });
       zch += table([{ t: '标的' }, { t: '现价', a: 'r' }, { t: '买入区间', a: 'r' }, { t: '卖出区间', a: 'r' }, { t: '止损', a: 'r' }, { t: '操作/周期目标' }], zRows);

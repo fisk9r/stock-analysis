@@ -1674,6 +1674,37 @@ def format_stock_summary(data, url="", mode="close"):
                 L.append("- 关注池：" + "、".join("%s(%s)" % (w["name"], w.get("reason", "")) for w in pp["watch"][:8]))
             if pp.get("risks"):
                 L.append("- 风险提醒：%s" % "；".join(pp["risks"]))
+        # ⚡ 短线/超短线盘前操作提示（追板回落/破位/停滞 当日离场或换强）
+        _zs = (data.get("zones") or {}).get("items") or []
+        _zst = [x for x in _zs if x.get("horizon") in ("短线", "超短线")]
+        if _zst:
+            _zst.sort(key=lambda x: (0 if x.get("zhuiban") else 1,
+                                     0 if x.get("rotate") else 1,
+                                     -(x.get("pnl_pct") or 0)))
+            L.append("")
+            L.append("**⚡ 短线/超短线盘前操作（持仓/关注）**")
+            L.append("> 追板回落/破位/停滞一律当日离场或换强；完整买卖区见看板。")
+            for x in _zst[:8]:
+                nm = x.get("name", "?")
+                hz = x.get("horizon")
+                zb = x.get("zhuiban")
+                seg = "- **%s**[%s] 现%.2f %+.1f%%" % (nm, hz, x.get("close", 0), x.get("pct", 0))
+                if zb:
+                    seg += " 🚨追板回落(%s炸板收%.2f,较涨停-%s%%)→**离场**" % (
+                        zb["date"], zb["close"], zb["fallback_pct"])
+                elif x.get("rotate") in ("止损", "割肉"):
+                    seg += " → **%s**：%s" % (x["rotate"], (x.get("rotate_reason") or "")[:28])
+                elif x.get("rotate") == "更换":
+                    seg += " → 离场换强"
+                elif x.get("action") in ("破位卖出", "跌破警示"):
+                    seg += " → 弱势观望"
+                t = x.get("targets") or {}
+                ts = t.get("短线") or t.get("超短线") or {}
+                if ts:
+                    seg += " ｜短目标%.2f(%d日)" % (ts["price"], ts["days"])
+                if x.get("time_status"):
+                    seg += " ｜%s" % x["time_status"]
+                L.append(seg)
         if url:
             L.append("")
             L.append("完整看板：%s" % url)
@@ -1724,6 +1755,22 @@ def format_sc(data, url="", mode="close"):
             L.append("盘前策略：仓位 %s ｜ 主线 %s ｜ 接力 %s"
                      % (pp["position"], "、".join(pp.get("main_line", []) or []),
                         "、".join(pp.get("relay_dir", []) or [])))
+        # ⚡ 短线/超短线盘前操作（追板回落/破位/停滞 当日离场或换强）
+        _zs = (data.get("zones") or {}).get("items") or []
+        _zst = [x for x in _zs if x.get("horizon") in ("短线", "超短线")]
+        if _zst:
+            _zst.sort(key=lambda x: (0 if x.get("zhuiban") else 1,
+                                     0 if x.get("rotate") else 1))
+            L.append("⚡短线操作：")
+            for x in _zst[:6]:
+                zb = x.get("zhuiban")
+                if zb:
+                    L.append("- %s 追板回落(%s炸板收%.2f,-%s%%)→离场"
+                             % (x.get("name"), zb["date"], zb["close"], zb["fallback_pct"]))
+                elif x.get("rotate") in ("止损", "割肉", "更换"):
+                    L.append("- %s %s" % (x.get("name"), x["rotate"]))
+                else:
+                    L.append("- %s %s" % (x.get("name"), x.get("action")))
         if url:
             L.append("看板：%s" % url)
         return {"title": "竞价前 %s" % date, "text": "\n".join(L)}
@@ -1914,6 +1961,17 @@ def format_open_anomaly_summary(data, url="", con=None):
     else:
         L.append("（高位断板概率整体可控）")
     L.append("")
+
+    # 🚨 追板回落·开盘前离场（追板资金被套，短线当日走）
+    _zs = (data.get("zones") or {}).get("items") or []
+    _zb = [x for x in _zs if x.get("zhuiban") and x.get("horizon") in ("短线", "超短线")]
+    if _zb:
+        L.append("### 🚨 追板回落·开盘前离场")
+        for x in _zb[:5]:
+            zb = x["zhuiban"]
+            L.append("- **%s**(%s) %s炸板收%.2f(较涨停-%s%%) → 开盘宜离场"
+                     % (x.get("name"), x.get("code"), zb["date"], zb["close"], zb["fallback_pct"]))
+        L.append("")
 
     if url:
         L.append("---")

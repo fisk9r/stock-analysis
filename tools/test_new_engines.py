@@ -417,6 +417,47 @@ def main():
     check("summary_lines 含关注股优化段", any("关注股优化" in l for l in sl_rot),
           "-> %s" % [l for l in sl_rot if "优化" in l][:1])
 
+    # 9g 追板回落检测 + 超短线周期 + 盘前过滤
+    base = [10.0 + 0.05 * ((i % 2) * 2 - 1) for i in range(45)]
+    bars_base = mk_bars(base)
+    # 炸板日：前收10.0，最高触涨停11.0，收10.4（较涨停-5.5%、自高点-5.5%）
+    zb_bar = {"d": "d045", "o": 10.0, "h": 11.0, "l": 10.2, "c": 10.4, "v": 5000}
+    bars_zb = bars_base + [zb_bar]
+    rz_zb = zones.analyze_one("TZB", "炸板样本", bars_zb, horizon="短线")
+    check("追板回落命中", bool(rz_zb) and bool(rz_zb["zhuiban"]),
+          "-> %s" % (rz_zb and rz_zb["zhuiban"]))
+    check("短线追板回落强制止损离场",
+          bool(rz_zb) and rz_zb["rotate"] == "止损",
+          "-> %s | %s" % (rz_zb and rz_zb["rotate"], rz_zb and rz_zb["rotate_reason"]))
+    # 守住涨停（收近涨停）不命中
+    hold_bar = {"d": "d045", "o": 10.0, "h": 11.0, "l": 10.5, "c": 10.98, "v": 5000}
+    rz_hold = zones.analyze_one("THD", "守板样本", bars_base + [hold_bar], horizon="短线")
+    check("收近涨停不误报追板回落", bool(rz_hold) and not rz_hold["zhuiban"],
+          "-> %s" % (rz_hold and rz_hold["zhuiban"]))
+    # 普通波动不触板不命中
+    norm_bar = {"d": "d045", "o": 10.0, "h": 10.3, "l": 9.8, "c": 10.1, "v": 1000}
+    rz_norm = zones.analyze_one("TNM", "普通样本", bars_base + [norm_bar], horizon="短线")
+    check("普通波动不命中追板回落", bool(rz_norm) and not rz_norm["zhuiban"])
+    # 中线追板回落只给理由，不直接强制止损（除非同时破位）
+    rz_mid = zones.analyze_one("TZM", "中线炸板", bars_zb, horizon="中线")
+    check("中线追板回落给理由但不强制止损",
+          bool(rz_mid) and rz_mid["zhuiban"] and rz_mid["rotate"] != "止损",
+          "-> rotate=%s" % (rz_mid and rz_mid["rotate"]))
+    # 超短线周期窗口=3日
+    tz = zones.analyze_one("TCH", "超短样本", bars_zb, horizon="超短线")
+    check("超短线周期窗口=3日", bool(tz) and tz["horizon"] == "超短线"
+          and tz["targets"].get("超短线", {}).get("days") == 3,
+          "-> %s" % (tz and tz["targets"].get("超短线")))
+    # summary_lines 含追板回落段
+    class _FZ:
+        bars = {"TZB": bars_zb}
+        stocks = {}
+        dates = []
+    zr_zb = zones.scan(_FZ(), "d999", ["TZB"], horizons={"TZB": "短线"})
+    sl_zb = zones.summary_lines(zr_zb)
+    check("summary_lines 含追板回落段", any("追板回落" in l for l in sl_zb),
+          "-> %s" % [l for l in sl_zb if "追板回落" in l][:1])
+
     # ================= 8. 分用户推送路由（notifier 纯函数，离线可测） =================
     print("\n---- 8. 分用户推送路由 ----")
     sys.path.insert(0, os.path.join(ROOT, "pipeline"))
@@ -443,6 +484,30 @@ def main():
     check("附录含自选与破位提示", "你的自选跟踪" in appx and "中化国际" in appx
           and "破位卖出" in appx)
     check("无关代码不生成附录", _nf._personal_appendix({"zones": zx}, {"000001"}) == "")
+
+    # 盘前推送含短线/超短线操作提示 + 追板回落离场
+    zitems = [
+        {"code": "TZB", "name": "炸板股", "horizon": "短线", "close": 10.4, "pct": -5.5,
+         "zhuiban": {"date": "d045", "limit_up": 11.0, "close": 10.4,
+                     "fallback_pct": 5.5, "from_high_pct": 5.5},
+         "rotate": "止损", "rotate_reason": "追板回落离场", "action": "正常持有",
+         "targets": {"短线": {"price": 11.0, "days": 5, "pct": 5.8}}, "time_status": None},
+        {"code": "TMZ", "name": "中线股", "horizon": "中线", "close": 9.0, "pct": -1.0,
+         "zhuiban": None, "rotate": None, "action": "正常持有",
+         "targets": {}, "time_status": None},
+    ]
+    fake_pre = {"meta": {"date": "2026-08-27"}, "zones": {"items": zitems}}
+    pm = _nf.format_stock_summary(fake_pre, "", mode="preauction")
+    check("盘前推送含短线/超短线操作段",
+          "短线/超短线盘前操作" in pm["text"], "-> %s" % ("段缺失" if "短线/超短线" not in pm["text"] else "ok"))
+    check("盘前推送含追板回落离场提示",
+          "追板回落" in pm["text"] and "离场" in pm["text"],
+          "-> %s" % [l for l in pm["text"].splitlines() if "追板回落" in l][:1])
+    sc_pm = _nf.format_sc(fake_pre, "", mode="preauction")
+    check("盘前SC精简版含短线操作", "短线操作" in sc_pm["text"] and "追板回落" in sc_pm["text"])
+    # 竞价后开盘前异动 含追板回落离场块
+    oa = _nf.format_open_anomaly_summary(fake_pre, "")
+    check("开盘前异动含追板回落离场块", "追板回落" in oa["text"] and "离场" in oa["text"])
 
     recs_t = [{"worth_score": 30, "p_continue": 40},
               {"worth_score": 85, "p_continue": 70},

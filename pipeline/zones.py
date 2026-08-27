@@ -39,9 +39,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chanlun  # noqa: E402
 
 ACTION_URGENT = ("破位卖出", "加仓提示")
-HORIZONS = ("短线", "中线", "长线")
+# 周期标注：超短线为显式标注（用户 holdings.json 指定），自动建议只出 短线/中线/长线
+HORIZONS = ("短线", "超短线", "中线", "长线")
+SHORT_HORIZONS = ("短线", "超短线")
 # 各周期默认时间窗（交易日）
-HORIZON_DAYS = {"短线": 5, "中线": 15, "长线": 60}
+HORIZON_DAYS = {"短线": 5, "超短线": 3, "中线": 15, "长线": 60}
 
 
 def _sma(closes, n):
@@ -99,6 +101,8 @@ def compute_targets(close, ma20, slope60, hi60, lo20, hi250, sell_hi):
     return {
         "短线": {"price": short, "days": HORIZON_DAYS["短线"],
                  "pct": round((short / close - 1) * 100, 1) if close else 0},
+        "超短线": {"price": short, "days": HORIZON_DAYS["超短线"],
+                   "pct": round((short / close - 1) * 100, 1) if close else 0},
         "中线": {"price": round(mid, 2), "days": HORIZON_DAYS["中线"],
                  "pct": round((mid / close - 1) * 100, 1) if close else 0},
         "长线": {"price": round(long, 2), "days": HORIZON_DAYS["长线"],
@@ -148,6 +152,46 @@ def _trend_state(close, ma20, ma60, slope60):
     if (slope60 or 0) > 0.04 and ma20 and close > ma20:
         return "up"
     return "side"
+
+
+def detect_zhuiban(code, bars):
+    """检测「追板回落」：近 3 个交易日曾触及涨停（炸板）但大幅回落。返回 dict 或 None。
+
+    主板 limit=10%、双创(300/301/302/688/689) limit=20%、北交所(8/4/920) limit=30%（自适应）。
+    命中条件：当日最高价 >= 涨停价×0.995（触板），且 收盘 < 涨停价×0.985 或 自高点回落 ≥5%。
+    这是「追板资金被套」的强离场信号，尤其对短线/超短线。
+    """
+    if not bars or len(bars) < 2:
+        return None
+    code = str(code or "")
+    if code.startswith(("300", "301", "302", "688", "689")):
+        LIM = 0.20
+    elif code.startswith(("8", "4", "920")):
+        LIM = 0.30
+    else:
+        LIM = 0.10
+    # 取最近 3 根（含当前），从近到远找第一次触板回落；取最近一次命中
+    for i in range(len(bars) - 1, max(-1, len(bars) - 4), -1):
+        b = bars[i]
+        if i < 1:
+            break
+        pc = float(bars[i - 1]["c"])
+        if pc <= 0:
+            continue
+        hi = float(b["h"]); cl = float(b["c"])
+        if hi <= 0 or cl <= 0:
+            continue
+        limit_up = round(pc * (1 + LIM), 2)
+        if hi < limit_up * 0.995:   # 未触板
+            continue
+        from_high = (hi - cl) / hi
+        fallback = (limit_up - cl) / limit_up
+        if cl < limit_up * 0.985 or from_high >= 0.05:
+            return {"date": b.get("d"), "limit_up": limit_up,
+                    "close": round(cl, 2),
+                    "fallback_pct": round(fallback * 100, 1),
+                    "from_high_pct": round(from_high * 100, 1)}
+    return None
 
 
 def analyze_one(code, name, bars, cost=None, horizon=None, elapsed=None,
@@ -336,6 +380,19 @@ def analyze_one(code, name, bars, cost=None, horizon=None, elapsed=None,
                     "score": c.get("worth_score"),
                     "p_continue": c.get("p_continue")} for c in cands[:3]]
 
+    # ---- 追板回落检测：触板后炸板回落 → 短线/超短线当日离场 ----
+    zhuiban = detect_zhuiban(code, bars)
+    if zhuiban:
+        reasons.append("⚠ 追板回落：%s 触及涨停(限价%.2f)后回落，收%.2f（较涨停-%s%%、自高点-%s%%），追板资金被套"
+                       % (zhuiban["date"], zhuiban["limit_up"], zhuiban["close"],
+                          zhuiban["fallback_pct"], zhuiban["from_high_pct"]))
+        if final_horizon in SHORT_HORIZONS:
+            # 短线追板资金被套=当日离场信号：盖过停滞/割肉，仅次于已破位
+            rotate = "止损"
+            rotate_reason = ("追板回落：%s 涨停炸板收%.2f（较涨停-%s%%），"
+                             "短线追板资金被套，盘前宜果断离场"
+                             % (zhuiban["date"], zhuiban["close"], zhuiban["fallback_pct"]))
+
     return {
         "code": code, "name": name,
         "close": round(close, 2),
@@ -363,6 +420,8 @@ def analyze_one(code, name, bars, cost=None, horizon=None, elapsed=None,
         "rotate": rotate,
         "rotate_reason": rotate_reason,
         "replace": replace,
+        # ---- 新增：追板回落（触板炸板回落，短线当日离场）----
+        "zhuiban": zhuiban,
     }
 
 
@@ -454,6 +513,14 @@ def summary_lines(zr):
     tps = al.get("take_profit") or []
     times = al.get("time") or []
     rotates = al.get("rotate") or []
+    # 追板回落·离场（短线/超短线追板资金被套，当日走人）——最高优先级，置于段首
+    zbs = [x for x in (zr.get("items") or [])
+           if x.get("zhuiban") and x.get("horizon") in SHORT_HORIZONS]
+    if zbs:
+        out.append("🚨 追板回落·离场：" + "；".join(
+            "%s[%s] %s炸板收%.2f(较涨停-%s%%)" % (tag(x), x["horizon"], x["zhuiban"]["date"],
+                                               x["zhuiban"]["close"], x["zhuiban"]["fallback_pct"])
+            for x in zbs[:5]))
     if rotates:
         out.append("🔄 关注股优化（离场/更换/止损/割肉）：" + "；".join(
             "%s[%s] %s：%s" % (tag(x), x.get("horizon"), x["rotate"],
