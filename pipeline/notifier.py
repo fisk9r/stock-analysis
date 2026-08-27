@@ -1352,14 +1352,24 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         n_gated = sum(1 for x in recs if _dual_ok(x))
         L.append("🔥 **推荐 Top%d**%s"
                  % (len(recs), ("（✅双重认证 %d 只）" % n_gated) if n_gated else "（今日无双重认证标的）"))
+        # 连板计划索引：code → 计划单（预期高度/买卖区）
+        _lp = {p.get("code"): p for p in (rec.get("ladder_plans") or [])}
         for i, it in enumerate(recs, 1):
             # 注意：必须用「- 」列表语法，ServerChan/PushPlus 渲染器对裸 "1. " 行不换行
             rs = it.get("reasons") or []
             extra = (" ｜ %s" % "、".join(rs[:1])) if rs else ""
             okmark = "✅ " if _dual_ok(it) else ""
-            L.append("- %s**%d. %s**(%s) · 价值 **%.0f分** · 晋级 **%.0f%%**%s"
+            warnmark = (" ⚠%s" % (it.get("veto_reason") or "")[:26]) if it.get("risk_flag") else ""
+            plan_sfx = ""
+            _pl = _lp.get(it.get("code"))
+            if _pl:
+                bz, sz, sp = _pl.get("buy_zone") or [0, 0], _pl.get("sell_zone") or [0, 0], _pl.get("stop")
+                plan_sfx = " ｜ 🎯%s 买%.2f~%.2f 卖%.2f 止损%.2f" % (
+                    _pl.get("expected_top", ""), bz[0], bz[1], sz[0], sp or 0)
+            L.append("- %s**%d. %s**(%s) · 价值 **%.0f分** · 晋级 **%.0f%%**%s%s%s"
                      % (okmark, i, it.get("name", "?"), _board(it),
-                        it.get("worth_score", 0), it.get("p_continue", 0), extra))
+                        it.get("worth_score", 0), it.get("p_continue", 0), extra,
+                        warnmark, plan_sfx))
     else:
         L.append("🔥 今日无明确推荐，建议控仓或低位试错")
     # ---- 分区榜单：每板块独立标题，每股单独一行（用户要求：分区清晰不糊在一起）----
@@ -1371,6 +1381,19 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         L.append("**%s**" % icon_title)
         for r in rows:
             L.append("- %s" % r)
+
+    # ---- 连板机会计划单（用户需求：挖掘连板第二天有机会买的票 + 买卖区间 + 预期高度）----
+    lps = rec.get("ladder_plans") or [] if _on("rec") else []
+    if lps:
+        _sec("🎯 连板机会计划（次日竞价介入口径）", [
+            "**%s** %s ｜ 买 %.2f~%.2f · 目标 %s~%.2f · 止损 %.2f · 持有%d日 · R=%.1f · 到10%%率%d%%%s"
+            % (p.get("name", "?"), p.get("expected_top", ""),
+               p["buy_zone"][0], p["buy_zone"][1],
+               p["sell_zone"][0], p["sell_zone"][1], p["stop"],
+               p.get("hold_days", 2), p.get("rr", 0),
+               p.get("reach10", 0),
+               (" ｜" + p["evidence"]) if p.get("evidence") and p.get("sample_n") else "")
+            for p in lps[:6]])
 
     trend = rec.get("trend") or [] if _on("trend") else []
     _sec("📈 趋势主升", [

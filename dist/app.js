@@ -2013,6 +2013,33 @@
     h += group('⚡ 强动量 · 连板余波（' + (R.momentum || []).length + '）', R.momentum, 'momentum',
       '近期≥2次涨停/≥2连板基因 + 多头未破位 + 距高点回撤≤18%（接住“连板妖股型、今日非涨停”掉缝里的票，如风范股份）');
 
+    /* 连板机会计划：挖掘「连板第二天有机会买」的票，给预期高度+买卖区间（2026-08-27 用户需求） */
+    (function () {
+      var LP = R.ladder_plans || [];
+      if (!LP.length) return;
+      var body = '<div class="grid g2">' + LP.map(function (p) {
+        var rc = p.reach10 >= 40 ? C.up : p.reach10 >= 25 ? C.gold : C.gray;
+        return '<div class="rec"><div class="rh">' +
+          '<span class="nm">' + stk(p.code, p.name) + '</span>' +
+          lbBadge(p.entry_streak) +
+          '<span class="bd ok" style="font-size:11px;padding:0 4px">🎯 ' + E(p.expected_top) + '</span>' +
+          '<span class="sc" style="color:' + rc + '">到10%' + f(p.reach10, 0) + '%</span></div>' +
+          '<div class="chips" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:5px">' +
+          '<span class="chip">次日买 <b>' + f(p.buy_zone[0], 2) + '~' + f(p.buy_zone[1], 2) + '</b></span>' +
+          '<span class="chip">目标 <b>' + f(p.sell_zone[0], 2) + '~' + f(p.sell_zone[1], 2) + '</b></span>' +
+          '<span class="chip" style="border-color:' + C.down + ';color:' + C.down + '">止损 ' + f(p.stop, 2) + '</span>' +
+          '<span class="chip">持有 ' + p.hold_days + '日</span>' +
+          '<span class="chip">盈亏比 ' + f(p.rr, 1) + '</span>' +
+          '</div>' +
+          (p.evidence ? '<div class="note" style="margin-top:6px;color:var(--muted)">' + E(p.evidence) +
+            (p.sample_n ? ' · 样本 ' + p.sample_n + ' 笔' : '') + '</div>' : '') +
+          '<div class="note" style="margin-top:4px;color:var(--muted)">竞价纪律：不低开才买；低开(<0)一律放弃（历史收红率仅24%）</div>' +
+          '</div>';
+      }).join('') + '</div>';
+      h += card('🎯 连板机会计划（' + LP.length + '）· 预期高度 + 次日买卖区', body,
+        '从全市场日K重建历史连板路径按高度分桶：入手N板后开盘接力，统计中位溢价/到10%率/持有天数。预期板数=期望收益折算；止损-8%。执行以9:25竞价纪律为准');
+    })();
+
     /* 综合最优解：融合连板/趋势/席位/题材/连续信号/区间，多引擎共振优先 */
     (function () {
       var FZ = R.fused || [];

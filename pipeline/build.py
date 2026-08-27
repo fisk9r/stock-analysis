@@ -411,6 +411,19 @@ def run(date_override=None, dedup_close=False):
     log("生成当日推荐 ...")
     rec = engine.recommend(lus, risks, demons, inds, sent, cyc, stats, auction["items"], regime, relay)
 
+    # 连板预期空间引擎（用户需求 2026-08-27）：挖掘「明天有机会买的连板票」，
+    # 给买入/卖出区间、止损与预期高度（如 3板→预期5板）；高位票只标注不拦。
+    try:
+        import ladderplan
+        lp_stats = ladderplan.ladder_stats(u)
+        rec["ladder_plans"] = ladderplan.scan(u, date, lus, lp_stats, topn=12)
+        log("  连板计划 %d 只（3板桶 n=%d）" % (
+            len(rec.get("ladder_plans") or []),
+            (lp_stats.get(3) or {}).get("n", 0)))
+    except Exception as e:
+        log("  连板计划失败（不影响主流程）：%r" % e)
+        rec["ladder_plans"] = []
+
     # 盘前策略：聚合 recommend 的仓位/策略 + 板块/接力/风险，供看板与盘前推送
     try:
         plan = engine.preopen_plan(rec, inds, relay, risks)

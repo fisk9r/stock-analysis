@@ -2091,8 +2091,9 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
         st = it.get("streak", 0) or 0
         sc = it.get("score", 0) or 0
         pb = it.get("p_break") or 100
-        # ── 负反馈闭环 V1：一票否决（历史回测 480 条确诊的高危画像）──
-        # p_break>=82 且 放量(非缩量) 且 非一字板 → 历史 T+1 胜率仅 33%，强制回避。
+        # ── 负反馈闭环 V1（标注式，2026-08-27 用户指令）──
+        # 高危画像不一刀切：WARN 降权+标注后照常参与分层（用户仍要挖掘连板次日买点）；
+        # 仅极端画像(VETO|)拦入回避。
         _vr = None
         try:
             from recveto import veto as _veto_fn
@@ -2107,10 +2108,16 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
             except Exception:
                 _vr = None
         if _vr:
+            _reason = _vr.split("|", 1)[1] if "|" in str(_vr) else str(_vr)
+            it["veto_reason"] = _reason
+            if _reason not in (it["risks"] or []):
+                it["risks"] = ([_reason] + (it["risks"] or []))[:3]
+            # WARN：高危标注 + 打分降 8%（排序自然靠后，仍可入选主推）
+            it["risk_flag"] = "⚠"
+            sc = sc * 0.92
+            it["score"] = round(sc, 1)
+        if _vr and str(_vr).startswith("VETO"):
             it["tag"] = "高位风险"
-            it["veto_reason"] = _vr
-            if _vr not in (it["risks"] or []):
-                it["risks"] = ([_vr] + (it["risks"] or []))[:3]
             avoid.append(it)
             continue
         # 连板高度是推荐分层的稳健主信号（不受保守评分绝对值影响），保证板块不为空。

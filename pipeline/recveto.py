@@ -9,15 +9,17 @@
   * 灾难信号：低开 → T+1 收红率仅 24% / 均值 -2.24%
 
 目标：把推荐名单的 T+1 收红率从 43% 拉向 80%+
-手段：
-  V1 一票否决——高位(p_break>=82)且非缩量且非一字板 → 强制归入「高位风险/回避」
+手段（2026-08-27 按用户指令改为「标注式」——高位票不一刀切，只降权+标注：
+  100% 胜率不可能，用户仍要挖掘连板次日买点，高风险画像保留但透明警示）：
+  V1 标注——p_break>=82 且放量且非一字：不再强制 avoid；仅 p_break>=90 的极端值才拦
   V2 打分校准——弱化被证伪的 p_break 高分贡献，抬升低分位
-  G1 竞价纪律——次日竞价低开(<0)一律回避；缩量或龙头才保留主推
+  G1 竞价纪律——低开标 avoid 证据不变（回测口径可执行）
 """
 from __future__ import annotations
 
 # ---- 可调参数（均来自历史回测分位）----
-VETO_PB = 82          # 断板概率高于此值视为"高位"
+VETO_PB = 82          # 断板概率高于此值视为"高位"→ 进入「标注」区
+HARD_VETO_PB = 90     # 极端断板概率且非缩量非一字 → 仍然拦下（不入选）
 SHRINK_RATIO = 0.7    # day_vol_ratio < 0.7 视为缩量（67% 胜率/+3.30% 的安全子集）
 LOW_OPEN = -0.01      # 竞价 open_pct < 此值视为低开（24% 胜率的灾难区）
 
@@ -51,16 +53,28 @@ def is_shrunk(ratio):
 
 
 def veto(it):
-    """一票否决判定。返回否决原因串；通过返回 None。
+    """标注式风险判定（2026-08-27 用户指令：100% 胜率不可能，高位票标注即可）。
 
-    规则 V1：p_break >= 82 且 非缩量 且 非一字板 → 否决。
-    （一字板惜售另说；缩量板是该高危子集里唯一胜率>60% 的分支）
+    返回：
+      None                      通过（含一般高位但条件尚可的）
+      "WARN|原因串"             高危画像 → 不拦，由调用方降权+risknote 标注
+      "VETO|原因串"             极端画像(p_break>=90 且放量且非一字) → 拦下进回避
     """
     pb = it.get("p_break") or it.get("pb") or 0
     ratio = it.get("day_vol_ratio")
+    if pb >= HARD_VETO_PB and not is_shrunk(ratio) and not it.get("yizi"):
+        return "VETO|极端断板率(%.0f%%)且放量接力——历史同条件 T+1 胜率仅 33%%" % pb
     if pb >= VETO_PB and not is_shrunk(ratio) and not it.get("yizi"):
-        return "高位高断板率(%.0f%%)且放量接力——历史同条件 T+1 胜率仅 33%%" % pb
+        return "WARN|断板率%.0f%%偏高且放量——历史同条件 T+1 胜率仅 33%%，轻仓/快进快出" % pb
     return None
+
+
+def is_veto(verdict):
+    return bool(verdict) and str(verdict).startswith("VETO")
+
+
+def is_warn(verdict):
+    return bool(verdict) and str(verdict).startswith("WARN")
 
 
 def calibrate_score(score, pb):
@@ -155,14 +169,18 @@ def quality_hint(con):
 
 
 def apply_veto(items):
-    """对 recommend() 的 items 全列表执行否决，返回 (kept, vetoed)。不改原列表元素标签，
-    由调用方决定如何处置 vetoed（engine 里强制改 tag 入 avoid）。"""
+    """对 recommend() 的 items 全列表执行标注式判定，返回 (kept, vetoed)。
+    vetoed 仅含极端(VETO|)者；WARN 者保留在 kept 且带 veto_reason 供降权/标注。"""
     kept, vetoed = [], []
     for it in items:
         reason = veto(it)
-        if reason:
-            it.setdefault("veto_reason", reason)
+        if not reason:
+            kept.append(it)
+        elif is_veto(reason):
+            it.setdefault("veto_reason", reason.split("|", 1)[1])
             vetoed.append(it)
         else:
+            it.setdefault("veto_reason", reason.split("|", 1)[1])
+            it["risk_flag"] = "⚠"
             kept.append(it)
     return kept, vetoed

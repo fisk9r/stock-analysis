@@ -27,13 +27,17 @@ def check(name, cond, detail=""):
         print("FAIL  %s  %s" % (name, detail))
 
 
-# ---------- V1 一票否决 ----------
+# ---------- V1 标注式判定（2026-08-27 用户指令：高位标注即可，不一刀切）----------
 it_high_vol = {"code": "600000", "p_break": 85, "day_vol_ratio": 1.4, "yizi": False}
 r = recveto.veto(it_high_vol)
-check("高位+放量 → 否决", r is not None and "33" in r, repr(r))
+check("高位+放量 → WARN(不拦)", recveto.is_warn(r) and "33" in str(r), repr(r))
 
-it_high_shrink = {"code": "600001", "p_break": 85, "day_vol_ratio": 0.5, "yizi": False}
-check("高位+缩量 → 放行(历史胜率67%分支)", recveto.veto(it_high_shrink) is None)
+it_extreme = {"code": "600010", "p_break": 93, "day_vol_ratio": 1.4, "yizi": False}
+r2 = recveto.veto(it_extreme)
+check("极端断板率(>=90)+放量 → VETO(拦)", recveto.is_veto(r2), repr(r2))
+
+it_high_shrink = {"code": "600001", "p_break": 95, "day_vol_ratio": 0.5, "yizi": False}
+check("缩量即使极端断板率 → 放行", recveto.veto(it_high_shrink) is None)
 
 it_high_yizi = {"code": "600002", "p_break": 90, "day_vol_ratio": 1.8, "yizi": True}
 check("一字板惜售 → 放行", recveto.veto(it_high_yizi) is None)
@@ -42,11 +46,11 @@ it_low_pb = {"code": "600003", "p_break": 70, "day_vol_ratio": 1.4, "yizi": Fals
 check("非高位 → 不否决", recveto.veto(it_low_pb) is None)
 
 it_borderline = {"code": "600004", "p_break": 82, "day_vol_ratio": None, "yizi": False}
-check("量能缺失按非缩量保守处理 → 否决", recveto.veto(it_borderline) is not None)
+check("量能缺失按非缩量保守处理 → 至少WARN", recveto.veto(it_borderline) is not None)
 
-# 边界：ratio=0.7 恰好不缩量 → 否决；0.69 缩量放行
-check("ratio=0.7 非缩量边界 → 否决",
-      recveto.veto({"p_break": 82, "day_vol_ratio": 0.7}) is not None)
+# 边界：ratio=0.7 恰好不缩量 → WARN；0.69 缩量放行
+check("ratio=0.7 非缩量边界 → WARN",
+      recveto.is_warn(recveto.veto({"p_break": 82, "day_vol_ratio": 0.7})))
 check("ratio=0.69 缩量 → 放行",
       recveto.veto({"p_break": 82, "day_vol_ratio": 0.69}) is None)
 
@@ -60,12 +64,15 @@ check("今日量缺失 → None", recveto.day_vol_ratio({}, bars) is None)
 bad = [{"v": None}, {"v": 0}, {"v": 0}]
 check("全零历史防除零 → None", recveto.day_vol_ratio(today, bad) is None)
 
-# ---------- apply_veto 批处理 ----------
-items = [dict(it_high_vol), dict(it_high_shrink), dict(it_low_pb)]
+# ---------- apply_veto 批处理（标注式：WARN 留在 kept 带 risk_flag，VETO 才入 vetoed）----------
+items = [dict(it_high_vol), dict(it_extreme), dict(it_high_shrink), dict(it_low_pb)]
 kept, vetoed = recveto.apply_veto(items)
-check("批处理 kept/vetoed 划分", len(kept) == 2 and len(vetoed) == 1,
+check("批处理 kept=3 / vetoed=1（仅极端）", len(kept) == 3 and len(vetoed) == 1,
       "%d/%d" % (len(kept), len(vetoed)))
-check("被否决者带 veto_reason", bool(vetoed[0].get("veto_reason")))
+check("被拦者带 veto_reason", bool(vetoed[0].get("veto_reason")))
+warned = [x for x in kept if x.get("risk_flag")]
+check("WARN 者留在 kept 且带 risk_flag", len(warned) == 1 and warned[0]["code"] == "600000",
+      repr([x.get("code") for x in kept]))
 
 # ---------- V2 打分校准 ----------
 s82 = recveto.calibrate_score(80.0, 85)   # 高位压分
