@@ -2033,7 +2033,10 @@
           '</div>' +
           (p.evidence ? '<div class="note" style="margin-top:6px;color:var(--muted)">' + E(p.evidence) +
             (p.sample_n ? ' · 样本 ' + p.sample_n + ' 笔' : '') + '</div>' : '') +
-          '<div class="note" style="margin-top:4px;color:var(--muted)">竞价纪律：不低开才买；低开(<0)一律放弃（历史收红率仅24%）</div>' +
+          '<div class="note" style="margin-top:4px;color:' + (p.gate === 'avoid' ? C.down : 'var(--muted)') + '">' +
+            (p.gate === 'avoid'
+              ? '🚫 已判低开：放弃买入（历史收红率仅24%）'
+              : E(p.gate_hint || '竞价纪律：不低开才买；低开(< -0.1%)一律放弃（历史收红率仅24%）')) + '</div>' +
           '</div>';
       }).join('') + '</div>';
       h += card('🎯 连板机会计划（' + LP.length + '）· 预期高度 + 次日买卖区', body,
