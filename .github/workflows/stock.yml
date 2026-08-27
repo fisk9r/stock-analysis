@@ -71,6 +71,7 @@ env:
   # zhipu(GLM 免费档) 为保底：kimi 失败/超时时自动切换。
   AI_KIMI_KEY: ${{ secrets.AI_KIMI_KEY }}
   AI_ZHIPU_KEY: ${{ secrets.AI_ZHIPU_KEY }}
+  PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
 
 jobs:
   run:
@@ -194,9 +195,11 @@ jobs:
         env:
           AU: ${{ secrets.ALLOWED_USERS_JSON }}
           HJ: ${{ secrets.HOLDINGS_JSON }}
+          WJ: ${{ secrets.WATCH_JSON }}
         run: |
           if [ -n "$AU" ]; then printf '%s' "$AU" > config/allowed_users.json; echo "✅ 已写出访问人员配置"; else echo "⚠ 未配置 ALLOWED_USERS_JSON，站点将无加密数据（登录后提示无数据）"; fi
           if [ -n "$HJ" ]; then printf '%s' "$HJ" > config/holdings.json; echo "✅ 已写出持仓配置（持股监测）"; else echo "ℹ 未配置 HOLDINGS_JSON，持股监测为空（可在站点「持股监测」页编辑）"; fi
+          if [ -n "$WJ" ]; then printf '%s' "$WJ" > config/watch.json; echo "✅ 已写出关注池配置（网页管理写回）"; else echo "ℹ 未配置 WATCH_JSON，关注池为空（可在站点「⭐ 管理关注股」页创建）"; fi
 
       - name: 执行流水线
         env:
@@ -208,7 +211,7 @@ jobs:
             build)       python pipeline/build.py ;;
             preauction)  python pipeline/build.py --preauction ;;
             auction)     python pipeline/build.py --auction-push ;;
-            anomaly)     python pipeline/build.py --anomaly-push ;;
+            anomaly)     python pipeline/intraday.py || true; python pipeline/build.py --anomaly-push ;;
             close_again) python pipeline/build.py --push-close ;;
             weekend)     python pipeline/build.py --weekend-push ;;
             yaogu)       python pipeline/build.py --yaogu-push ;;
@@ -259,7 +262,7 @@ jobs:
         run: |
           rm -rf site && mkdir -p site
           # 逐个拷贝：默认 shell 是 bash -e，一次 cp 多文件只要缺一个整步就挂
-          for f in index.html styles.css charts.js app.js auth.js nacl.js users.json meta.json sw.js manifest.webmanifest icon.svg; do
+          for f in index.html styles.css charts.js app.js auth.js nacl.js users.json meta.json sw.js manifest.webmanifest icon.svg ai_narrative.json; do
             if [ -f "dist/$f" ]; then cp "dist/$f" site/; else echo "::warning::缺少 dist/$f"; fi
           done
           # 目标必须写全 site/data；写成 site/ 会因目录已存在而变成 site/data/data
