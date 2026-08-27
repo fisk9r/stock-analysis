@@ -194,6 +194,90 @@ def detect_zhuiban(code, bars):
     return None
 
 
+def band_levels(bars, cost=None, vol_ratio=None):
+    """轻量波段区间：给定日K（≥20 根），返回买入区/卖出区/止损 + 操作建议。
+
+    用于：① 趋势票（无成本）给「回踩买 / 反弹卖」波段价；② 持仓（有成本）给
+    卖出建议（止盈/止损/持有）。不调用缠论，开销小，可批量跑全市场。
+
+    返回 dict 或 None（数据不足）。字段：
+      close, ma20, ma60, buy_zone[lo,hi], sell_zone[lo,hi], stop,
+      advice（中文操作建议）, band_action（波段动作枚举）。
+    """
+    if not bars or len(bars) < 20 or not bars[-1].get("c"):
+        return None
+    cur = bars[-1]
+    close = float(cur["c"])
+    closes = [float(b["c"]) for b in bars]
+    ma20 = _sma(closes, 20)
+    ma60 = _sma(closes, 60)
+    struct_low = min(float(b["l"]) for b in bars[max(0, len(bars) - 45):-5])
+    struct_high = max(float(b["h"]) for b in bars[max(0, len(bars) - 60):-2])
+    lo10 = min(float(b["l"]) for b in bars[-10:])
+    lo20 = min(float(b["l"]) for b in bars[-20:]) if len(bars) >= 2 else close
+    hi60 = max(float(b["h"]) for b in bars[-60:]) if len(bars) >= 2 else close
+    low10 = min(float(b["l"]) for b in bars[-10:])
+
+    sup_cands = [("结构低点", struct_low), ("MA20", ma20)]
+    if ma60:
+        sup_cands.append(("MA60", ma60))
+    key_sup_tag, key_sup = _pick_level(sup_cands, close, "below")
+    res_cands = [("阶段高点", struct_high)]
+    key_res_tag, key_res = _pick_level(res_cands, close, "above")
+
+    buy_lo = round(key_sup * 0.985, 2)
+    buy_hi = round(key_sup * 1.02, 2)
+    sell_lo = round(key_res * 0.98, 2)
+    sell_hi = round(key_res * 1.03, 2)
+    stop = round(min(buy_lo, low10), 2)
+
+    # ---- 波段操作建议 ----
+    if cost is not None and close:
+        pnl = (close / float(cost) - 1) * 100
+        if close <= stop:
+            advice, band_action = "止损离场（已破位，按纪律执行）", "止损"
+        elif close >= sell_hi:
+            advice, band_action = "止盈减仓（突破卖出区上沿，落袋为安）", "止盈"
+        elif close >= sell_lo:
+            advice, band_action = "分批止盈（进入卖出区，锁定利润）", "止盈"
+        elif close <= buy_hi and pnl < 15:
+            advice, band_action = "回踩买入区，可逢低摊低/加仓", "加仓"
+        else:
+            advice, band_action = "区间内持有（趋势未破，等待方向）", "持有"
+    else:
+        if close >= sell_lo:
+            advice, band_action = "波段卖点：反弹至卖出区可高抛", "卖点"
+        elif close <= buy_hi:
+            advice, band_action = "波段买点：回踩买入区可低吸", "买点"
+        else:
+            advice, band_action = "区间内持有，等回踩买/冲高卖", "持有"
+
+    # ---- 三档网格：把买/卖区各拆成 3 档价位 + 仓位点，便于分批建仓/减仓 ----
+    def _grid(lo, hi, ratios):
+        if hi <= lo:
+            return [{"price": round(lo, 2), "ratio": round(sum(ratios), 3)}]
+        pts = [lo + (hi - lo) * (i / (len(ratios))) for i in range(len(ratios))]
+        return [{"price": round(p, 2), "ratio": round(r, 3)}
+                for p, r in zip(pts, ratios)]
+    grid_buy = _grid(buy_lo, buy_hi, [0.40, 0.35, 0.25])    # 越低买得越多
+    grid_sell = _grid(sell_lo, sell_hi, [0.30, 0.35, 0.35])  # 越高卖得越多
+
+    return {
+        "close": round(close, 2),
+        "ma20": round(ma20, 2) if ma20 else None,
+        "ma60": round(ma60, 2) if ma60 else None,
+        "buy_zone": [buy_lo, buy_hi],
+        "sell_zone": [sell_lo, sell_hi],
+        "grid_buy": grid_buy,
+        "grid_sell": grid_sell,
+        "stop": stop,
+        "sup_ref": "%s %.2f" % (key_sup_tag, key_sup),
+        "res_ref": "%s %.2f" % (key_res_tag, key_res),
+        "advice": advice,
+        "band_action": band_action,
+    }
+
+
 def analyze_one(code, name, bars, cost=None, horizon=None, elapsed=None,
                 replace_pool=None, exclude=None):
     """bars: [{d,o,h,l,c,v,...}] 升序；cost: 持仓成本价（可选）；

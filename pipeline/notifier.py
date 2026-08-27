@@ -1368,10 +1368,50 @@ def _fmt_close_compact(data, url="", mode="close"):
 
     trend = rec.get("trend") or [] if _on("trend") else []
     _sec("📈 趋势主升", [
-        "**%s**(%s) %.2f ｜ 近5日%d涨"
-        % (t.get("name", "?"), t.get("industry", "—") or "—",
-           t.get("close", 0) or 0, (t.get("trend_meta") or {}).get("up_days", 0) or 0)
-        for t in trend[:4]])
+        "**%s**%s(%s) %.2f ｜ 近5日%d涨%s"
+        % (t.get("name", "?"),
+           "🆕" if t.get("is_new") else ("（历史%s·%d天）" % (t.get("first_seen", "")[:7], t.get("times", 0)) if t.get("continued") or t.get("times", 0) > 1 else ""),
+           t.get("industry", "—") or "—",
+           t.get("close", 0) or 0, (t.get("trend_meta") or {}).get("up_days", 0) or 0,
+           (" ｜ 买%s~%s卖%s~%s" % (t.get("buy_zone", ["", ""])[0], t.get("buy_zone", ["", ""])[1],
+                                    t.get("sell_zone", ["", ""])[0], t.get("sell_zone", ["", ""])[1])
+            if t.get("buy_zone") else ""))
+        for t in trend[:5]])
+    # ---- 综合最优解（融合连板/趋势/席位/题材/连续信号/区间，多引擎共振优先）----
+    fused = rec.get("fused") or []
+    if fused:
+        _sec("🏆 综合最优解", [
+            "**%s**(%s) 综合%.0f分·%d引擎共振%s ｜ %s"
+            % (f.get("name", "?"), f.get("industry", "—") or "—",
+               f.get("fusion_score", 0), f.get("n_engine", 0),
+               ("｜R=%s" % f.get("r")) if f.get("r") is not None else "",
+               "、".join(("%s%s" % (e["engine"], ("+%d" % e["score"] if e["score"] >= 0 else "%d" % e["score"]))
+                          for e in f.get("evidence", [])[:3])))
+            for f in fused[:6]])
+    # ---- 今日作战指令（升级模块聚合：仓位/触发/梯队/归因）----
+    try:
+        _brief = []
+        pa = data.get("position_advice")
+        if pa:
+            _brief.append("建议总仓位 **%d%%**（%s，热度%s/情绪%s）"
+                          % (pa.get("suggest_pct", 50), pa.get("level", ""),
+                             pa.get("heat", "—"), pa.get("sentiment", "—")))
+        lw = data.get("ladder_warn")
+        if lw and lw.get("warns"):
+            _brief.append("梯队[%s·高%d板]：%s" % (lw["level"], lw.get("today_max", 0),
+                                                  "；".join(lw["warns"][:2])))
+        tg = data.get("triggers")
+        if tg and tg.get("hits"):
+            for h in tg["hits"][:4]:
+                _brief.append("🔔【%s】%s（%s）%s" % (h["type"], h["name"], h["pool"], h["detail"]))
+        ac = data.get("accuracy")
+        if ac:
+            _brief.append("昨日Top%d兑现率 %s%%%s" % (ac.get("topn"), ac.get("hit_rate"),
+                                                     ("，失准%d只已归因" % ac["n_miss"]) if ac.get("n_miss") else ""))
+        if _brief:
+            _sec("🧭 今日作战指令", _brief[:8])
+    except Exception:
+        pass
     bull = data.get("bull") or [] if _on("bull") else []
     _sec("🐂 牛股雷达", [
         "**%s**〔%s〕%.2f元 %+.1f%%"

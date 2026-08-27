@@ -412,6 +412,90 @@ def run(date_override=None, dedup_close=False):
         log("  趋势向上筛选失败（不影响主流程）：%r" % e)
         rec["trend"] = []
 
+    # 趋势票持久化 + 波段区间（核心增强）：标注历史/新推荐，避免每日随行情波动；
+    # 给每只趋势票附加回踩买/反弹卖的波段价。
+    try:
+        cur_trend = rec.get("trend") or []
+        for _p in cur_trend:
+            _c = _p.get("code")
+            _bs = [b for b in (u.bars.get(_c) or []) if b["d"] <= date]
+            if len(_bs) >= 20:
+                _bd = zones.band_levels(_bs)
+                if _bd:
+                    _p["buy_zone"] = _bd["buy_zone"]
+                    _p["sell_zone"] = _bd["sell_zone"]
+                    _p["stop"] = _bd["stop"]
+                    _p["band_action"] = _bd["band_action"]
+                    _p["advice"] = _bd["advice"]
+        _states = store.trend_track_states(con) if con else {}
+        _merged = {}
+        for _p in cur_trend:
+            _c = _p["code"]
+            _st = _states.get(_c) or {}
+            _p["is_new"] = _c not in _states
+            _p["continued"] = False
+            _p["first_seen"] = _st.get("first_seen", date)
+            _p["times"] = _st.get("times", 0) + 1
+            # 需求3：明确结论（买/卖/持有 + 具体价格 + 波段≤20交易日）
+            try:
+                _bs_v = [b for b in (u.bars.get(_c) or []) if b["d"] <= date]
+                _vd = engine.trend_verdict(_bs_v, band=_p,
+                                           first_seen=_p.get("first_seen"), date=date)
+                if _vd:
+                    _p["verdict"] = _vd
+            except Exception:
+                pass
+            _merged[_c] = _p
+        # 既往趋势票：若仍处上升趋势（MA20>MA60 且 价>MA20）则继续保留为「历史趋势」
+        for _code, _stt in _states.items():
+            if _code in _merged:
+                continue
+            _bs = [b for b in (u.bars.get(_code) or []) if b["d"] <= date]
+            if len(_bs) < 40:
+                continue
+            _closes = [float(b["c"]) for b in _bs]
+            _ma20 = sum(_closes[-20:]) / 20
+            _ma60 = sum(_closes[-60:]) / 60 if len(_closes) >= 60 else 0
+            if _ma20 and _ma60 and _ma20 > _ma60 and float(_bs[-1]["c"]) > _ma20:
+                _ind = next((n for _, n, k in (code2boards.get(_code) or []) if k == "industry"), "—")
+                _name = _stt.get("name") or (u.stocks.get(_code, {}) or {}).get("name") or _code
+                _p = {"code": _code, "name": _name, "streak": 0, "industry": _ind,
+                      "close": round(float(_bs[-1]["c"]), 2),
+                      "float_mv": (u.stocks.get(_code, {}) or {}).get("float_mv"),
+                      "turn": round(float(_bs[-1].get("turn") or 0), 2),
+                      "quality": 0, "p_continue": 0, "demon": 0,
+                      "score": 0, "worth_score": 0,
+                      "is_new": False, "continued": True,
+                      "first_seen": _stt["first_seen"], "times": _stt["times"] + 1}
+                _bd = zones.band_levels(_bs)
+                if _bd:
+                    _p["buy_zone"] = _bd["buy_zone"]; _p["sell_zone"] = _bd["sell_zone"]
+                    _p["stop"] = _bd["stop"]; _p["band_action"] = _bd["band_action"]
+                    _p["advice"] = _bd["advice"]
+                try:
+                    _vd = engine.trend_verdict(_bs, band=_bd or {},
+                                               first_seen=_stt["first_seen"], date=date)
+                    if _vd:
+                        _p["verdict"] = _vd
+                except Exception:
+                    pass
+                _merged[_code] = _p
+        # 已破位的既往趋势票移出跟踪（不再挂失效标签）
+        _broken = [c for c in _states if c not in _merged]
+        if _broken:
+            store.trend_track_drop(con, _broken)
+        if con:
+            store.trend_track_upsert(con, date, list(_merged.values()))
+        rec["trend"] = sorted(_merged.values(),
+                              key=lambda x: (0 if x.get("is_new") else 1,
+                                             -(x.get("score") or 0)))[:20]
+        log("  趋势持久化：展示 %d 只（新 %d / 历史延续 %d）" % (
+            len(rec["trend"]),
+            sum(1 for x in rec["trend"] if x.get("is_new")),
+            sum(1 for x in rec["trend"] if x.get("continued"))))
+    except Exception as e:
+        log("  趋势持久化失败（不影响主流程）：%r" % e)
+
     # 强动量 · 连板余波选股（接住『连板妖股基因、今天非涨停』掉缝里的票，
     # 如风范股份；与 screen_uptrend 的平滑趋势互补，两档并列呈现）
     try:
@@ -682,7 +766,7 @@ def run(date_override=None, dedup_close=False):
 
     # ---- 关注股雷达：notify.json watch + holdings.json watch==true ----
     try:
-        data["watch"] = watchlist.scan(u, date)
+        data["watch"] = watchlist.scan(u, date, con=con)
         wl = data["watch"]
         if wl:
             log("  关注股雷达：%d 只，急讯 %d 条" % (wl.get("n", 0), wl.get("alert_n", 0)))
@@ -822,6 +906,33 @@ def run(date_override=None, dedup_close=False):
         log("  连续信号失败（不影响主流程）：%r" % e)
         data["signals"] = None
 
+    # ---- 综合最优解：融合连板/趋势/席位/题材/连续信号/区间，输出统一排序 Top20 ----
+    try:
+        rec["fused"] = engine.fuse_recommend(data)
+        log("  综合最优解：融合 %d 只标的" % len(rec.get("fused") or []))
+    except Exception as e:
+        log("  综合最优解失败（不影响主流程）：%r" % e)
+        rec["fused"] = []
+
+    # ---- fused 快照落库（供 accuracy 归因「昨日 Top → 今日兑现」）----
+    try:
+        store.save_snapshot(con, "fused", date, rec.get("fused") or [])
+        con.commit()
+    except Exception as e:
+        log("  fused 快照落库失败：%r" % e)
+
+    # ---- 需求2：推荐准确率归因（昨日 Top5 次日未晋级 → 环节诊断）----
+    try:
+        import accuracy as _acc
+        data["accuracy"] = _acc.build(u, date, con, topn=5)
+        if data["accuracy"]:
+            log("  准确率归因：Top%d 命中率 %s%%｜%s"
+                % (data["accuracy"]["topn"], data["accuracy"]["hit_rate"],
+                   ("失准 %d 只" % data["accuracy"]["n_miss"]) if data["accuracy"]["n_miss"] else "全兑现"))
+    except Exception as e:
+        log("  准确率归因失败（不影响主流程）：%r" % e)
+        data["accuracy"] = None
+
     # ---- 缠论结构（对推荐池/涨停股跑笔-中枢-背驰-买卖点）----
     try:
         rec_codes = [it.get("code") for it in (data.get("recommend", {}).get("all") or [])]
@@ -916,6 +1027,83 @@ def run(date_override=None, dedup_close=False):
     except Exception as e:
         log("  持股监测失败（不影响主流程）：%r" % e)
         data["holdings"] = None
+
+    # ============ 升级模块（一次性挂载，失败互不影响）============
+
+    # ---- A4 情绪→总仓位建议：热度(标杆成交额) + 情绪分 取严 ----
+    try:
+        bh = engine.benchmark_heat(u, date)
+        pa = engine.position_suggestion(bh.get("level"), (sent or {}).get("level"),
+                                        bh.get("score"), (sent or {}).get("score"))
+        data["position_advice"] = pa
+        log("  总仓位建议：%d成（%s）· 热度%s/情绪%s"
+            % (pa["suggest_pct"], pa["level"], pa["heat"], pa["sentiment"]))
+    except Exception as e:
+        log("  总仓位建议失败：%r" % e)
+        data["position_advice"] = None
+
+    # ---- B6 连板梯队断板预警 ----
+    try:
+        data["ladder_warn"] = engine.ladder_warn(u, date)
+        lw = data["ladder_warn"]
+        if lw and lw.get("warns"):
+            log("  梯队预警[%s]：%s" % (lw["level"], "；".join(lw["warns"])))
+    except Exception as e:
+        log("  梯队预警失败：%r" % e)
+        data["ladder_warn"] = None
+
+    # ---- B8 板块轮动实操结论：主线 Top3 + 领涨票 ----
+    try:
+        if code2boards:
+            data["sector_trade"] = engine.sector_trade(u, date, code2boards, topn=3)
+            if data["sector_trade"]:
+                log("  板块轮动：%s"
+                    % "、".join(s["sector"] for s in data["sector_trade"]))
+    except Exception as e:
+        log("  板块轮动失败：%r" % e)
+        data["sector_trade"] = None
+
+    # ---- B5 龙虎榜席位可跟性排序：按历史胜率排可跟席位 ----
+    try:
+        seats = data.get("seats")
+        if seats:
+            stats = seats.get("stats") or {}
+            hits = seats.get("hits") or []
+            ranked = sorted(stats.items(), key=lambda kv: -kv[1].get("win_rate", 0))
+            items = []
+            for label, st in ranked:
+                if st.get("win_rate", 0) >= 55 and st.get("n", 0) >= 8:
+                    reps = [h for h in hits if h.get("label") == label][:3]
+                    items.append({"label": label, "win_rate": st["win_rate"],
+                                  "n": st["n"], "avg_pct": st.get("avg_pct"), "reps": reps})
+            data["seat_follow"] = {"n": len(items), "items": items} if items else None
+            if data["seat_follow"]:
+                log("  可跟席位：%d 个（胜率≥55%%）" % len(items))
+    except Exception as e:
+        log("  可跟席位失败：%r" % e)
+        data["seat_follow"] = None
+
+    # ---- A1 触发式盯盘：波段区/持仓/关注累计 → 条件单命中 ----
+    try:
+        import alerts
+        data["triggers"] = alerts.build_triggers(data, date)
+        if data["triggers"] and data["triggers"]["n"]:
+            log("  触发盯盘：%d 条命中" % data["triggers"]["n"])
+    except Exception as e:
+        log("  触发盯盘失败：%r" % e)
+        data["triggers"] = {"date": date, "n": 0, "hits": []}
+
+    # ---- C11 事件影响可操作评级：解禁→关注股雷达标注 ----
+    try:
+        if data.get("riskcal"):
+            data["riskcal"] = riskcal.grade(data["riskcal"])
+            rflags = riskcal.watch_flags(data["riskcal"])
+            if rflags and data.get("watch"):
+                for it in data["watch"]["items"]:
+                    if it.get("code") in rflags:
+                        it["risk_flag"] = rflags[it["code"]]
+    except Exception as e:
+        log("  事件评级标注失败：%r" % e)
 
     # ---- 持仓×策略/雷达联动：给持仓条目打上当日命中信号标签 ----
     try:

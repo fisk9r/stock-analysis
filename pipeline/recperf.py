@@ -47,6 +47,35 @@ def build(con=None, limit=2400):
     if len(dates) < 5:
         return None
 
+    # ---- 行情阶段分层：用每日推荐样本平均收益自身的趋势近似「市场阶段」 ----
+    # 上升/下降以「当日均值 vs 近20日滚动均值」判定，分桶后各自算胜率。
+    daily_avg = []
+    for d in dates:
+        s = by_date[d]
+        daily_avg.append(round(s["pn"] / s["n"], 2) if s["n"] else 0.0)
+    win_by_phase = {"上升": [], "震荡": [], "下降": []}
+    phase_of = []
+    for i, d in enumerate(dates):
+        win = by_date[d]["win"]
+        n = by_date[d]["n"]
+        if i >= 1:
+            window = daily_avg[max(0, i - 20):i]
+            roll = sum(window) / len(window) if window else 0.0
+            diff = daily_avg[i] - roll
+            phase = "上升" if diff > 0.5 else ("下降" if diff < -0.5 else "震荡")
+        else:
+            phase = "震荡"
+        phase_of.append(phase)
+        if n:
+            win_by_phase[phase].append(win / n * 100.0)
+    phase_winrate = {}
+    for ph, lst in win_by_phase.items():
+        if lst:
+            phase_winrate[ph] = {
+                "win_rate": round(sum(lst) / len(lst), 1),
+                "n_days": len(lst),
+            }
+
     series_dates, win_rate, avg_pct, cont_rate = [], [], [], []
     cum = 1.0
     cumulative = []
@@ -72,6 +101,7 @@ def build(con=None, limit=2400):
         "cont_rate": cont_rate,
         "cumulative": cumulative,
         "n_days": len(dates),
+        "phase_winrate": phase_winrate,
         "recent30": {
             "win_rate": avg(win_rate, 30),
             "avg_pct": avg(avg_pct, 30),

@@ -53,6 +53,30 @@ def scan(date, horizon=14):
             "unlock_top": unlock[:15], "fin_due": []}
 
 
+def grade(rp):
+    """给解禁清单打『可操作评级』：回避 / 中性偏空 / 影响有限（按金额+占比）。"""
+    if not rp:
+        return rp
+    for x in rp.get("unlock_top", []):
+        mv = x.get("mv_yi") or 0
+        ratio = x.get("ratio") or 0
+        if mv >= 50 or ratio >= 10:
+            x["grade"], x["gflag"] = "回避", -1
+        elif mv >= 20 or ratio >= 5:
+            x["grade"], x["gflag"] = "中性偏空", 0
+        else:
+            x["grade"], x["gflag"] = "影响有限", 1
+    return rp
+
+
+def watch_flags(rp):
+    """解禁→关注股雷达的 code->评级 映射，供 watchlist.scan 标注。"""
+    if not rp:
+        return {}
+    return {x["code"]: x.get("grade") for x in rp.get("unlock_top", [])
+            if x.get("code")}
+
+
 def summary_lines(r):
     if not r:
         return []
@@ -60,6 +84,8 @@ def summary_lines(r):
     out = ["解禁雷区（未来 %d 日共 %d 笔，金额 TOP）：未来两周合计压力需留意"
            % (r.get("horizon", 14), r.get("n_all", len(un)))]
     for x in un[:5]:
-        out.append("- %s（%s）%s 解禁 %.1f 亿（占流通 %.2f%%）"
-                   % (x.get("name"), x.get("code"), x.get("day"), x.get("mv_yi"), x.get("ratio")))
+        g = x.get("grade")
+        tag = ("［%s］" % g) if g else ""
+        out.append("- %s（%s）%s 解禁 %.1f 亿（占流通 %.2f%%）%s"
+                   % (x.get("name"), x.get("code"), x.get("day"), x.get("mv_yi"), x.get("ratio"), tag))
     return out

@@ -1294,6 +1294,40 @@ def ladder_history(u, date, days=5):
     return {"dates": [d[5:] for d in dates], "matrix": matrix, "max": maxv}
 
 
+def ladder_warn(u, date, n=8):
+    """连板梯队健康度诊断：高度板断板 + 梯队断层 → 接力退潮预警。
+
+    基于 recent_height_series 近 N 日空间高度序列，输出告警清单。纯本地、零网络。"""
+    ser = recent_height_series(u, date, n=n)
+    if len(ser) < 2:
+        return {"level": "数据不足", "warns": [], "today_max": 0, "yest_max": 0,
+                "lb_today": 0, "series": ser}
+    today = ser[-1]
+    yest = ser[-2]
+    warns = []
+    level = "正常"
+    if today[1] < yest[1]:
+        warns.append("空间板断板：高度 %d→%d 板，接力情绪退潮，次日高位股谨慎"
+                     % (yest[1], today[1]))
+        level = "退潮"
+    # 梯队连续度：近 3 日出现过的连板层级集合
+    recent = ser[-3:]
+    present = set()
+    for _d, _mx, _lb in recent:
+        for k in range(2, _mx + 1):
+            present.add(k)
+    top = today[1]
+    missing = [k for k in range(2, top) if k not in present] if top >= 3 else []
+    if missing:
+        warns.append("梯队断层：缺 %s 板，连板结构不完整，资金抱团松动"
+                     % "、".join("%d" % m for m in missing))
+        level = "退潮" if level != "正常" else "降温"
+    if not warns and today[1] <= yest[1] and today[2] < yest[2]:
+        level = "降温"
+    return {"level": level, "warns": warns, "today_max": today[1],
+            "yest_max": yest[1], "lb_today": today[2], "series": ser}
+
+
 def recent_height_series(u, date, n=20):
     """从 bars 派生近 N 个交易日『空间高度』序列，用于检测峰值后衰减通道。
     返回 [(date, max_streak, lb_count)]，max_streak = 当日涨停股中最大连板数（>=1），
@@ -1342,6 +1376,33 @@ def sector_rotation(u, date, code2boards, topn=12, days=5):
         out.append({"name": ind, "zt_days": series, "today": last,
                     "persistent": persistent, "is_new": is_new, "trend": trend})
     out.sort(key=lambda x: -x["today"])
+    return out
+
+
+def sector_trade(u, date, code2boards, topn=3):
+    """板块轮动实操结论：取 sector_rotation 主线 TopN，附加『领涨票』便于次日直接跟踪。
+
+    返回 [{sector, trend, persistent, is_new, today_zt, leads:[{code,name,chg}]}]，
+    库空时返回 []（前端优雅降级）。"""
+    rot = sector_rotation(u, date, code2boards, topn=12, days=5)
+    if not rot or not code2boards:
+        return []
+    today = u.zt.get(date, set())
+    out = []
+    for s in rot[:topn]:
+        ind = s["name"]
+        leads = []
+        for code, boards in code2boards.items():
+            if any(k == "industry" and nm == ind for _bk, nm, k in boards) and code in today:
+                bs = u.bars.get(code) or []
+                last = [b for b in bs if b["d"] <= date]
+                if last:
+                    leads.append({"code": code,
+                                  "name": (u.stocks.get(code, {}) or {}).get("name") or code,
+                                  "chg": last[-1].get("pct")})
+        leads.sort(key=lambda x: -(x.get("chg") or 0))
+        out.append({"sector": ind, "trend": s["trend"], "persistent": s["persistent"],
+                    "is_new": s["is_new"], "today_zt": s["today"], "leads": leads[:5]})
     return out
 
 
@@ -1722,6 +1783,103 @@ def benchmark_heat(u, date):
         "avg_daily": round(avg_daily, 2),
         "total_amt": round(total_amt, 1),   # 亿元
         "stocks": rows,
+    }
+
+
+def position_suggestion(heat_level, sentiment_level, heat_score=None, sent_score=None):
+    """据『市场热度(标杆成交额) + 情绪分』给出今日建议总仓位（成）。
+
+    两路信号取严：任一侧退潮都压仓，避免单一指标误导。返回 dict。"""
+    _map = {"热": 80, "温": 60, "冷": 40, "样本不足": 50,
+            "亢奋": 80, "偏热": 75, "均衡": 60, "偏冷": 40, "冰点": 20}
+    hp = _map.get(heat_level, 50)
+    sp = _map.get(sentiment_level, 50)
+    pct = min(hp, sp)
+    if pct >= 75:
+        lv = "高仓位(可积极)"
+    elif pct >= 60:
+        lv = "中性偏多(精选)"
+    elif pct >= 40:
+        lv = "中性偏谨慎"
+    else:
+        lv = "低仓位(防守)"
+    reason = "热度=%s · 情绪=%s → 取较严一侧" % (heat_level, sentiment_level)
+    if heat_level in ("冷",) or sentiment_level in ("冰点", "偏冷"):
+        reason += "（退潮期，控仓防回撤）"
+    return {"heat": heat_level, "sentiment": sentiment_level,
+            "suggest_pct": pct, "level": lv, "reason": reason}
+
+
+def trend_verdict(bars, band=None, first_seen=None, date=None, cost=None):
+    """趋势票明确结论（需求3）：建议买入 / 卖出 / 持有，给出具体价格与持有期限。
+
+    纪律硬约束：波段持有上限 **20 个交易日（约1个月）**——连续涨一个月极少见，
+    到期未到卖区也应离场换股。数据来自日K + band_levels，纯本地。
+
+    返回 {action: 建议买入|建议卖出|持有观察|到期离场,
+          buy_price, sell_price, stop_price, hold_limit_days,
+          days_held, deadline, reason} 或 None。
+    """
+    if not bars or len(bars) < 20 or not bars[-1].get("c"):
+        return None
+    band = band or {}
+    close = float(bars[-1]["c"])
+    buy_zone = band.get("buy_zone") or [None, None]
+    sell_zone = band.get("sell_zone") or [None, None]
+    stop = band.get("stop")
+
+    # 已持有天数：自首见日起的交易日数
+    days_held = 0
+    if first_seen:
+        since = [b for b in bars if b["d"] >= first_seen]
+        days_held = max(0, len(since) - 1)
+    HOLD_LIMIT = 20
+    deadline = None
+    if first_seen and len(bars) > days_held:
+        rest = [b for b in bars if b["d"] > (first_seen or "")]
+        # 截止价参考：到期日若仍在区间内则离场
+    expired = days_held >= HOLD_LIMIT and first_seen
+
+    cur = float(close)
+    bz_lo, bz_hi = (buy_zone[0], buy_zone[1]) if buy_zone and buy_zone[0] else (None, None)
+    sz_lo, sz_hi = (sell_zone[0], sell_zone[1]) if sell_zone and sell_zone[0] else (None, None)
+
+    if stop and cur <= stop:
+        action = "卖出（破位止损）"
+        reason = "已跌破止损 %.2f，纪律执行离场" % stop
+    elif sz_lo and cur >= sz_lo:
+        action = "卖出（分批止盈）"
+        reason = "进入卖出区 %s~%s，落袋为安" % (
+            ("%.2f" % sz_lo) if sz_lo else "?", ("%.2f" % sz_hi) if sz_hi else "?")
+    elif expired:
+        action = "到期离场"
+        reason = "持仓已 %d 个交易日（上限%d），波段时间到：无论盈亏换股，连续涨一个月极罕见" % (
+            days_held, HOLD_LIMIT)
+    elif bz_hi and cur <= bz_hi:
+        action = "买入"
+        reason = "回踩买入区 %s~%s，轻仓低吸、破 %s 止损" % (
+            ("%.2f" % bz_lo) if bz_lo else "?", "%.2f" % bz_hi,
+            ("%.2f" % stop) if stop else "?")
+    elif days_held >= 15:
+        action = "减仓"
+        reason = "持有 %d 天接近波段上限，且处区间中段：先减半仓锁定利润" % days_held
+    else:
+        action = "持有观察"
+        reason = "区间中段（买区上方、卖区下方），等回踩或冲高再动手"
+
+    return {
+        "action": action,
+        "buy_price": "%.2f" % bz_lo if bz_lo else None,
+        "buy_zone": list(buy_zone) if buy_zone and buy_zone[0] else None,
+        "sell_price": "%.2f" % sz_lo if sz_lo else None,
+        "sell_zone": list(sell_zone) if sell_zone and sell_zone[0] else None,
+        "stop_price": "%.2f" % stop if stop else None,
+        "hold_limit_days": HOLD_LIMIT,
+        "days_held": days_held,
+        "expired": bool(expired),
+        "close": round(cur, 2),
+        "cost": cost,
+        "reason": reason,
     }
 
 
@@ -2151,6 +2309,108 @@ def screen_uptrend(u, date, code2boards=None, topn=12):
         })
     cands.sort(key=lambda x: -x["score"])
     return cands[:topn]
+
+
+def fuse_recommend(data):
+    """融合多引擎信号，输出统一『最优解』清单（按综合分排序 Top20）。
+
+    融合来源：连板接力(recommend.all) + 趋势主升(recommend.trend) + 游资席位(lhbseats)
+    + 主线题材(theme) + 连续信号(signals) + 买卖区间(zones 破位/买点)。
+
+    每只标的聚合各引擎证据(evidence)并给 fusion_score；同票被多引擎同时命中（共振）
+    者分数更高、可信度更强，避免『单模型每天变』的碎片推荐。
+    """
+    rec = (data or {}).get("recommend") or {}
+    allp = rec.get("all") or []
+    trend = rec.get("trend") or []
+    seats = (data or {}).get("lhbseats") or {}
+    theme_d = (data or {}).get("theme") or {}
+    signals_d = (data or {}).get("signals") or {}
+    zones_d = (data or {}).get("zones") or {}
+
+    # 当日主线题材板块集合（命中主线给加成）
+    mainline_secs = set()
+    for s in (theme_d.get("mainline") if isinstance(theme_d, dict) else []) or []:
+        if s.get("tier") == "主线":
+            mainline_secs.add(s.get("name"))
+    # 龙虎榜活跃标的
+    seat_codes = set()
+    for row in (list(seats.get("reasons") or []) + list(seats.get("top") or [])):
+        if row.get("code"):
+            seat_codes.add(row["code"])
+    # 连续信号活跃标的
+    sig_codes = set()
+    for grp in (signals_d.get("groups") or []):
+        for it in (grp.get("items") or []):
+            if it.get("code"):
+                sig_codes.add(it["code"])
+    # 区间动作映射（破位负向、买点正向）
+    zone_map = {}
+    band_map = {}
+    for it in (zones_d.get("items") or []):
+        if it.get("code"):
+            zone_map[it["code"]] = it.get("action")
+            band_map[it["code"]] = it
+
+    agg = {}
+    def grab(code):
+        return agg.setdefault(code, {"code": code, "name": "", "industry": None,
+                                     "score_parts": []})
+    for it in allp:
+        c = it["code"]; g = grab(c)
+        g["name"] = g["name"] or it.get("name")
+        g["industry"] = g["industry"] or it.get("industry")
+        g["score_parts"].append(("连板接力", it.get("worth_score") or 0, it.get("tag") or ""))
+    for it in trend:
+        c = it["code"]; g = grab(c)
+        g["name"] = g["name"] or it.get("name")
+        g["industry"] = g["industry"] or it.get("industry")
+        band = (it.get("trend_meta") or {}).get("band") or ""
+        g["score_parts"].append(("趋势主升", it.get("worth_score") or 0, band))
+    for c in seat_codes:
+        grab(c)["score_parts"].append(("游资席位", 55, "龙虎榜活跃"))
+    for c in sig_codes:
+        grab(c)["score_parts"].append(("连续信号", 50, "跨日硬信号共振"))
+    for c, g in agg.items():
+        if g.get("industry") in mainline_secs:
+            g["score_parts"].append(("主线题材", 10, "所属板块为当日主线"))
+        zact = zone_map.get(c)
+        if zact in ("加仓提示", "回踩买入区"):
+            g["score_parts"].append(("区间买点", 12, zact))
+        elif zact == "破位卖出":
+            g["score_parts"].append(("区间破位", -25, zact))
+        elif zact in ("逼近卖出", "突破持有"):
+            g["score_parts"].append(("区间卖点", 5, zact))
+
+    out = []
+    for c, g in agg.items():
+        parts = g["score_parts"]
+        if not parts:
+            continue
+        base = sum(max(0, p[1]) for p in parts) / float(len(parts))
+        penalty = sum(min(0, p[1]) for p in parts)
+        n_eng = len(set(p[0] for p in parts))
+        reso = 1.0 + min(0.25, 0.08 * (n_eng - 1))   # 多引擎共振加权
+        fusion = clamp(base * reso + penalty, 0, 100)
+        ev = [{"engine": p[0], "score": p[1], "note": p[2]} for p in parts]
+        # 盈亏比 R：期望收益空间(卖区下沿-现价) / 风险空间(现价-止损)
+        r = None
+        bd = band_map.get(c)
+        if bd:
+            _sl = bd.get("sell_zone") or [None, None]
+            _st = bd.get("stop")
+            _cl = bd.get("close")
+            if _sl and _sl[0] and _st and _cl:
+                denom = _cl - _st
+                if denom > 0:
+                    r = round((_sl[0] - _cl) / denom, 2)
+        if r is not None and r >= 2.0:
+            ev.append({"engine": "盈亏比", "score": 0, "note": "R=%.1f 赔率优" % r})
+        out.append({"code": c, "name": g["name"], "industry": g.get("industry"),
+                    "fusion_score": round(fusion, 1), "n_engine": n_eng,
+                    "r": r, "evidence": ev})
+    out.sort(key=lambda x: -x["fusion_score"])
+    return out[:20]
 
 
 def sector_trend_recommend(u, date, code2boards=None, sectors=None, topn=6):

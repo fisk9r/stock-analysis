@@ -503,6 +503,42 @@
       h += card('🌙 尾盘偷袭监测', tb, '分钟级数据定向扫描焦点池：14:30 后急拉=次日兑现风险/资金抢筹，尾盘跳水=出货警示；「惯犯」=近日常尾盘异动');
     }
 
+    /* 🎯 今日作战指令：总仓位建议 + 触发盯盘 + 梯队预警 + 准确率归因（升级模块聚合） */
+    (function () {
+      var PA = D.position_advice, TG = D.triggers, LW = D.ladder_warn, AC = D.accuracy;
+      if (!PA && !TG && !LW && !AC) return;
+      var body = '';
+      if (PA) {
+        var pc = PA.suggest_pct >= 75 ? C.up : PA.suggest_pct >= 60 ? C.gold : C.down;
+        body += '<div style="margin-bottom:8px"><b style="color:' + pc + ';font-size:15px">建议总仓位 ' +
+          n2(PA.suggest_pct) + '%</b> <span class="muted">（' + E(PA.level) + ' · 热度' + E(PA.heat || '—') + '/情绪' + E(PA.sentiment || '—') + '）</span>' +
+          '<div class="muted" style="font-size:10px;margin-top:2px">' + E(PA.reason || '') + '</div></div>';
+      }
+      if (LW && LW.warns && LW.warns.length) {
+        var lc = LW.level === '退潮' ? C.danger : C.warn;
+        body += '<div style="margin-bottom:8px"><b style="color:' + lc + '">🪜 连板梯队[' + E(LW.level) + '·高' + LW.today_max + '板]</b>' +
+          LW.warns.map(function (w2) { return '<div style="font-size:11px;color:' + lc + '">· ' + E(w2) + '</div>'; }).join('') + '</div>';
+      }
+      if (TG && TG.hits && TG.hits.length) {
+        body += '<div style="margin-bottom:8px"><b>🔔 触发盯盘 <span style="color:' + C.up + '">' + TG.n + '</span> 条命中</b><table style="width:100%;font-size:11px;margin-top:4px">' +
+          TG.hits.slice(0, 6).map(function (h1) {
+            var c6 = h1.type === '止损' ? C.down : h1.type === '止盈' ? C.gold : C.up;
+            return '<tr><td style="padding:2px 0"><b style="color:' + c6 + '">【' + E(h1.type) + '】</b>' +
+              stk(h1.code, h1.name || h1.code) + ' <span class="muted">' + E(h1.pool) + '</span></td>' +
+              '<td class="r muted" style="max-width:220px">' + E(h1.detail) + '</td></tr>';
+          }).join('') + '</table>' + (TG.n > 6 ? '<div class="muted" style="font-size:10px;margin-top:3px">…共 ' + TG.n + ' 条</div>' : '') + '</div>';
+      }
+      if (AC) {
+        var hc2 = AC.hit_rate >= 60 ? C.up : AC.hit_rate >= 40 ? C.gold : C.down;
+        body += '<div><b>🎯 昨日Top' + AC.topn + '兑现率 </b><b style="color:' + hc2 + '">' + f(AC.hit_rate, 0) + '%</b>' +
+          (AC.miss_diag && AC.miss_diag.length ? '<div style="font-size:11px;margin-top:3px">' + AC.miss_diag.slice(0, 3).map(function (m2) {
+            return '<div>✗ ' + E(m2.name) + ' ' + (m2.pct >= 0 ? '+' : '') + f(m2.pct, 1) + '% <span class="muted">' + E(m2.diag[0]).slice(0, 50) + '</span></div>';
+          }).join('') + '</div>' : '') +
+          '<div class="muted" style="font-size:10px;margin-top:2px">' + E(AC.suggestion || '').slice(0, 90) + '</div></div>';
+      }
+      if (body) h += card('🎯 今日作战指令', body, '仓位纪律 + 条件触发 + 梯队健康度 + 推荐自检，四合一执行简报');
+    })();
+
     /* 关注股雷达 */
     var WL = D.watch;
     if (WL && WL.items && WL.items.length) {
@@ -519,10 +555,18 @@
             : (s === '跌停' || s === '炸板' || s === '趋势破位' || s === '空头排列') ? C.down : '';
           return '<span class="bd" style="' + (col ? 'border-color:' + col + ';color:' + col + ';' : '') + 'font-size:10px;padding:0 4px;margin-right:4px;white-space:nowrap">' + E(s) + '</span>';
         }).join(' ') || '<span class="muted">—</span>';
+        var sa = x7.since_added;
+        var saHtml = sa ? '<div class="muted" style="font-size:10px;margin-top:2px">关注以来 <b style="color:' + (sa.pct >= 0 ? C.up : C.down) + '">' +
+          (sa.pct >= 0 ? '+' : '') + f(sa.pct, 1) + '%</b> · 持有' + sa.days + '天 · 高' + f(sa.hi, 2) + '/低' + f(sa.lo, 2) +
+          (sa.n_zt ? ' · ' + sa.n_zt + '板' : '') + (sa.max_dd < -3 ? ' · 最大回撤' + f(sa.max_dd, 0) + '%' : '') + '</div>' : '';
+        var rf = x7.risk_flag;
+        var rfHtml = rf ? ' <span class="bd" style="border-color:' + (rf === '回避' ? C.down : (rf === '中性偏空' ? C.warn : C.muted || '#9aa')) + ';color:' + (rf === '回避' ? C.down : (rf === '中性偏空' ? C.warn : C.muted || '#9aa')) + ';font-size:10px;padding:0 4px">' + E(rf) + '</span>' : '';
         return '<tr><td><b>' + E(x7.name || '') + '</b> <span class="muted">' + E(x7.code) + '</span>' +
-          (x7.urgent ? ' <span class="bd" style="border-color:' + C.warn + ';color:' + C.warn + ';font-size:10px;padding:0 4px">急</span>' : '') + '</td>' +
-          '<td class="r">' + f(x7.close, 2) + '</td>' +
-          '<td class="r" style="color:' + (x7.pct >= 0 ? C.up : C.down) + '">' + f(x7.pct, 2) + '%</td>' +
+          (x7.urgent ? ' <span class="bd" style="border-color:' + C.warn + ';color:' + C.warn + ';font-size:10px;padding:0 4px">急</span>' : '') +
+          rfHtml +
+          saHtml + '</td>' +
+          '<td class="r"><b>' + f(x7.close, 2) + '</b></td>' +
+          '<td class="r" style="color:' + (x7.pct >= 0 ? C.up : C.down) + '">' + (x7.pct >= 0 ? '+' : '') + f(x7.pct, 2) + '%<div class="muted" style="font-size:9px">今</div></td>' +
           '<td class="r">' + f(x7.vol_ratio, 1) + '</td>' +
           '<td>' + sigHtml + '</td></tr>';
       });
@@ -1925,10 +1969,70 @@
       '主线内首板，位置低、容错高，是退潮/启动期的主力打法');
     h += group('🚫 高位风险回避（' + (R.avoid || []).length + '）', R.avoid, 'avoid',
       '连板≥3 且断板概率≥86%，次日冲高回落概率大，列出仅为提示回避');
-    h += group('📈 趋势向上 · 主升候选（' + (R.trend || []).length + '）', R.trend, 'trend',
-      '均线多头 + 近5日日均涨幅≥2% + 至少4天收涨 + 横盘日≤1（剔除“技术多头实则横盘”的票）');
+    /* 趋势主升：标注历史/新推荐 + 波段买卖价（避免每日随行情波动） */
+    (function () {
+      var TR = R.trend || [];
+      if (!TR.length) return;
+      var body = TR.map(function (t) {
+        var badge = t.is_new
+          ? '<span class="bd" style="border-color:' + C.up + ';color:' + C.up + ';font-size:11px;padding:0 4px">🆕 新入选</span>'
+          : (t.times > 1 ? '<span class="bd" style="border-color:' + C.gray + ';color:' + C.gray + ';font-size:11px;padding:0 4px">历史 ' + E((t.first_seen || '').slice(0, 7)) + ' · 跟踪' + t.times + '天</span>' : '');
+        var bm = t.trend_meta || {};
+        var band = (t.buy_zone && t.sell_zone)
+          ? '<span class="chip">回踩买 <b>' + f(t.buy_zone[0], 2) + '~' + f(t.buy_zone[1], 2) + '</b></span>' +
+            '<span class="chip">反弹卖 <b>' + f(t.sell_zone[0], 2) + '~' + f(t.sell_zone[1], 2) + '</b></span>' +
+            (t.stop ? '<span class="chip" style="border-color:' + C.down + ';color:' + C.down + '">止损 ' + f(t.stop, 2) + '</span>' : '')
+          : '';
+        var adv = t.advice ? '<div class="note" style="margin-top:4px;color:var(--muted)">波段：' + E(t.advice) + '</div>' : '';
+        var vd = t.verdict || null;
+        var vdHtml = '';
+        if (vd) {
+          var act = vd.action || '';
+          var isBuy = act.indexOf('买入') >= 0;
+          var isSell = (act.indexOf('卖出') >= 0 || act.indexOf('离场') >= 0);
+          var vc = isSell ? C.down : isBuy ? C.up : C.gold;
+          var priceLine = [];
+          if (isBuy && vd.buy_price) priceLine.push('买点价 <b>' + vd.buy_price + '</b>');
+          if (isSell && vd.sell_price) priceLine.push('卖点价 <b>' + vd.sell_price + '</b>');
+          if (vd.stop_price) priceLine.push('破 ' + vd.stop_price + ' 止损');
+          var holdLine = '<span class="muted" style="font-size:10px">波段上限 ' + vd.hold_limit_days +
+            ' 个交易日' + (vd.days_held ? ' · 已跟踪 ' + vd.days_held + ' 天' : '') +
+            (vd.expired ? ' · <b style="color:' + C.warn + '">已到期</b>' : '') + '</span>';
+          vdHtml = '<div style="margin-top:5px;padding:5px 8px;border-left:3px solid ' + vc + ';background:rgba(128,128,128,.08);border-radius:4px">' +
+            '<b style="color:' + vc + '">→ 结论：' + E(act) + '</b> ' + priceLine.join(' ｜ ') +
+            '<div class="muted" style="font-size:10px;margin-top:2px">' + E(vd.reason || '') + '</div>' + holdLine + '</div>';
+        }
+        return '<div class="rec trend"><div class="rh"><span class="nm">' + stk(t.code, t.name) + '</span>' +
+          (bm.band ? '<span class="bd ok" style="margin-left:4px;font-size:11px">' + E(bm.band) + '</span>' : '') + badge +
+          '<span class="sc" style="color:' + C.up + '">' + f(t.close || 0, 2) + '</span></div>' +
+          '<div class="chips" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:5px">' + band + '</div>' + adv + vdHtml + '</div>';
+      }).join('');
+      h += card('📈 趋势主升 · 候选（' + TR.length + '，🆕=新入选 / 历史=持续跟踪）', body,
+        '均线多头+近5日日均≥2%+≥4天收涨+横盘≤1；🆕为当日新入选，历史=持续跟踪的趋势票（不随单日波动天天换），每只附回踩买/反弹卖波段价');
+    })();
     h += group('⚡ 强动量 · 连板余波（' + (R.momentum || []).length + '）', R.momentum, 'momentum',
       '近期≥2次涨停/≥2连板基因 + 多头未破位 + 距高点回撤≤18%（接住“连板妖股型、今日非涨停”掉缝里的票，如风范股份）');
+
+    /* 综合最优解：融合连板/趋势/席位/题材/连续信号/区间，多引擎共振优先 */
+    (function () {
+      var FZ = R.fused || [];
+      if (!FZ.length) return;
+      var body = FZ.map(function (x, i) {
+        var ev = (x.evidence || []).map(function (e) {
+          var col = (e.engine === '区间破位') ? C.down : (e.score >= 0 ? C.up : C.down);
+          return '<span class="bd" style="border-color:' + col + ';color:' + col + ';margin:1px 3px 1px 0;display:inline-block;padding:0 4px;font-size:10px">' +
+            E(e.engine) + (e.score >= 0 ? '+' : '') + Math.round(e.score) + '</span>';
+        }).join('');
+        var rTag = (x.r != null) ? '<span class="bd" style="border-color:' + (x.r >= 2 ? C.up : x.r >= 1 ? C.gold : C.gray) +
+          ';color:' + (x.r >= 2 ? C.up : x.r >= 1 ? C.gold : C.gray) + ';margin:1px 3px;display:inline-block;padding:0 4px;font-size:10px">R=' + f(x.r, 1) + (x.r >= 2 ? ' 赔率优' : '') + '</span>' : '';
+        return '<div class="rec"><div class="rh"><span class="nm">' + stk(x.code, x.name) +
+          '</span>' + rTag + '<span class="sc" style="color:' + (x.fusion_score >= 60 ? C.up : x.fusion_score >= 45 ? C.gold : C.gray) + '">综合 ' + f(x.fusion_score, 0) + '分</span>' +
+          '<span class="muted">· ' + x.n_engine + ' 引擎共振</span></div>' +
+          '<div class="chips" style="margin-top:5px;display:flex;flex-wrap:wrap;gap:4px">' + ev + '</div></div>';
+      }).join('');
+      h += card('🏆 综合最优解（融合多引擎 · Top' + FZ.length + '）', body,
+        '融合连板接力 / 趋势主升 / 游资席位 / 主线题材 / 连续信号 / 买卖区间 六大信号，多引擎共振者综合分更高、可信度更强，避免单模型碎片推荐');
+    })();
 
     /* 板块趋势推荐：把趋势向上的个股按行业聚类，找出趋势抱团最强的板块，并标注主线/龙头 */
     (function () {
@@ -2799,8 +2903,9 @@
       .catch(function () { return sinaFallback(); })
       .catch(function (e2) { return { ok: false, error: (e2 && e2.message) || '行情接口不可用', klines: [] }; });
   }
-  /* canvas 蜡烛图：阳线红/阴线绿（A股习惯），叠加 MA5/10/20 + 量能 + 十字光标 */
-  function drawKline(canvas, kl, theme) {
+  /* canvas 蜡烛图：阳线红/阴线绿（A股习惯），叠加 MA5/10/20 + 量能 + 十字光标；
+     ov 可选：{buy:[lo,hi], sell:[lo,hi], stop} 波段区/止损叠加（来自 zones 数据） */
+  function drawKline(canvas, kl, theme, ov) {
     var dpr = window.devicePixelRatio || 1;
     var W = canvas.clientWidth || 740, H = canvas.clientHeight || 380;
     canvas.width = Math.max(1, W * dpr); canvas.height = Math.max(1, H * dpr);
@@ -2851,6 +2956,32 @@
         ctx.fillRect(x(i) - bw / 2, volTop + volH - vh, bw, vh);
       }
       ctx.globalAlpha = 1;
+      /* 波段区/止损叠加：买区绿带、卖区金带、止损红线（仅画最近 1/3 区域内有效时） */
+      if (ov) {
+        function yClamp(p) { var yy = y(p); return Math.max(padT, Math.min(padT + priceH, yy)); }
+        function zoneRect(z, col) {
+          if (!z || z[0] == null) return;
+          var inRange = z[0] < hi && z[1] > lo;
+          if (!inRange) return;
+          ctx.fillStyle = col; ctx.globalAlpha = 0.10;
+          ctx.fillRect(padL, yClamp(Math.max(z[1], lo)), plotW, Math.abs(yClamp(z[0]) - yClamp(z[1])));
+          ctx.globalAlpha = 0.55; ctx.strokeStyle = col; ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+          [z[0], z[1]].forEach(function (p2) {
+            if (p2 > lo && p2 < hi) { ctx.beginPath(); ctx.moveTo(padL, yClamp(p2)); ctx.lineTo(padL + plotW, yClamp(p2)); ctx.stroke(); }
+          });
+          ctx.setLineDash([]); ctx.globalAlpha = 1; ctx.textAlign = 'right';
+          ctx.fillStyle = col;
+          if (z[1] < hi && z[1] > lo) ctx.fillText(z[1].toFixed(2), padL + plotW - 4, yClamp(z[1]) - 6);
+        }
+        zoneRect(ov.buy, theme.up);
+        zoneRect(ov.sell, '#fbbf24');
+        if (ov.stop != null && ov.stop > lo && ov.stop < hi) {
+          ctx.strokeStyle = theme.down; ctx.setLineDash([2, 2]); ctx.lineWidth = 1.4;
+          ctx.beginPath(); ctx.moveTo(padL, yClamp(ov.stop)); ctx.lineTo(padL + plotW, yClamp(ov.stop)); ctx.stroke();
+          ctx.setLineDash([]); ctx.fillStyle = theme.down; ctx.textAlign = 'left';
+          ctx.fillText('止损 ' + ov.stop.toFixed(2), padL + 4, yClamp(ov.stop) + 8);
+        }
+      }
       var yl = y(kl[n - 1].close);
       ctx.strokeStyle = theme.axis; ctx.setLineDash([3, 3]);
       ctx.beginPath(); ctx.moveTo(padL, yl); ctx.lineTo(padL + plotW, yl); ctx.stroke(); ctx.setLineDash([]);
@@ -2894,7 +3025,8 @@
       '<span style="color:var(--up)">● 阳线(涨)</span> <span style="color:var(--down)">● 阴线(跌)</span> ' +
       '<span style="color:#fbbf24">— MA5</span> <span style="color:#22d3ee">— MA10</span> <span style="color:#a78bfa">— MA20</span></div>' +
       '<div class="kl-msg"></div>' +
-      '<div class="kl-hint">数据实时取自腾讯财经公开接口，浏览器直连、不落地存储。鼠标移到 K 线上可看每日开 / 收 / 高 / 低。A股惯例：红涨 / 绿跌。</div>' +
+      '<div class="kl-hint">数据实时取自腾讯财经公开接口，浏览器直连、不落地存储。鼠标移到 K 线上可看每日开 / 收 / 高 / 低。A股惯例：红涨 / 绿跌。' +
+      '<span style="color:var(--up)">绿色带=买入区</span> · <span style="color:#fbbf24">金色带=卖出区</span> · <span style="color:var(--down)">红虚线=止损</span>（有波段数据时显示）</div>' +
       '</div>';
     md.querySelector('.kl-name').textContent = name || code;
     md.querySelector('.kl-code').textContent = code;
@@ -2914,10 +3046,31 @@
       });
       var last = kl[kl.length - 1], prev = kl[kl.length - 2] || last;
       var chg = (last.close - prev.close) / prev.close * 100;
+      /* 波段区/止损数据：从 zones/watch/trend 找该票的 band_levels 结果（B7 可视化） */
+      var kov = null;
+      try {
+        (function () {
+          function fromBand(bd) {
+            if (!bd) return null;
+            var o2 = {};
+            if (bd.buy_zone && bd.buy_zone[0] != null) o2.buy = bd.buy_zone;
+            if (bd.sell_zone && bd.sell_zone[0] != null) o2.sell = bd.sell_zone;
+            if (bd.stop != null) o2.stop = bd.stop;
+            return (o2.buy || o2.sell || o2.stop != null) ? o2 : null;
+          }
+          var zi = ((D.zones || {}).items || []).filter(function (z3) { return z3.code === code; })[0];
+          kov = kov || fromBand(zi);
+          if (!kov) {
+            (((D.watch || {}).items) || []).some(function (w5) {
+              return w5.code === code && w5.band_levels && (kov = fromBand(w5.band_levels));
+            });
+          }
+        })();
+      } catch (e4) { kov = null; }
       md.querySelector('.kl-last').innerHTML = '收盘 <b style="color:' + (chg >= 0 ? 'var(--up)' : 'var(--down)') + '">' +
         last.close.toFixed(2) + '</b> <span style="color:' + (chg >= 0 ? 'var(--up)' : 'var(--down)') + '">' +
         (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%</span> <span class="muted">(' + last.date + ')</span>';
-      requestAnimationFrame(function () { drawKline(cv, kl, klTheme()); });
+      requestAnimationFrame(function () { drawKline(cv, kl, klTheme(), kov); });
     }).catch(function (e) {
       md.querySelector('.kl-loading').style.display = 'none';
       md.querySelector('.kl-msg').innerHTML = '<div class="kl-off">无法获取 K 线：' + E((e && e.message) || e) +
@@ -3145,6 +3298,19 @@
       var risks = (d.risks && d.risks.length) ? d.risks.map(function (r) { return '<span class="bd" style="border-color:' + C.danger + ';color:' + C.danger + '">' + E(r) + '</span>'; }).join(' ') : '<span class="muted">无</span>';
       var plus = (d.plus && d.plus.length) ? d.plus.map(function (r) { return '<span class="bd" style="border-color:' + C.up + ';color:' + C.up + '">' + E(r) + '</span>'; }).join(' ') : '';
       var pnl = (d.pnl_pct != null) ? ('<span class="' + (d.pnl_pct >= 0 ? 'up' : 'down') + '">' + (d.pnl_pct >= 0 ? '+' : '') + f(d.pnl_pct) + '%</span>') : '<span class="muted">观察仓</span>';
+      var bz = d.buy_zone, sz = d.sell_zone;
+      var bandHtml = '';
+      if (bz && sz) {
+        var bAct = d.band_action || '';
+        var bCol = (bAct === '止损' || bAct === '卖点') ? C.down
+          : (bAct === '止盈' || bAct === '加仓' || bAct === '买点') ? C.up : C.muted;
+        bandHtml = '<div class="kv" style="margin:4px 0"><b style="color:var(--muted);font-size:12px">波段</b> ' +
+          '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + '">买 ' + f(bz[0]) + '~' + f(bz[1]) + '</span>' +
+          '<span class="chip" style="border-color:' + C.down + ';color:' + C.down + '">卖 ' + f(sz[0]) + '~' + f(sz[1]) + '</span>' +
+          (d.stop_band != null ? '<span class="chip">止损 ' + f(d.stop_band) + '</span>' : '') +
+          '</div>' +
+          (d.sell_advice ? '<div class="note" style="margin-top:4px">波段操作：<b style="color:' + bCol + '">' + E(d.sell_advice) + '</b></div>' : '');
+      }
       return '<div class="card"><div class="body">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
         '<div>' + stk(d.code, d.name) + (d.watch ? ' <span class="tag">观察</span>' : '') + '</div>' + gradeBadge(d.grade) +
@@ -3157,6 +3323,7 @@
         '</div>' +
         (pred ? '<div class="kv" style="margin:4px 0">' + pred + '</div>' : '') +
         '<div class="kv" style="margin:4px 0">' + tgt + ' ｜ ' + stp + '</div>' +
+        bandHtml +
         '<div style="margin:6px 0"><b style="color:var(--muted);font-size:12px">风险</b> ' + risks + '</div>' +
         (plus ? '<div style="margin:6px 0"><b style="color:var(--muted);font-size:12px">亮点</b> ' + plus + '</div>' : '') +
         ((d.signals && d.signals.length) ? '<div style="margin:6px 0"><b style="color:var(--muted);font-size:12px">信号</b> ' + d.signals.map(sigBadge).join(' ') + '</div>' : '') +

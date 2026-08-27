@@ -27,8 +27,9 @@ URGENT = ("涨停", "跌停", "炸板", "趋势破位")
 
 
 def load_watch_codes():
-    """合并 notify.json watch + holdings.json watch==true + config/watch.json（网页管理写回）"""
-    codes, names = [], {}
+    """合并 notify.json watch + holdings.json watch==true + config/watch.json（网页管理写回）。
+    返回 (codes, names, added) —— added: {code: "2026-08-01"} 用户显式标注的关注锚点日（可选）。"""
+    codes, names, added = [], {}, {}
     root = store.ROOT
     # 1) 网页管理的关注池（WATCH_JSON 密钥 → CI 还原为 config/watch.json）
     wp = os.path.join(root, "config", "watch.json")
@@ -43,6 +44,8 @@ def load_watch_codes():
                 c = str(x["code"]).zfill(6)
                 if c not in names:
                     codes.append(c); names[c] = x.get("name") or ""
+                if x.get("added"):
+                    added[c] = str(x["added"]).strip()
     except Exception:
         pass
     np = os.path.join(root, "config", "notify.json")
@@ -59,6 +62,8 @@ def load_watch_codes():
                 if c not in names:
                     codes.append(c)
                     names[c] = x.get("name") or ""
+                if x.get("added"):
+                    added[c] = str(x["added"]).strip()
     except Exception:
         pass
     hp = os.path.join(root, "config", "holdings.json")
@@ -72,15 +77,31 @@ def load_watch_codes():
                     names[c] = p.get("name") or ""
                 elif not names[c]:
                     names[c] = p.get("name") or ""
+                # 持仓观察股的建仓日可作为关注锚点；未标注 added 时回退到该日期
+                if p.get("date"):
+                    added.setdefault(c, str(p["date"]).strip())
     except Exception:
         pass
-    return codes, names
+    return codes, names, added
 
 
-def scan(u, date):
-    codes, extra_names = load_watch_codes()
+def scan(u, date, con=None, risk_flags=None):
+    """关注股雷达：除当日信号外，额外计算「关注以来累计」（自关注锚点日至今）。
+
+    锚点日优先用用户显式标注的 added；否则用持久化的首次进入关注池日期
+    （store.watch_first_seen，跨构建保留，最贴近「关注时候」）；
+    再不行回退到最近 60 根K线起点。
+
+    返回每个标的：今日价/涨幅 + since_added{锚点日, 持有天数, 累计涨跌幅,
+    区间最高/最低, 最大回撤, 期间涨停/跌停/炸板次数} + 当日信号。
+    """
+    codes, extra_names, added = load_watch_codes()
     if not codes:
         return None
+    if con is None:
+        con = store.connect()
+    # 持久化首见日（跨构建保留，作为「关注时候」锚点）
+    first_seen_db = store.watch_first_seen(con, date, codes)
     items = []
     for c in codes:
         bs = [b for b in u.bars.get(c, []) if b["d"] <= date]
@@ -92,13 +113,49 @@ def scan(u, date):
                           "note": "K线不足" if n < 25 else ""})
             continue
         cur = bs[-1]
-        closes = [b["c"] for b in bs]
+        close = float(cur["c"])
+        closes = [float(b["c"]) for b in bs]
         ma20 = sum(closes[-20:]) / 20
         ma60 = sum(closes[-60:]) / 60 if n >= 60 else None
-        vols = [b.get("v") or 0 for b in bs]
+        vols = [float(b.get("v") or 0) for b in bs]
         v5 = sum(vols[-6:-1]) / 5
         vr = (cur.get("v") or 0) / v5 if v5 else 0
         hi20 = max(b["h"] for b in bs[-21:-1]) if n >= 22 else None
+
+        # ---- 关注以来累计 ----
+        anchor = added.get(c) or first_seen_db.get(c) or None
+        since = []
+        if anchor:
+            since = [b for b in bs if b["d"] >= anchor]
+        if len(since) < 2:
+            since = bs[-60:]
+            anchor = since[0]["d"]
+        n_since = len(since)
+        first_c = float(since[0]["c"])
+        # 区间最高/最低/最大回撤
+        run_max = since[0]["c"]
+        max_dd = 0.0
+        for b in since:
+            cc = float(b["c"])
+            run_max = max(run_max, cc)
+            if run_max > 0:
+                dd = (cc / run_max - 1) * 100
+                if dd < max_dd:
+                    max_dd = dd
+        hi_s = max(float(b["h"]) for b in since)
+        lo_s = min(float(b["l"]) for b in since)
+        cum_pct = (close / first_c - 1) * 100 if first_c else 0.0
+        # 期间涨停/跌停/炸板次数
+        n_zt = sum(1 for b in since if c in u.zt.get(b["d"], ()))
+        n_dt = sum(1 for b in since if c in u.dt.get(b["d"], ()))
+        n_zb = sum(1 for b in since if c in u.zhaban.get(b["d"], ()))
+        since_added = {
+            "anchor": anchor, "days": n_since,
+            "pct": round(cum_pct, 2),
+            "hi": round(hi_s, 2), "lo": round(lo_s, 2),
+            "max_dd": round(max_dd, 2),
+            "n_zt": n_zt, "n_dt": n_dt, "n_zb": n_zb,
+        }
 
         sig = []
         if c in u.zt.get(date, ()):
@@ -107,12 +164,12 @@ def scan(u, date):
             sig.append("跌停")
         elif c in u.zhaban.get(date, ()):
             sig.append("炸板")
-        bull = cur["c"] > ma20 and (ma60 is None or ma20 > ma60)
-        bear = cur["c"] < ma20 and (ma60 is None or ma20 < ma60)
-        if hi20 and cur["c"] > hi20 and vr >= 1.5:
+        bull = close > ma20 and (ma60 is None or ma20 > ma60)
+        bear = close < ma20 and (ma60 is None or ma20 < ma60)
+        if hi20 and close > hi20 and vr >= 1.5:
             sig.append("放量突破20日高")
         prev_ma20 = sum(closes[-21:-1]) / 20 if n >= 21 else ma20
-        if closes[-2] >= prev_ma20 > cur["c"] and vr >= 1.2:
+        if closes[-2] >= prev_ma20 > close and vr >= 1.2:
             sig.append("趋势破位")
         if bull and not bear:
             sig.append("多头排列")
@@ -121,9 +178,12 @@ def scan(u, date):
 
         items.append({
             "code": c, "name": name,
-            "close": round(cur["c"], 2),
+            "close": round(close, 2),
             "pct": round(cur.get("pct") or 0, 2),
             "vol_ratio": round(vr, 2),
+            "first_seen": anchor,
+            "since_added": since_added,
+            "risk_flag": (risk_flags or {}).get(c),
             "signals": sig,
             "urgent": any(s in URGENT for s in sig),
         })
@@ -138,7 +198,7 @@ def scan(u, date):
 
 
 def summary_lines(wl):
-    """收盘推送用紧凑摘要"""
+    """收盘推送用紧凑摘要；明确区分『今日』与『关注以来』。"""
     if not wl:
         return []
     out = []
@@ -146,12 +206,17 @@ def summary_lines(wl):
     urg = [x for x in its if x.get("urgent")]
     if urg:
         out.append("⚠️ " + "；".join(
-            "%s %s(%+.1f%%·%s)" % (x["name"], "/".join(x["signals"][:2]), x.get("pct", 0), "急讯")
+            "%s %s(今%+.1f%%·%s)" % (x["name"], "/".join(x["signals"][:2]),
+                                     x.get("pct", 0), "急讯")
             for x in urg[:4]))
-    normal = [x for x in its if not x.get("urgent")][:6]
-    if normal:
-        out.append("关注股速览：" + "、".join(
-            "%s%+.1f%%" % (x["name"], x.get("pct", 0)) for x in normal))
+    cum = [x for x in its if not x.get("urgent") and x.get("since_added")]
+    if cum:
+        out.append("关注以来：" + "；".join(
+            "%s 持有%s天 %+.%1f%%（高%s/低%s%s）"
+            % (x["name"], x["since_added"]["days"], x["since_added"]["pct"],
+               x["since_added"]["hi"], x["since_added"]["lo"],
+               ("·%d板" % x["since_added"]["n_zt"] if x["since_added"]["n_zt"] else ""))
+            for x in cum[:6]))
     if not out:
         out.append("关注池 %d 只今日无异动" % wl.get("n", 0))
     return out
