@@ -1699,6 +1699,40 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     return "\n".join(L)
 
 
+def _ladder_plan_lines(rec, aitems=None, n=6, compact=False):
+    """连板机会计划 → 推送行（盘前/竞价共用）。
+
+    aitems：竞价数据 {code: {...open_pct...}}。有竞价时按实际开盘做 gate 复核：
+      低开( <recveto.LOW_OPEN )计划标 🚫放弃；其余标注低/高开与是否达标买区。
+    compact：SC 紧凑板式（去掉 evidence 长尾）。
+    """
+    LP = rec.get("ladder_plans") or []
+    if not LP:
+        return []
+    lines = []
+    for i, p in enumerate(LP[:n], 1):
+        bz = p.get("buy_zone") or [0, 0]
+        sz = p.get("sell_zone") or [0, 0]
+        mark = ""
+        opv = None
+        if aitems:
+            aq = aitems.get(p.get("code")) or {}
+            opv = aq.get("open_pct")
+        if p.get("gate") == "avoid" or (opv is not None and opv < -0.1):
+            mark = " 🚫低开放弃"
+        elif opv is not None:
+            inzone = bz[0] <= (aq.get("open") or 0) <= bz[1] if aq.get("open") else None
+            mark = " ✅达标买区" if inzone else " 竞价%.1f%%" % opv
+        line = "- %d. **%s**(%s→%s) 买%.2f~%.2f 卖%.2f~%.2f 止损%.2f%s" % (
+            i, p.get("name", "?"), p.get("entry_streak", 0),
+            (p.get("expected_top") or "").split("→")[-1],
+            bz[0], bz[1], sz[0], sz[1], p.get("stop", 0), mark)
+        if not compact and p.get("evidence"):
+            line += "\n  · %s" % str(p["evidence"])[:60]
+        lines.append(line)
+    return lines
+
+
 def format_stock_summary(data, url="", mode="close", con=None):
     """ServerChan/PushPlus(markdown) 排版：盘面数据 / 复盘要点 / 推荐 / 风险，分区清晰、留白克制。
     mode='close' 收盘后；mode='preauction' 竞价前。"""
@@ -1723,6 +1757,13 @@ def format_stock_summary(data, url="", mode="close", con=None):
         pool = _top_recs(rec.get("core"), rec.get("relay"), rec.get("all"), MAX_RECS)
         gated = [x for x in pool if _dual_ok(x)]
         ungated = [x for x in pool if not _dual_ok(x)]
+        # 🎯 连板机会计划（昨日收盘产出的次日竞价介入单）
+        _lp_lines = _ladder_plan_lines(rec, n=6)
+        if _lp_lines:
+            L.append("")
+            L.append("**🎯 连板机会计划（次日竞价介入口径）**")
+            L.append("> 低开(< -0.1%)一律放弃；只在不低开时按买区接力，止损-8%铁律。")
+            L.extend(_lp_lines)
         L.append("**昨日推荐 · 今日竞价强弱（评分%.0f+晋级%.0f%% 双重认证）**"
                  % _push_gate())
         L.append("> 认证标的：竞价强=续强确认；竞价弱/爆量派发=回避。")
@@ -1824,6 +1865,11 @@ def format_sc(data, url="", mode="close", con=None):
         pool = _top_recs(rec.get("core"), rec.get("relay"), rec.get("all"), MAX_RECS)
         gated = [x for x in pool if _dual_ok(x)]
         ungated = [x for x in pool if not _dual_ok(x)]
+        # 🎯 连板机会计划（SC 紧凑版）
+        _lp_lines = _ladder_plan_lines(rec, n=4, compact=True)
+        if _lp_lines:
+            L.append("🎯连板计划（低开即弃·止损-8%）：")
+            L.extend(_lp_lines)
         L.append("双重认证（评分%.0f+晋级%.0f%%）· 今日竞价强弱：" % _push_gate())
         if gated:
             for i, it in enumerate(gated, 1):
@@ -1917,6 +1963,35 @@ def format_auction_summary(data, url="", con=None):
             strong.append((it, aq, tag))
         elif (not is_prev) and pat and pat not in ("强转弱",) and (aq.get("yizi") or pat in ("一字板", "弱转强", "高开高走")):
             newstrong.append((it, aq))
+
+    # 🎯 连板计划 · 竞价复核：昨日生成的买卖区 vs 今日实际竞价
+    _lp = {p.get("code"): p for p in ((data.get("recommend") or {}).get("ladder_plans") or [])}
+    if _lp:
+        lp_hit, lp_avoid = [], []
+        for _c, _p in _lp.items():
+            _aq = aitems.get(_c) or {}
+            _opv = _aq.get("open_pct")
+            if _opv is None:
+                continue
+            if _opv < -0.1 or (_p.get("gate") == "avoid"):
+                lp_avoid.append("%s(开%.1f%%)" % (_p.get("name", "?"), _opv))
+            else:
+                bz = _p.get("buy_zone") or [0, 0]
+                opx = _aq.get("open") or 0
+                inz = bool(opx) and bz[0] <= opx <= bz[1]
+                lp_hit.append("%s(%d→%s 开%.1f%% %s) 卖%.2f~%.2f 止损%.2f" % (
+                    _p.get("name", "?"), _p.get("entry_streak", 0),
+                    (_p.get("expected_top") or "").split("→")[-1], _opv,
+                    "达标买区✅" if inz else "买区外观望",
+                    ((_p.get("sell_zone") or [0, 0])[0]),
+                    ((_p.get("sell_zone") or [0, 0])[1]), _p.get("stop", 0)))
+        if lp_hit or lp_avoid:
+            L.append("")
+            L.append("### 🎯 连板计划竞价复核")
+            for x in lp_hit[:6]:
+                L.append("- **%s**" % x)
+            if lp_avoid:
+                L.append("- 🚫 低开放弃：%s" % "、".join(lp_avoid[:8]))
 
     L.append("> **竞价纪律（480 笔历史推荐实测）**：低开票一律回避（收红率仅 24%）；"
              "不低开 + 核心龙头或缩量板胜率 78% 均值 +5.5%。以下名单已按此执行。")

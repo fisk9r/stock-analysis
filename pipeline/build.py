@@ -413,13 +413,23 @@ def run(date_override=None, dedup_close=False):
 
     # 连板预期空间引擎（用户需求 2026-08-27）：挖掘「明天有机会买的连板票」，
     # 给买入/卖出区间、止损与预期高度（如 3板→预期5板）；高位票只标注不拦。
+    # 2026-08-27 升级：环境动态修正（情绪/接力regime/梯队健康度三元组）。
     try:
         import ladderplan
         lp_stats = ladderplan.ladder_stats(u)
-        rec["ladder_plans"] = ladderplan.scan(u, date, lus, lp_stats, topn=12)
-        log("  连板计划 %d 只（3板桶 n=%d）" % (
+        try:
+            _lw = engine.ladder_warn(u, date)
+        except Exception:
+            _lw = None
+        rec["ladder_plans"] = ladderplan.scan(
+            u, date, lus, lp_stats, topn=12,
+            sent=sent, regime=regime, ladder_warn=_lw)
+        _lp_coef, _lp_note = ladderplan.env_mod(
+            sent=sent, regime=regime, ladder_warn=_lw)
+        log("  连板计划 %d 只（3板桶 n=%d，环境系数 %.2f %s）" % (
             len(rec.get("ladder_plans") or []),
-            (lp_stats.get(3) or {}).get("n", 0)))
+            (lp_stats.get(3) or {}).get("n", 0),
+            _lp_coef, _lp_note or "无修正"))
     except Exception as e:
         log("  连板计划失败（不影响主流程）：%r" % e)
         rec["ladder_plans"] = []
