@@ -300,7 +300,7 @@ def plan(u, code, s, close, stats=None, open_pct=None, env_coef=1.0,
     if open_v is not None and open_v < LOW_OPEN_PCT:
         gate = "avoid"
     gate_hint = ("竞价低开<%s%%→放弃买入(recveto.G1:该条件历史T+1收红率仅24%%)"
-                 % abs(LOW_OPEN_PCT))
+                 % LOW_OPEN_PCT)
     ev_bits = []
     if ev_n:
         ev_bits.append("近 %d 笔同高度样本·开盘接力中位溢价 %.1f%%" % (
