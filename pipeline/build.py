@@ -61,6 +61,35 @@ def log(*a):
     print("[build]", *a, flush=True)
 
 
+# ---- 模块导出自检（2026-08-28 事故防呆）----
+# 曾发生：本地 store.py 新增了 trend_track_* / watch_first_seen 四个函数与两张表，
+# 但文件从未推送 → CI 每次构建都在 except 里静默降级（只留一行「不影响主流程」），
+# 线上 trend 长期缺 is_new/verdict。这里在启动时显式核对关键导出，
+# 缺失即打 ⚠⚠ 严重标记（可直接 grep CI 日志发现漏推）。
+_REQUIRED_EXPORTS = {
+    "store": ("trend_track_states", "trend_track_upsert", "trend_track_drop",
+              "watch_first_seen"),
+    "engine": ("screen_uptrend", "trend_verdict", "institution_evidence",
+               "sector_day_forecast", "classify_trend_state"),
+    "zones": ("band_levels", "scan"),
+    "watchreco": ("distill", "lines"),
+}
+
+
+def selfcheck_exports():
+    miss = []
+    for mod, names in _REQUIRED_EXPORTS.items():
+        m = sys.modules.get(mod)
+        if m is None:
+            continue
+        for n in names:
+            if not hasattr(m, n):
+                miss.append("%s.%s" % (mod, n))
+    if miss:
+        log("  ⚠⚠ 严重：关键函数缺失 %s（本地与远端不同步？先跑 tools/diff_remote.py）" % miss)
+    return miss
+
+
 def pick_date(u, override=None):
     """选定分析日：默认最后一个已收盘交易日"""
     if override:
@@ -264,6 +293,7 @@ def compute_money_flow():
 
 def run(date_override=None, dedup_close=False):
     t0 = time.time()
+    selfcheck_exports()
     con = store.connect()
     # 数据完整性自检：修复可能的量纲异常（如某日 vol/amount 被放大 ~100×），幂等。
     try:
