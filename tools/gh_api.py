@@ -97,7 +97,9 @@ def api(method, path, data=None, binary=None, base=API, timeout=120):
             if _attempt < 2:
                 time.sleep(2 * (_attempt + 1))
                 continue
-    raise last_err
+    if last_err is not None:
+        raise last_err
+    raise SystemExit("API 请求失败：3 次重试均未成功且无明确异常（网络/代理问题）")
 
 
 # ----------------------------- Secrets -----------------------------
