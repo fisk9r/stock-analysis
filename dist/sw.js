@@ -1,7 +1,7 @@
 /* 极简 PWA 离线缓存：仅缓存应用外壳，data.js 始终走网络（保证数据最新）。 */
-const CACHE = "sa-shell-v1";
+const CACHE = "sa-shell-v2";
 const SHELL = ["index.html", "styles.css", "charts.js", "app.js", "auth.js",
-               "nacl.js", "users.json", "meta.json", "icon.svg", "manifest.webmanifest"];
+               "nacl.js", "watchx.js", "stock_names.js", "users.json", "meta.json", "icon.svg", "manifest.webmanifest"];
 
 self.addEventListener("install", function (e) {
   e.waitUntil(caches.open(CACHE).then(function (c) { return c.addAll(SHELL); }).then(function () { return self.skipWaiting(); }));

@@ -237,17 +237,47 @@ td.code{color:var(--faint);font-size:11.5px}
 /* ---------------- 推荐卡 ---------------- */
 .rec{border:1px solid var(--border);border-radius:var(--r);overflow:hidden;background:var(--card);
   box-shadow:var(--shadow);display:flex;flex-direction:column}
-.rec .rh{padding:9px 12px;display:flex;align-items:center;gap:3px;border-bottom:1px solid var(--border-2);
-  background:var(--card-2);line-height:1.35;min-height:40px}
+/* 头部两行结构：line1=名称/代码/星标/分数（永不拆行）；line2=徽标组（可换行但每项不拆） */
+.rec .rh{padding:8px 12px;display:flex;flex-wrap:wrap;align-items:center;gap:3px 5px;
+  border-bottom:1px solid var(--border-2);background:var(--card-2);line-height:1.35;min-height:40px}
 .rec .rh .nm{font-size:14px;font-weight:700;color:var(--text);white-space:nowrap;flex-shrink:0}
 .rec .rh .sc{margin-left:auto;font-size:18px;font-weight:750;font-variant-numeric:tabular-nums;
-  flex-shrink:0}
+  flex-shrink:0;white-space:nowrap}
 /* 推荐卡头部内的徽标压缩：确保桌面端一排放下 */
-.rec .rh .bd{padding:0 5px;font-size:10px;line-height:1.6;border-radius:4px}
-.rec .rh .code{font-size:10.5px;flex-shrink:0}
+.rec .rh .bd{padding:0 5px;font-size:10px;line-height:1.6;border-radius:4px;white-space:nowrap}
+.rec .rh .code{font-size:10.5px;flex-shrink:0;white-space:nowrap}
+/* 徽标组：整组换行，组内每项禁止拆行——这是「名称/连板/风格被拆成多行」的根治点 */
+.rec .rh .rh-tags{display:flex;flex-wrap:wrap;align-items:center;gap:3px 4px;
+  flex:1 1 auto;min-width:0;order:3;width:100%;margin-top:2px}
+.rec .rh .rh-tags:empty{display:none}
 .rec .rb{padding:11px 14px;font-size:12.5px;flex:1}
-.rec .rb .kv{display:flex;flex-wrap:wrap;gap:9px;margin-bottom:9px;font-size:11.5px;color:var(--muted)}
+.rec .rb .kv{display:flex;flex-wrap:wrap;gap:5px 12px;margin-bottom:9px;font-size:11.5px;color:var(--muted)}
+/* 关键：每个指标项禁止内部换行（"收盘 5.67" 不会拆成两行） */
+.rec .rb .kv span{white-space:nowrap}
 .rec .rb .kv span b{color:var(--text);font-weight:650}
+/* 次要指标折叠区 */
+.rec .rb details{margin-top:2px}
+.rec .rb details summary{cursor:pointer;font-size:11px;color:var(--accent);
+  list-style:none;padding:2px 0;user-select:none}
+.rec .rb details summary::-webkit-details-marker{display:none}
+.rec .rb details summary:before{content:"▸ ";}
+.rec .rb details[open] summary:before{content:"▾ ";}
+.rec .rb details .kv{margin:5px 0 0}
+/* 买点 / 风险 高亮（用户需求：达到买点高亮提示可买入，有风险的高亮提示止盈或卖出） */
+.rec.signal-buy{border-color:var(--up);box-shadow:0 0 0 1px var(--up-br),var(--shadow)}
+.rec.signal-buy .rh{background:var(--up-bg)}
+.rec.signal-sell{border-color:var(--down);box-shadow:0 0 0 1px var(--down-br),var(--shadow)}
+.rec.signal-sell .rh{background:var(--down-bg)}
+.rec.signal-warn{border-color:var(--warn);box-shadow:0 0 0 1px var(--warn-br),var(--shadow)}
+.rec.signal-warn .rh{background:var(--warn-bg)}
+/* 信号条：一眼看到「可买入 / 止盈 / 止损卖出」 */
+.sig-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  padding:5px 9px;border-radius:6px;font-size:12px;font-weight:700;margin-top:6px}
+.sig-bar.buy{background:var(--up-bg);color:var(--up);border:1px solid var(--up-br)}
+.sig-bar.sell{background:var(--down-bg);color:var(--down);border:1px solid var(--down-br)}
+.sig-bar.warn{background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn-br)}
+.sig-bar.hold{background:var(--gray-bg);color:var(--gray-fg);border:1px solid var(--gray-br)}
+.sig-bar .px{font-variant-numeric:tabular-nums;font-weight:800}
 .rec ul{list-style:none;display:flex;flex-direction:column;gap:4px}
 .rec ul li{padding-left:15px;position:relative;color:var(--text-2);line-height:1.55}
 .rec ul li:before{content:"";position:absolute;left:4px;top:8px;width:4px;height:4px;border-radius:50%;
@@ -486,3 +516,34 @@ html{scroll-behavior:smooth}
 .to-top:hover{color:var(--accent);border-color:var(--accent)}
 .to-top:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 @media (prefers-reduced-motion:reduce){.to-top{transition:none}}
+
+/* ==========================================================================
+   2026-08-29 追加：需求2 推荐卡紧凑化 + 需求3 一键关注 + 需求5 买点/风险高亮
+   + WLX 三时相操作台（与 watchx.js 内嵌样式互补，这里管卡片层）
+   ========================================================================== */
+
+/* 需求2：推荐卡 .kv 指标一行流式 —— 更紧凑的字距与分隔，避免「名称/连板/风格」被挤成多行 */
+.rec .rb .kv{gap:4px 10px;font-size:11px;line-height:1.5}
+.rec .rb .kv span{white-space:nowrap}
+.rec .rh{flex-wrap:wrap;row-gap:4px}
+.rec .rh .nm{margin-right:2px}
+.rec .rh .sc{margin-left:auto}
+
+/* 需求3：一键关注按钮（app.js wlQuickBtn 输出 .wl-qk；watchx.js 委托点击） */
+.wl-qk{display:inline-flex;align-items:center;gap:3px;margin-left:6px;padding:2px 8px;border-radius:10px;
+  border:1px solid var(--border);background:transparent;color:var(--muted);font-size:11px;cursor:pointer;
+  font-family:inherit;line-height:1.5;vertical-align:middle;white-space:nowrap;
+  transition:color .15s,border-color .15s,background .15s}
+.wl-qk:hover{border-color:var(--gold);color:var(--gold)}
+.wl-qk.on{border-color:var(--gold);color:var(--gold);background:var(--gold-bg)}
+
+/* 需求5：趋势票买点/风险高亮（可买=上色发光；风险=下跌色发光） */
+.rec.trend.wlx-hl-buy{border-color:var(--up);box-shadow:0 0 0 1px var(--up-br),0 0 16px var(--up-bg)}
+.rec.trend.wlx-hl-sell{border-color:var(--down);box-shadow:0 0 0 1px var(--down-br),0 0 16px var(--down-bg)}
+.rec.trend.wlx-hl-buy .rh::after{content:'✅ 可买';font-size:10.5px;font-weight:800;color:var(--up);
+  border:1px solid var(--up-br);border-radius:8px;padding:0 6px;margin-left:6px;background:var(--up-bg)}
+.rec.trend.wlx-hl-sell .rh::after{content:'⚠ 风险';font-size:10.5px;font-weight:800;color:var(--down);
+  border:1px solid var(--down-br);border-radius:8px;padding:0 6px;margin-left:6px;background:var(--down-bg)}
+
+/* 需求7：重点速览卡片 chip 微调 */
+.ov-chip .wl-qk{margin-left:2px}

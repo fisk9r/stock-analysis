@@ -8,7 +8,7 @@
 <meta name="theme-color" content="#0b1020">
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <link rel="apple-touch-icon" href="icon.svg">
-<link rel="stylesheet" href="styles.css?v=20260825b">
+<link rel="stylesheet" href="styles.css?v=20260829">
 </head>
 <body>
 
@@ -23,6 +23,7 @@
   </div>
   <nav class="tabs" id="tabs">
     <button data-v="overview" class="on">市场概览</button>
+    <button data-v="watch">⭐ 我的自选</button>
     <button data-v="ladder">涨停梯队</button>
     <button data-v="sectors">板块热力</button>
     <button data-v="risk">断板风险</button>
@@ -44,6 +45,7 @@
   </div>
 
   <section class="view on" id="v-overview"></section>
+  <section class="view" id="v-watch"></section>
   <section class="view" id="v-ladder"></section>
   <section class="view" id="v-sectors"></section>
   <section class="view" id="v-risk"></section>
@@ -66,6 +68,10 @@
 <script>
   document.write('<scr' + 'ipt src="data.js?t=' + Math.floor(Date.now() / 60000) + '"><\/scr' + 'ipt>');
 </script>
+<!-- 全市场股票名录（本机自选股智能纠错用的离线索引，不依赖登录） -->
+<script src="stock_names.js?v=20260829"></script>
+<!-- 本机自选池模块：免密钥增删 + 实时行情 + 三时相操作建议 + 盘中破位告警 -->
+<script src="watchx.js?v=20260829"></script>
 <!-- 登录门禁：解密后再按需加载 charts.js / app.js（顺序由 auth.js 控制） -->
 <script src="auth.js?v=20260810b"></script>
 <script>

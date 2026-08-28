@@ -235,6 +235,58 @@
     h += narrativeCard();
     h += qualityCard();
 
+    /* 需求7：重点速览置顶 —— 打开即看连板核心 / 加速趋势 / 综合最优 / 高危预警，
+       不必翻其它视图。数据取自 recommend（fused/trend/avoid）与 ladder。 */
+    h += (function () {
+      var R7 = D.recommend || {};
+      var chips = '';
+      var cnt = 0;
+      function sec7(title, arr, cls, fmt) {
+        return (arr || []).slice(0, 3).map(function (x) {
+          cnt++;
+          var inner = fmt ? fmt(x) : '';
+          return '<span class="ov-chip' + (cls ? ' ' + cls : '') + '" data-kind="none" style="cursor:default;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border:1px solid var(--border);border-radius:10px;font-size:12px;background:var(--card-2)">' +
+            '<b>' + stk(x.code, x.name) + '</b>' + inner + wlQuickBtn(x.code, x.name) + '</span>';
+        }).join('');
+      }
+      var body7 = '';
+      /* ① 连板核心：高度≥2板 */
+      var ladderTop = [];
+      (function () {
+        var L = D.ladder || {};
+        ['5', '4', '3', '2'].forEach(function (k) {
+          (L[k] || []).forEach(function (x) { ladderTop.push(x); });
+        });
+      })();
+      var lb7 = sec7('连板核心', ladderTop, '', function (x) {
+        return '<span class="bd lb' + Math.min(6, Math.max(1, x.streak || 1)) + '" style="font-size:10px;padding:0 4px">' + (x.streak || 1) + '板</span>' +
+          (x.p_continue != null ? '<span class="muted" style="font-size:10.5px">续' + f(x.p_continue, 0) + '%</span>' : '');
+      });
+      if (lb7) body7 += '<div style="margin-bottom:8px"><b style="color:var(--muted);font-size:12px">🔥 连板核心（按高度）</b><div class="chips" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:6px">' + lb7 + '</div></div>';
+      /* ② 加速上行趋势票 */
+      var acc = (R7.trend || []).filter(function (t) { return t.trend_meta && t.trend_meta.trend_state === '加速上行'; });
+      var acc7 = sec7('加速趋势', acc, '', function (t) {
+        var bm = t.trend_meta || {};
+        return '<span style="color:var(--up);font-size:10.5px;font-weight:700">🚀加速 ' + f(bm.accel, 1) + 'x</span>' +
+          (t.verdict && t.verdict.action ? '<span class="muted" style="font-size:10.5px">' + E((t.verdict.action || '').slice(0, 6)) + '</span>' : '');
+      });
+      if (acc7) body7 += '<div style="margin-bottom:8px"><b style="color:var(--muted);font-size:12px">📈 加速上行趋势</b><div class="chips" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:6px">' + acc7 + '</div></div>';
+      /* ③ 综合最优解 Top3 */
+      var fz7 = sec7('综合最优', (R7.fused || []).slice(0, 3), '', function (x) {
+        return '<span style="color:' + (x.fusion_score >= 60 ? 'var(--up)' : 'var(--gold)') + ';font-size:10.5px;font-weight:700">' + f(x.fusion_score, 0) + '分</span>' +
+          '<span class="muted" style="font-size:10.5px">' + x.n_engine + '引擎</span>';
+      });
+      if (fz7) body7 += '<div style="margin-bottom:8px"><b style="color:var(--muted);font-size:12px">🏆 综合最优解</b><div class="chips" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:6px">' + fz7 + '</div></div>';
+      /* ④ 高危回避 */
+      var av7 = (R7.avoid || []).slice(0, 3).map(function (x) {
+        return '<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border:1px solid var(--down-br);border-radius:10px;font-size:12px;background:var(--down-bg)">' +
+          '<b style="color:var(--down)">' + E(x.name) + '</b><span class="muted" style="font-size:10.5px">' + (x.streak || '') + '板 断板' + f(x.p_break, 0) + '%</span></span>';
+      }).join('');
+      if (av7) body7 += '<div style="margin-bottom:4px"><b style="color:var(--muted);font-size:12px">🚫 高位风险（回避）</b><div class="chips" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:6px">' + av7 + '</div></div>';
+      if (!body7) return '';
+      return card('⚡ 重点速览 · 今日必看', body7, '打开即看：连板核心按高度排列、🚀加速趋势、多引擎共振的综合最优、高危回避票；点名称看K线，点 ☆ 一键关注（免密钥）');
+    })();
+
     /* 数据完整性体检（构建期自检：覆盖度/量纲错乱/价格异常） */
     var IG = D.integrity;
     if (IG) {
@@ -851,11 +903,10 @@
         '把焦点股近 20 日形态与全市场比对，找出历史上最像的标的并回看其后续表现（形态基因映射）');
     }
 
-    /* 关注股网页化管理：仅 owner 显示入口 */
-    if (window.__SA_USER__ === 'owner') {
-      h += '<div class="sa-mgmt-actions" style="margin:6px 0 18px"><button class="mbtn mbtn-p" id="wlMgrBtn">⭐ 管理关注股</button>' +
-        '<span class="muted">增删自选，保存后写回云端并重建（需管理密钥/令牌）</span></div>';
-    }
+    /* 关注股管理入口：本机池免密钥，对所有人开放；云端同步仅 owner */
+    h += '<div class="sa-mgmt-actions" style="margin:6px 0 18px"><button class="mbtn mbtn-p" id="wlMgrBtn">⭐ 管理关注股</button>' +
+      '<span class="muted">本机增删<b>免密钥、立即生效</b>' +
+      (window.__SA_USER__ === 'owner' ? '；云端同步写回 GitHub 并重建，需令牌' : '') + '</span></div>';
 
     /* 市场可视化：温度走势(双线) + 板块涨停 TOP10 */
     var VZ = D.viz;
@@ -1970,6 +2021,7 @@
         return '<div class="rec ' + cls + '"><div class="rh">' +
           '<span class="nm">' + stk(it.code, it.name) + '</span><span class="code faint">' + E(it.code) + '</span>' +
           lbBadge(it.streak) + tierBadge(it.sector_tier) + mlBadge(it) + relayBadge(it) + vaBadge + hcBadge +
+          wlQuickBtn(it.code, it.name) +
           '<span class="sc" style="color:' + scol + '">' + f(it.score, 1) + '</span></div>' +
           '<div class="rb">' + kvHtml +
           '<ul>' + (it.reasons || []).map(function (r) { return '<li>' + E(r) + '</li>'; }).join('') + '</ul>' +
@@ -2050,9 +2102,17 @@
             '<b style="color:' + vc + '">→ 结论：' + E(act) + '</b>' + earlyTag + ' ' + priceLine.join(' ｜ ') +
             '<div class="muted" style="font-size:10px;margin-top:2px">' + E(vd.reason || '') + '</div>' + holdLine + '</div>';
         }
-        return '<div class="rec trend"><div class="rh"><span class="nm">' + stk(t.code, t.name) + '</span>' +
+        /* 需求5：买点/风险高亮 —— 结论含「买入」且未过期 → 可买高亮；含「卖出/离场/减仓」或已到期 → 风险高亮 */
+        var hlCls = '';
+        if (vd) {
+          var act0 = vd.action || '';
+          if (vd.expired || act0.indexOf('卖出') >= 0 || act0.indexOf('离场') >= 0) hlCls = ' wlx-hl-sell';
+          else if (act0.indexOf('买入') >= 0) hlCls = ' wlx-hl-buy';
+        }
+        return '<div class="rec trend' + hlCls + '"><div class="rh"><span class="nm">' + stk(t.code, t.name) + '</span>' +
           (bm.band ? '<span class="bd ok" style="margin-left:4px;font-size:11px">' + E(bm.band) + '</span>' : '') +
           stateBadge + badge +
+          wlQuickBtn(t.code, t.name) +
           '<span class="sc" style="color:' + C.up + '">' + f(t.close || 0, 2) + '</span></div>' +
           '<div class="chips" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:5px">' + band + '</div>' + adv + vdHtml + instHtml + '</div>';
       }).join('');
@@ -2072,6 +2132,7 @@
           '<span class="nm">' + stk(p.code, p.name) + '</span>' +
           lbBadge(p.entry_streak) +
           '<span class="bd ok" style="font-size:11px;padding:0 4px">🎯 ' + E(p.expected_top) + '</span>' +
+          wlQuickBtn(p.code, p.name) +
           '<span class="sc" style="color:' + rc + '">到10%' + f(p.reach10, 0) + '%</span></div>' +
           '<div class="chips" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:5px">' +
           '<span class="chip">次日买 <b>' + f(p.buy_zone[0], 2) + '~' + f(p.buy_zone[1], 2) + '</b></span>' +
@@ -2369,9 +2430,11 @@
   };
   var MU_TOKEN_KEY = 'sa_gh_token';
   var MU_ADMIN_KEY = 'sa_worker_admin_key';
-  // 管理代理 Worker：留空 = 沿用旧模式（浏览器直连 GitHub，需粘贴令牌）
-  // 填入你的 Worker URL 后 = 浏览器只发「管理密钥(ADMIN_KEY)」，GitHub 令牌仅存于 Worker 服务端
-  var WORKER_URL = 'https://stock-admin.37204360.workers.dev';
+  // 管理代理 Worker：留空 = 浏览器直连 GitHub（需粘贴令牌）
+  // 填入 Worker URL 后 = 浏览器只发「管理密钥(ADMIN_KEY)」，GitHub 令牌仅存于 Worker 服务端。
+  // 历史值 https://stock-admin.37204360.workers.dev 已于 2026-08-28 起连接超时不可达；
+  // 若写死会导致面板永远走「要密钥」分支而实际拿不到任何可用通道，故改为默认留空 + 运行时可配。
+  var WORKER_URL = '';
 
   // 站点部署地址：<owner>.github.io/<repo>/ 或 CF Pages（stock-analysis-8zm.pages.dev，仓库固定）；据此推断仓库
   function muRepo() {
@@ -2399,10 +2462,25 @@
     try { MU.adminKey = sessionStorage.getItem(MU_ADMIN_KEY) || localStorage.getItem(MU_ADMIN_KEY) || ''; } catch (e) {}
     return MU.adminKey;
   }
-  // Worker 地址：编译期常量优先；否则允许在面板「代理设置」里运行时配置（存 localStorage）
+  // Worker 地址：编译期常量优先；否则允许在面板「代理设置」里运行时配置（存 localStorage）。
+  // 探测失败会置 MU.workerDead，此后一律降级到 GitHub 令牌模式，避免卡在拿不到密钥的分支。
   function muWorkerUrl() {
+    if (MU.workerDead) return '';
     if (WORKER_URL) return WORKER_URL;
     try { return (localStorage.getItem('sa_worker_url') || '').trim(); } catch (e) { return ''; }
+  }
+  // 探测代理通道是否活着（3.5 秒超时即判死）
+  function muProbeWorker() {
+    var u = muWorkerUrl();
+    if (!u) return Promise.resolve(false);
+    return new Promise(function (res) {
+      var done = false, tm = setTimeout(function () {
+        if (done) return; done = true; MU.workerDead = true; res(false);
+      }, 3500);
+      fetch(u.replace(/\/$/, '') + '/ping', { cache: 'no-store' })
+        .then(function (r) { if (done) return; done = true; clearTimeout(tm); res(r.status < 500); })
+        ['catch'](function () { if (done) return; done = true; clearTimeout(tm); MU.workerDead = true; res(false); });
+    });
   }
   // 登录时若勾了「记住口令」，这里就能直接拿到 owner 口令，免得再输一次
   function muRecallPass() {
@@ -3576,20 +3654,33 @@
     });
   }
 
-  /* ---------------- 关注股网页管理：写回 WATCH_JSON 密钥 ---------------- */
+  /* ---------------- 关注股网页管理 ----------------
+   * 分两层，默认走**免密钥**的本机层：
+   *   ① 本机自选池 —— 存 localStorage，立即生效，浏览器直连行情现算指标与告警。
+   *   ② 云端清单   —— 写回 GitHub 密钥并触发 CI 重建（跨设备/进每日推送），需要令牌或管理密钥。
+   * 之所以还要密钥：站点托管在 Cloudflare Pages，是纯静态文件，没有服务端与数据库，
+   * 「云端名单」唯一能落盘的地方就是仓库密钥，写完还得触发一次重建才会生效。
+   */
   var WL_POS = [];
   function wlOpen() {
     ensureMgmtStyle();
+    if (window.WLX) { WLX.ensureStyle(); WLX.bindDelegates(); }
     var cur = (D.watch_meta && D.watch_meta.length) ? D.watch_meta : [];
     WL_POS = cur.map(function (d) { return { code: d.code, name: d.name || '' }; });
     if (!WL_POS.length) WL_POS.push({ code: '', name: '' });
     var ov = document.createElement('div'); ov.className = 'sa-mgmt-ov'; ov.id = 'wlOv';
-    ov.innerHTML = '<div class="sa-mgmt"><div class="sa-mgmt-h"><span>⭐ 管理关注股（网页可编辑自选池）</span>' +
+    ov.innerHTML = '<div class="sa-mgmt"><div class="sa-mgmt-h"><span>⭐ 管理关注股</span>' +
       '<span class="sa-mgmt-x" onclick="var o=this.closest(\'.sa-mgmt-ov\');if(o)o.remove()">✕</span></div>' +
       '<div class="sa-mgmt-b" id="wlBody"></div></div>';
     document.body.appendChild(ov);
     ov.addEventListener('click', function (e) { if (e.target === ov) ov.parentNode.removeChild(ov); });
     wlRender();
+    /* 后台探测代理通道，结果只用于提示，不阻塞面板 */
+    muProbeWorker().then(function (alive) {
+      var n = document.getElementById('wlChan');
+      if (n) n.textContent = alive ? '代理通道：在线（只需管理密钥）'
+        : '代理通道：不可用 → 云端同步改用 GitHub 令牌';
+    });
   }
   function wlRender() {
     var b = document.getElementById('wlBody'); if (!b) return;
@@ -3600,7 +3691,17 @@
         '<td><button class="mbtn mbtn-d" data-rm="' + i + '">删</button></td>' +
         '</tr>';
     }).join('');
-    b.innerHTML = '<div class="sa-mgmt-note info" style="margin-bottom:10px">这里的自选池会进入「关注股雷达」每日推送提醒。保存后加密写回云端密钥并触发重建，手机上也能随时管理。改动需管理密钥/令牌（仅本机会话保存）。</div>' +
+    b.innerHTML =
+      '<div class="sa-mgmt-note info" style="margin-bottom:10px">' +
+      '<b>为什么以前要输 KEY？</b> 站点托管在 Cloudflare Pages，是<b>纯静态</b>的——没有服务端、没有数据库。' +
+      '云端名单唯一能存的地方是 GitHub 仓库密钥，写完还要触发一次 CI 重建才生效，所以必须持有令牌。' +
+      '现在默认改为存<b>本机</b>，增删立即生效、无需任何密钥；只有要同步到云端（跨设备/进每日推送）时才需要令牌。' +
+      '<div id="wlChan" style="margin-top:6px;color:#8aa0c8">代理通道：探测中…</div></div>' +
+
+      '<div class="wlx-sec">① 本机自选池（免密钥 · 立即生效）</div>' +
+      '<div id="wlLocalBox"></div>' +
+
+      '<div class="wlx-sec">② 云端清单（需令牌 · 写回 GitHub 并重建）</div>' +
       '<div class="sa-mgmt-add">' +
       '<input id="wlNewCode" placeholder="代码 如 600396" style="width:130px">' +
       '<input id="wlNewName" placeholder="名称(可选)" style="width:120px">' +
@@ -3608,8 +3709,8 @@
       (WL_POS.length ? '<table class="sa-mgmt-t"><thead><tr><th>代码</th><th>名称</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
         : '<div class="sa-mgmt-empty">还没有关注股，添加一只试试。</div>') +
       '<div class="sa-mgmt-actions">' +
-      '<button class="mbtn mbtn-p" id="wlSaveBtn">保存并部署</button>' +
-      '<button class="mbtn mbtn-ghost" id="wlCancelBtn">取消</button></div>' +
+      '<button class="mbtn mbtn-p" id="wlSaveBtn">☁ 同步到云端</button>' +
+      '<button class="mbtn mbtn-ghost" id="wlCancelBtn">关闭</button></div>' +
       '<div class="sa-mgmt-note" id="wlNote"></div>';
     b.querySelectorAll('input[data-i]').forEach(function (inp) {
       inp.addEventListener('input', function () { WL_POS[+inp.dataset.i][inp.dataset.k] = inp.value.trim(); });
@@ -3627,8 +3728,138 @@
     var save = document.getElementById('wlSaveBtn'); if (save) save.addEventListener('click', wlSave);
     var cancel = document.getElementById('wlCancelBtn');
     if (cancel) cancel.addEventListener('click', function () { var o = document.getElementById('wlOv'); if (o) o.remove(); });
+    wlRenderLocal();
+  }
+
+  /* 本机自选池（面板内嵌版）：代码/名称都能输，自动纠错 */
+  var WL_SUG = [];
+  function wlRenderLocal() {
+    var box = document.getElementById('wlLocalBox'); if (!box) return;
+    var items = (window.WLX ? WLX.list() : []);
+    var lis = items.length ? items.map(function (it) {
+      return '<tr><td><b>' + E(it.name || it.code) + '</b></td>' +
+        '<td class="muted" style="font-size:11.5px">' + E(it.code) + '</td>' +
+        '<td><input class="mu-in" style="width:74px" data-wlcost="' + E(it.code) +
+        '" value="' + (it.cost != null ? it.cost : '') + '" placeholder="成本价"></td>' +
+        '<td><button class="mbtn mbtn-d" data-wlrm="' + E(it.code) + '">删</button></td></tr>';
+    }).join('') : '<tr><td colspan="4" class="sa-mgmt-empty">本机自选池为空。在下方输入代码或名称加入，' +
+      '也可以直接在推荐卡、连板卡上点 ☆ 一键加入。</td></tr>';
+    box.innerHTML =
+      '<div class="sa-mgmt-add" style="position:relative">' +
+      '<input id="wlInp" placeholder="输入代码或名称，如 600500 / 中化国际 / zhgj" style="flex:1" autocomplete="off">' +
+      '<button class="mbtn mbtn-p" id="wlAddLocal">＋ 加入</button>' +
+      '<div id="wlSug" class="wlx-sug" style="display:none"></div></div>' +
+      '<table class="sa-mgmt-t"><thead><tr><th>名称</th><th>代码</th><th>成本价</th><th></th></tr></thead>' +
+      '<tbody>' + lis + '</tbody></table>' +
+      '<div class="muted" style="font-size:11.5px;margin-top:6px">成本价填了之后，' +
+      '「我的自选」页会自动算出止损位/目标位，并在盘中跌破止损时弹告警。</div>';
+    wlBindLocal(box);
+  }
+  function wlBindLocal(box) {
+    var inp = box.querySelector('#wlInp'), sug = box.querySelector('#wlSug');
+    var selIdx = -1;
+    function show(list) {
+      if (!list || !list.length) {
+        sug.innerHTML = '<div class="wlx-sug-empty">没找到匹配的标的</div>';
+        sug.style.display = 'block'; return;
+      }
+      WL_SUG = list; selIdx = -1;
+      sug.innerHTML = list.map(function (r) {
+        return '<div class="wlx-sug-it" data-code="' + E(r.code) + '" data-name="' + E(r.name) + '">' +
+          '<span class="n">' + E(r.name) + '</span><span class="c">' + E(r.code) + '</span>' +
+          '<span class="m">' + (window.WLX ? WLX.marketOf(r.code) : '') + '</span></div>';
+      }).join('');
+      sug.style.display = 'block';
+    }
+    function hide() { sug.style.display = 'none'; WL_SUG = []; selIdx = -1; }
+    function pick(node) {
+      var code = node.getAttribute('data-code'), name = node.getAttribute('data-name');
+      var r = window.WLX ? WLX.add(code, name) : { ok: false, msg: '模块未加载' };
+      wlNote(r.msg, r.ok ? 'ok' : 'err');
+      if (r.ok && window.WLX) WLX.toast(r.msg, 'ok');
+      if (inp) inp.value = '';
+      hide(); wlRenderLocal();
+    }
+    function commit() {
+      var v = (inp && inp.value || '').trim();
+      if (!v || !window.WLX) return;
+      var r = WLX.resolve(v);
+      if (!r) { wlNote('没找到「' + v + '」对应的股票，试试只输代码', 'err'); return; }
+      var rr = WLX.add(r.code, r.name);
+      wlNote(rr.msg, rr.ok ? 'ok' : 'err');
+      if (rr.ok && !r.name) WLX.onlineSearch(r.code, 1).then(function (o) {
+        if (o.length && o[0].code === r.code) {
+          var arr = WLX.list();
+          arr.forEach(function (x) { if (x.code === r.code) x.name = o[0].name; });
+          try { localStorage.setItem('sa_watch_local_v1', JSON.stringify(arr)); } catch (e2) {}
+        }
+        wlRenderLocal();
+      })['catch'](function () {});
+      if (inp) inp.value = '';
+      hide(); wlRenderLocal();
+    }
+    if (inp) {
+      var tm = null;
+      inp.addEventListener('input', function () {
+        var v = inp.value.trim();
+        clearTimeout(tm);
+        if (!v || !window.WLX) { hide(); return; }
+        tm = setTimeout(function () {
+          var local = WLX.search(v, 8);
+          if (local.length && local[0].score >= 90) { show(local); return; }
+          WLX.onlineSearch(v, 8).then(function (on) {
+            var seen = {}, merged = [];
+            local.concat(on).forEach(function (r) {
+              if (seen[r.code]) return; seen[r.code] = 1; merged.push(r);
+            });
+            show(merged.length ? merged : local);
+          })['catch'](function () { show(local); });
+        }, 180);
+      });
+      inp.addEventListener('keydown', function (e) {
+        if (sug.style.display === 'none') { if (e.key === 'Enter') commit(); return; }
+        var its = sug.querySelectorAll('.wlx-sug-it');
+        if (e.key === 'ArrowDown') {
+          e.preventDefault(); selIdx = Math.min(selIdx + 1, its.length - 1);
+          [].forEach.call(its, function (n, i) { n.classList.toggle('sel', i === selIdx); });
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault(); selIdx = Math.max(selIdx - 1, 0);
+          [].forEach.call(its, function (n, i) { n.classList.toggle('sel', i === selIdx); });
+        } else if (e.key === 'Enter') {
+          e.preventDefault();
+          if (selIdx >= 0 && its[selIdx]) pick(its[selIdx]); else commit();
+        } else if (e.key === 'Escape') { hide(); }
+      });
+      inp.addEventListener('blur', function () { setTimeout(hide, 200); });
+    }
+    if (sug) sug.addEventListener('mousedown', function (e) {
+      var it = e.target.closest ? e.target.closest('.wlx-sug-it') : null;
+      if (!it) return;
+      e.preventDefault(); pick(it);
+    });
+    var ab = box.querySelector('#wlAddLocal');
+    if (ab) ab.addEventListener('click', commit);
+    [].forEach.call(box.querySelectorAll('[data-wlrm]'), function (btn) {
+      btn.addEventListener('click', function () {
+        var r = WLX.del(btn.getAttribute('data-wlrm'));
+        wlNote(r.msg, r.ok ? 'ok' : 'err'); wlRenderLocal();
+      });
+    });
+    [].forEach.call(box.querySelectorAll('[data-wlcost]'), function (ci) {
+      ci.addEventListener('change', function () {
+        WLX.setCost(ci.getAttribute('data-wlcost'), ci.value, '');
+        wlNote('已保存成本价', 'ok'); wlRenderLocal();
+      });
+    });
   }
   function wlNote(m, t) { var n = document.getElementById('wlNote'); if (n) { n.textContent = m; n.className = 'sa-mgmt-note ' + (t || ''); } }
+  /* 一键关注按钮（需求3）：推荐/趋势/梯队卡上的 ☆，走本机池零密钥 */
+  function wlQuickBtn(code, name) {
+    var W3 = window.WLX;
+    if (!W3) return '';
+    var on = W3.has(code);
+    return '<button class="wl-qk' + (on ? ' on' : '') + '" data-wl-qk="' + E(code) + '" data-wl-name="' + E(name || '') + '" title="' + (on ? '点击移出本机关注' : '点击加入本机关注（零密钥、立即生效）') + '">' + (on ? '★ 已关注' : '☆ 关注') + '</button>';
+  }
   function wlPayload() {
     var out = [];
     WL_POS.forEach(function (p) { if (/^\d{6}$/.test(p.code || '')) out.push({ code: p.code, name: p.name || '' }); });
@@ -3658,11 +3889,11 @@
         if (!t) { wlNote('请填写密钥', 'err'); return; }
         if (muWorkerUrl()) { MU.adminKey = t; try { if (document.getElementById('wlTokKeep').checked) localStorage.setItem(MU_ADMIN_KEY, t); else sessionStorage.setItem(MU_ADMIN_KEY, t); } catch (e2) {} }
         else { MU.token = t; try { if (document.getElementById('wlTokKeep').checked) localStorage.setItem(MU_TOKEN_KEY, t); else sessionStorage.setItem(MU_TOKEN_KEY, t); } catch (e2) {} }
-        gate.remove(); go.textContent = '保存并部署'; go.onclick = null; wlSave();
+        gate.remove(); go.textContent = '☁ 同步到云端'; go.onclick = null; wlSave();
       };
       return;
     }
-    wlNote('正在加密写回 GitHub 密钥…', 'info');
+    wlNote('正在加密写回 GitHub 密钥 WATCH_JSON 并触发重建…', 'info');
     var btn = document.getElementById('wlSaveBtn'); if (btn) btn.disabled = true;
     muLoadNacl().then(function () { return muGetPubKey(); }).then(function (pk) {
       if (!pk || !pk.key || !pk.key_id) throw new Error('未取得仓库公钥');
@@ -3717,12 +3948,26 @@
     document.addEventListener('click', function (e) {
       if (e.target && e.target.id === 'wlMgrBtn') { e.preventDefault(); wlOpen(); }
     });
-    var views = { overview: viewOverview, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings };
+    /* 「我的自选」走本机模块（免密钥 + 实时行情），每次切入都重渲染，故单独路由 */
+    function viewWatch() {
+      return '<div class="card"><div class="head"><h2>⭐ 我的自选 · 三时相操作台</h2>' +
+        '<span class="sub">本机自选池（免密钥）· 浏览器直连行情实时计算止损/目标与破位提醒</span></div>' +
+        '<div class="body"><div id="wlxPanel"></div></div></div>';
+    }
+    var views = { overview: viewOverview, watch: viewWatch, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings };
     var done = {};
     function show(k) {
       var el = document.getElementById('v-' + k);
       if (!el) { console.warn('[show] 缺少视图容器 #v-' + k); return; }
-      if (!done[k]) {
+      /* 自选台需要实时行情，不走一次性缓存：每次切入都重新渲染 */
+      if (k === 'watch') {
+        el.innerHTML = views[k]();
+        initCountUp(el);
+        try { if (window.WLX) window.WLX.renderPanel(document.getElementById('wlxPanel')); } catch (e) {
+          document.getElementById('wlxPanel').innerHTML =
+            '<div class="empty">自选模块加载失败：' + E(e.message) + '</div>';
+        }
+      } else if (!done[k]) {
         try {
           el.innerHTML = views[k]();
           initCountUp(el);

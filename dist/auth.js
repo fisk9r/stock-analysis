@@ -69,6 +69,7 @@
 
   function renderApp() {
     // charts.js 定义全局 CH，app.js 渲染；顺序加载
+    // watchx.js / stock_names.js 已在 index.html 同步加载（自选池 + 名录），不在此列
     return loadScript('charts.js').then(function () { return loadScript('app.js'); });
   }
 
