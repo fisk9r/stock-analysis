@@ -57,8 +57,14 @@ PROVIDER_PRESETS = {
                   "model": "kimi-k2.6", "temperature": 1, "label": "Moonshot Kimi"},
     "qwen":      {"kind": "openai",   "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
                   "model": "qwen-max", "label": "阿里通义 Qwen"},
-    "zhipu":     {"kind": "openai",   "base_url": "https://open.bigmodel.cn/api/paas/v4",
-                  "model": "glm-4-plus", "label": "智谱 GLM"},
+    # 智谱 GLM：保底模型。2026-08-27 实测本账号 key：
+    #   glm-4-plus / glm-4.6 @通用端点 → 1113 余额不足（体验套餐不覆盖）；
+    #   GLM Coding 端点（coding/paas/v4）的 glm-4.6 免费可用（吃体验套餐额度）。
+    # glm-4.6 是 thinking 模型：正文在 message.content，思考在 reasoning_content；
+    # 用 thinking.type=disabled 可关思考提速，部分网关不支持该字段时需去掉重试。
+    "zhipu":     {"kind": "openai",   "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+                  "model": "glm-4.6", "label": "智谱 GLM-4.6",
+                  "thinking": {"type": "disabled"}},
     "doubao":    {"kind": "openai",   "base_url": "https://ark.cn-beijing.volces.com/api/v3",
                   "model": "doubao-seed-1-6-250615", "label": "字节豆包 Doubao"},
     "hunyuan":   {"kind": "openai",   "base_url": "https://api.hunyuan.cloud.tencent.com/v1",
@@ -108,17 +114,21 @@ def _extract_json(text):
         return None
 
 
-def _openai_chat(base_url, api_key, model, prompt, system, timeout, temperature=0.3, max_tokens=None):
+def _openai_chat(base_url, api_key, model, prompt, system, timeout, temperature=0.3,
+                 max_tokens=None, extra=None, want_text=False):
     url = base_url.rstrip("/") + "/chat/completions"
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": prompt}]
 
-    def _do(use_rf):
+    def _do(use_rf, use_extra):
         payload = {"model": model, "temperature": temperature, "messages": messages}
         if max_tokens:
             payload["max_tokens"] = max_tokens
         if use_rf:
             payload["response_format"] = {"type": "json_object"}
+        # GLM-4.6 等 thinking 模型的开关字段（如 {"thinking":{"type":"disabled"}}）
+        if use_extra and extra:
+            payload.update(extra)
         req = urllib.request.Request(
             url, data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json",
@@ -126,29 +136,34 @@ def _openai_chat(base_url, api_key, model, prompt, system, timeout, temperature=
             method="POST")
         with urllib.request.urlopen(req, timeout=timeout) as r:
             d = json.loads(r.read().decode("utf-8", "ignore"))
-        return d["choices"][0]["message"]["content"]
+        msg = d["choices"][0]["message"]
+        content = msg.get("content") or ""
+        if not content.strip():
+            # 思考模型偶发把正文吞进思考区：兜底取 reasoning_content（只取其中 JSON 部分）
+            content = msg.get("reasoning_content") or ""
+        return content
 
-    # 速率限制(429)退避重试：国产模型账号 RPM 常很低（如 Moonshot 免费档仅 3/min），
-    # 一次 429 不应直接判失败——退避 3s/6s/9s 后重试，显著提升"HY3 备用叙事"可用性。
-    # 交替尝试 response_format（部分国产接口不支持该字段，需去掉再试）。
+    # 重试矩阵（2026-08-27）：429 退避重试；400/422 可能是不支持 response_format
+    # 或 thinking 字段，逐级去掉再试——保证"换脑保底链"在最弱环境下也能出结果。
     last = None
-    for attempt in range(4):
-        use_rf = (attempt % 2 == 0)
+    combos = [(True, True), (False, True), (False, False), (False, False)]
+    for attempt, (use_rf, use_extra) in enumerate(combos):
         try:
-            return _do(use_rf)
+            return _do(use_rf, use_extra)
         except urllib.error.HTTPError as e:
             last = e
-            if e.code == 429 and attempt < 3:
-                time.sleep(3 * (attempt + 1))
+            if e.code == 429 and attempt < len(combos) - 1:
+                time.sleep(3 * min(attempt + 1, 3))
                 continue
-            # 非 429：按原语义去掉 response_format 再试最后一次
-            if attempt == 0:
-                try:
-                    return _do(False)
-                except urllib.error.HTTPError as e2:
-                    last = e2
+            if e.code in (400, 422) and attempt < len(combos) - 1:
+                continue  # 下一个组合：去掉可疑字段再试
             break
-    raise last
+        except Exception as e2:
+            last = e2
+            break
+    if isinstance(last, Exception):
+        raise last
+    raise RuntimeError(str(last))
 
 
 def _anthropic_chat(base_url, api_key, model, prompt, system, timeout):
@@ -217,7 +232,8 @@ def _chat_once(name, cfg, prompt, system=None, timeout=40, max_tokens=None):
         raw = _gemini_chat(base, key, model, prompt, system, timeout)
     else:
         raw = _openai_chat(base, key, model, prompt, system, timeout,
-                           temperature=temperature, max_tokens=max_tokens)
+                           temperature=temperature, max_tokens=max_tokens,
+                           extra=cfg.get("request_extra") or cfg.get("thinking"))
     return _extract_json(raw)
 
 

@@ -291,7 +291,7 @@ def diagnose(u, date, pos, fwd, code2boards=None):
         grade, action = "B", "持有观察"
         why = "结构尚可，留意%s" % ("、".join(risks[:2]) if risks else "量能变化")
 
-    return {
+    d = {
         "code": code, "name": name, "ok": True, "watch": pos.get("watch"),
         "cost": cost, "shares": shares, "entry": pos.get("date"), "note": pos.get("note"),
         "price": round(price, 2), "pct": round(cur["pct"] or 0, 2),
@@ -311,6 +311,21 @@ def diagnose(u, date, pos, fwd, code2boards=None):
         "risks": risks, "plus": plus,
         "grade": grade, "action": action, "why": why,
     }
+
+    # ---- 波段操作建议（回踩买/反弹卖/止损）：持仓给卖出建议，关注给买卖价 ----
+    try:
+        import zones as _zmod
+        _bd = _zmod.band_levels(bs, cost=cost)
+        if _bd:
+            d["buy_zone"] = _bd["buy_zone"]
+            d["sell_zone"] = _bd["sell_zone"]
+            d["stop_band"] = _bd["stop"]
+            d["band_action"] = _bd["band_action"]
+            d["sell_advice"] = _bd["advice"]
+    except Exception:
+        pass
+
+    return d
 
 
 # ============================================================== 持续跟踪
@@ -442,6 +457,11 @@ def summary_lines(rep, limit=8):
             detail.append("止损%.2f(%+.1f%%)" % (d["stop"], d["stop_pct"] or 0))
         if d.get("target"):
             detail.append("目标%.2f(%+.1f%%)" % (d["target"], d["target_pct"] or 0))
+        if d.get("buy_zone") and d.get("sell_zone"):
+            detail.append("波段 买%s~%s/卖%s~%s" % (d["buy_zone"][0], d["buy_zone"][1],
+                                                   d["sell_zone"][0], d["sell_zone"][1]))
+        if d.get("sell_advice"):
+            detail.append("操作：%s" % d["sell_advice"])
         if detail:
             out.append("   " + "；".join(detail))
     if rep.get("alerts"):

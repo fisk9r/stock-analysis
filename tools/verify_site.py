@@ -1,6 +1,8 @@
 """线上站点体检：确认能访问、明文数据确实不存在、密文能下载。
 
-用法：python tools/verify_site.py https://<user>.github.io/stock-analysis
+用法：python tools/verify_site.py <站点URL>
+适配 GitHub Pages 与 Cloudflare Pages（后者对不存在路径回退 index.html，
+以「200 + 非 HTML 内容」判定真文件，避免把回退壳误报为泄露）。
 下载的密文会存到 _livecheck/ 供 verify_decrypt.js 解密验证。
 """
 import os
@@ -21,6 +23,8 @@ MUST_MISS = ["data.js", "data.js.bak", "push_log.jsonl", "config/allowed_users.j
 
 
 def fetch(url, timeout=30):
+    """返回 (status, body)。CF Pages 对不存在路径会回退 index.html（200 + text/html），
+    调用方须用 is_real() 区分真文件与回退壳。"""
     req = urllib.request.Request(url, headers={"User-Agent": "site-check"})
     try:
         r = urllib.request.urlopen(req, timeout=timeout)
@@ -29,6 +33,16 @@ def fetch(url, timeout=30):
         return e.code, b""
     except Exception as e:
         return 0, str(e).encode()
+
+
+def is_real(st, body):
+    """真文件判定：非 text/html（SPA 回退壳是 text/html 的 index.html）。"""
+    if st != 200:
+        return False
+    head = body[:400].lstrip().lower()
+    if head.startswith(b"<!doctype html") or head.startswith(b"<html"):
+        return False
+    return True
 
 
 def _owner_password():
@@ -109,19 +123,22 @@ def main():
     print("== 必须存在 ==")
     for f in MUST_EXIST:
         st, body = fetch(base + "/" + f)
-        ok = st == 200
+        # index.html 本身就是 HTML，只查状态码；其余用 is_real 排除 SPA 回退壳
+        ok = (st == 200 and len(body) > 0) if f == "index.html" else is_real(st, body)
         bad += 0 if ok else 1
-        print("  %s %-14s HTTP %s  %d 字节" % ("✅" if ok else "❌", f, st, len(body)))
+        print("  %s %-14s HTTP %s  %d 字节%s" % ("✅" if ok else "❌", f, st, len(body),
+              "" if ok else "（SPA回退壳，真缺失）"))
         if ok:
             with open(os.path.join(OUT, f), "wb") as fh:
                 fh.write(body)
 
     print("== 必须不存在（存在即泄露） ==")
     for f in MUST_MISS:
-        st, _ = fetch(base + "/" + f)
-        ok = st != 200
-        bad += 0 if ok else 1
-        print("  %s %-24s HTTP %s" % ("✅" if ok else "❌ 泄露！", f, st))
+        st, body = fetch(base + "/" + f)
+        # CF Pages 对不存在路径回退 index.html（200+HTML 壳），不是真实文件 → 不算泄露
+        leaked = is_real(st, body)
+        bad += 1 if leaked else 0
+        print("  %s %-24s HTTP %s" % ("✅ 不存在" if not leaked else "❌ 泄露！", f, st))
 
     print("== 加密数据 ==")
     users = []

@@ -57,6 +57,14 @@ CREATE TABLE IF NOT EXISTS theme_daily(
   date TEXT NOT NULL, theme TEXT NOT NULL, n INTEGER,
   PRIMARY KEY(date, theme)
 );
+CREATE TABLE IF NOT EXISTS watch_firstseen(
+  code TEXT PRIMARY KEY, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS trend_track(
+  code TEXT PRIMARY KEY, name TEXT,
+  first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+  times INTEGER DEFAULT 1
+);
 """
 
 
@@ -281,3 +289,74 @@ def themes_series(con, days=30):
 def _days_ago(days):
     import datetime
     return (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+
+
+# ---------------------------------------------------------------- 关注股锚点 / 趋势票持久化
+def watch_first_seen(con, date, codes):
+    """记录/读取关注股「首次进入关注池」的日期（用于「关注以来累计」统计）。
+
+    返回 {code: first_seen_date}。新出现的 code 以传入 date 作为首见日写入。
+    """
+    out = {}
+    for c in codes:
+        row = con.execute("SELECT first_seen FROM watch_firstseen WHERE code=?", (c,)).fetchone()
+        if row:
+            out[c] = row[0]
+        else:
+            con.execute(
+                "INSERT OR REPLACE INTO watch_firstseen(code,first_seen,last_seen) VALUES(?,?,?)",
+                (c, date, date))
+            out[c] = date
+    # 已在池中的更新 last_seen，离池的不动（保留历史首见日）
+    con.executemany("UPDATE watch_firstseen SET last_seen=? WHERE code=?",
+                    [(date, c) for c in codes])
+    con.commit()
+    return out
+
+
+def trend_track_upsert(con, date, picks):
+    """把当日命中的趋势票写入 trend_track，保留首次见日与出现次数。
+
+    picks: [{code, name, ...}]（当日严格筛选命中的趋势票）。
+    返回 {code: {first_seen, times, last_seen, is_new}}。"""
+    prev = {}
+    for code, name, fs, ls, times in con.execute(
+            "SELECT code,name,first_seen,last_seen,times FROM trend_track"):
+        prev[code] = {"first_seen": fs, "last_seen": ls, "times": times, "name": name}
+    out = {}
+    for p in picks:
+        c = p.get("code")
+        if not c:
+            continue
+        if c in prev:
+            times = prev[c]["times"] + 1
+            fs = prev[c]["first_seen"]
+            is_new = False
+        else:
+            times = 1
+            fs = date
+            is_new = True
+        con.execute(
+            "INSERT OR REPLACE INTO trend_track(code,name,first_seen,last_seen,times)"
+            " VALUES(?,?,?,?,?)",
+            (c, p.get("name") or "", fs, date, times))
+        out[c] = {"first_seen": fs, "last_seen": date, "times": times, "is_new": is_new}
+    con.commit()
+    return out
+
+
+def trend_track_states(con):
+    """返回全部已记录趋势票状态 {code: {first_seen, last_seen, times, name}}。"""
+    out = {}
+    for code, name, fs, ls, times in con.execute(
+            "SELECT code,name,first_seen,last_seen,times FROM trend_track"):
+        out[code] = {"first_seen": fs, "last_seen": ls, "times": times, "name": name}
+    return out
+
+
+def trend_track_drop(con, codes):
+    """趋势彻底破位的票移出跟踪（不再标历史），避免长期挂着失效标签。"""
+    if not codes:
+        return
+    con.executemany("DELETE FROM trend_track WHERE code=?", [(c,) for c in codes])
+    con.commit()
