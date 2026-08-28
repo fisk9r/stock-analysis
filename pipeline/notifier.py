@@ -1417,20 +1417,57 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
                 sfx = " → **持有·剩%d个交易日**" % rest
             else:
                 sfx = " → **%s**" % act
-        zone_s = (" ｜ 买%s~%s卖%s~%s" % (
+        zone_s = (" ｜ 买%s~%s 卖%s~%s" % (
             t.get("buy_zone", ["", ""])[0], t.get("buy_zone", ["", ""])[1],
             t.get("sell_zone", ["", ""])[0], t.get("sell_zone", ["", ""])[1])
             if t.get("buy_zone") else "")
-        return ("**%s**%s(%s) %.2f ｜ %s·近5日%d涨%s%s"
-                % (t.get("name", "?"),
-                   "🆕" if t.get("is_new") else ("（历史%s·%d天）" % (t.get("first_seen", "")[:7], t.get("times", 0)) if t.get("continued") or t.get("times", 0) > 1 else ""),
+        # 机构/主力介入徽标（用户需求：机构介入情况及时点名）
+        inst = t.get("institution") or {}
+        inst_s = ""
+        if inst.get("level") in ("强", "中"):
+            _tg = (inst.get("tags") or [""])[0]
+            inst_s = " ｜ 🏦%s介入%s" % (inst["level"], ("·" + _tg) if _tg else "")
+        # 历史/新推荐标记（压缩为短标，避免行过长）
+        _mark = ""
+        if t.get("is_new"):
+            _mark = " 🆕"
+        elif (t.get("times") or 0) > 1:
+            _mark = " (跟踪%d天)" % t.get("times")
+        return ("**%s**%s(%s) %.2f ｜ 日均%.1f%%·%d涨%s%s%s"
+                % (t.get("name", "?"), _mark,
                    t.get("industry", "—") or "—",
                    t.get("close", 0) or 0,
-                   meta.get("band") or "趋势",
+                   meta.get("avg_daily", 0) or 0,
                    meta.get("up_days", 0) or 0,
-                   zone_s, sfx))
+                   zone_s, inst_s, sfx))
 
-    _sec("📈 趋势主升", [_trend_line(t) for t in trend[:6]])
+    def _trend_group(pred, n, exclude=None):
+        out = []
+        for t in trend:
+            if exclude and id(t) in exclude:
+                continue
+            if pred(t):
+                out.append(t)
+            if len(out) >= n:
+                break
+        return out
+
+    if trend:
+        _acc = _trend_group(
+            lambda t: (t.get("trend_meta") or {}).get("trend_state") == "加速上行", 3)
+        _used = set(id(x) for x in _acc)
+        _slow = _trend_group(
+            lambda t: (t.get("trend_meta") or {}).get("slow_channel")
+            or (t.get("trend_meta") or {}).get("band") == "趋势平缓", 3, _used)
+        _used |= set(id(x) for x in _slow)
+        _steady = _trend_group(lambda t: True, 4, _used)
+        # 分档推送（用户需求：趋势票要同时给「缓」与「加速」两类，别只给强趋势）
+        if _acc:
+            _sec("🚀 趋势 · 加速主升", [_trend_line(t) for t in _acc])
+        if _steady:
+            _sec("📈 趋势 · 稳健上行", [_trend_line(t) for t in _steady])
+        if _slow:
+            _sec("🐢 趋势 · 缓坡慢牛", [_trend_line(t) for t in _slow])
     # ---- 自选/持仓操作结论（P1/P4：跟着做）----
     _wr = rec.get("watch_reco")
     if _wr and _wr.get("items") and _on("rec"):
@@ -1722,10 +1759,33 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         alerts = (hrep or {}).get("alerts") or []
         if hrep and hrep.get("enabled") and alerts:
             _sec("📡 持仓预警", [a for a in alerts[:4] if a])
+    # ---- 收尾纪律条：一句话记住今天怎么干（排版清爽化：结论前置、纪律收尾）----
+    _disc = _discipline_line(data, rec)
+    if _disc:
+        L.append("")
+        L.append(_disc)
     if url:
         L.append("")
         L.append("🔗 看板 %s" % url)
     return "\n".join(L)
+
+
+def _discipline_line(data, rec):
+    """收尾『纪律一句话』：仓位 + 卖压 + 买卖触发，避免读者抓不住重点。"""
+    rec = rec or {}
+    pa = data.get("position_advice") or {}
+    pp = data.get("preopen_plan") or {}
+    pos = pa.get("suggest_pct")
+    if pos:
+        pos_s = "总仓位≤%d%%" % pos
+    elif pp.get("position"):
+        pos_s = "仓位 %s" % pp["position"]
+    else:
+        pos_s = "控仓为主"
+    wr = rec.get("watch_reco") or {}
+    n_sell = wr.get("sell_n") or 0
+    sell_s = ("关注票 %d 只触发卖出 → 先处理卖" % n_sell) if n_sell else "无强制卖出信号"
+    return "> 📌 纪律：%s ｜ %s ｜ 买点只认买区、低开< -0.1%%弃 ｜ 破止损无条件走" % (pos_s, sell_s)
 
 
 def _ladder_plan_lines(rec, aitems=None, n=6, compact=False):
@@ -1772,13 +1832,13 @@ def _rec_action_line(it, lp_map):
     if p:
         bz = p.get("buy_zone") or [0, 0]
         sz = p.get("sell_zone") or [0, 0]
-        return ("→ ✅ 竞价达标买 **%.2f~%.2f** ｜ 目标 %.2f~%.2f ｜ 止损 %.2f（低开<-0.1%%弃）"
-                % (bz[0], bz[1], sz[0], sz[1], p.get("stop") or 0))
+        return ("→ ✅ 竞价达标买 **%.2f~%.2f** ｜ 目标 %.2f~%.2f ｜ 止损 %.2f ｜ 持有%d日（低开<-0.1%%弃）"
+                % (bz[0], bz[1], sz[0], sz[1], p.get("stop") or 0, p.get("hold_days", 2)))
     if it.get("risk_flag"):
-        return "→ ⚠ 高危标注：轻仓/快进快出，竞价弱直接放弃"
+        return "→ ⚠ 高危（%s）：≤2成仓快进快出，竞价弱直接放弃" % ((it.get("veto_reason") or "放量接力")[:12])
     if (it.get("p_break") or 0) >= 78:
-        return "→ 冲高兑现为主，不追高；低开(<-0.1%)一律放弃"
-    return "→ 竞价强势可跟（首仓轻），低开(<-0.1%)放弃"
+        return "→ 冲高兑现为主不追高；低开(<-0.1%)放弃，破均价线离场"
+    return "→ 竞价强势可跟（首仓≤3成），低开(<-0.1%)放弃，破-5%止损"
 
 
 def watchreco_lines(data, n=6, compact=False):
@@ -1796,6 +1856,69 @@ def watchreco_lines(data, n=6, compact=False):
     out = _wc.lines(wr, n=n, compact=compact)
     if out and not compact:
         out.insert(0, "> 持仓给卖出/加仓/持有动作，自选给买入时机；完整买卖区见看板。")
+    return out
+
+
+def _watch_action_by_sector(act, dirn):
+    """关注票动作 × 板块当日预判 → 可执行指令（用户需求：盘前结合板块预测当日涨跌）。
+
+    纪律优先原则：个股卖出信号 > 板块方向；板块只调节「买入/持有」的力度。
+    """
+    act = act or "观望"
+    dirn = dirn or "震荡"
+    if act.startswith("卖出") or act == "离场换强":
+        if dirn == "偏强":
+            return "%s（板块偏强，但个股已触发卖出纪律 → 纪律优先，冲高兑现）" % act
+        return "%s（板块%s → 卖出纪律优先，不恋战）" % (act, dirn)
+    if act in ("建议买入", "回踩买入", "加仓"):
+        if dirn == "偏强":
+            return "%s（板块偏强 → 可在买区上沿介入）" % act
+        if dirn == "偏弱":
+            return "轻仓%s（板块偏弱 → 等回踩买区下沿再介入）" % act
+        return "%s（板块震荡 → 按买区执行，不追高）" % act
+    if act == "减仓":
+        return "减仓（板块%s → 按计划降低仓位）" % dirn
+    if dirn == "偏强":
+        return "持有待涨（板块偏强 → 可持股不动）"
+    if dirn == "偏弱":
+        return "冲高减仓（板块偏弱 → 反弹兑现）"
+    return "持有（板块震荡 → 按买卖区执行）"
+
+
+def watch_forecast_lines(data, n=8):
+    """盘前「关注票操作说明」行：每只关注票 = 板块当日预判 + 明确动作。"""
+    rec = data.get("recommend") or {}
+    wr = rec.get("watch_reco") or {}
+    items = wr.get("items") or []
+    if not items:
+        return []
+    sfc = data.get("sector_forecast") or {}
+    mkt = sfc.get("__market__") or {}
+    out = []
+    if mkt:
+        out.append("> 大盘环境：**%s**（%d分）· %s"
+                   % (mkt.get("dir"), mkt.get("score", 50), mkt.get("why", "—")))
+    for x in items[:n]:
+        ind = x.get("industry") or "—"
+        f = sfc.get(ind) or {}
+        dirn = f.get("dir") or "震荡"
+        icon = {"偏强": "🔴", "偏弱": "🟢", "震荡": "⚪"}.get(dirn, "⚪")
+        tag = "持仓" if x.get("is_holding") else "自选"
+        seg = "- %s **%s**" % (tag, x.get("name") or "?")
+        if x.get("close"):
+            seg += " %.2f" % x["close"]
+        if x.get("pnl_pct") is not None:
+            seg += " 浮盈%+.1f%%" % x["pnl_pct"]
+        seg += " ｜ %s%s 预判%s" % (ind if ind != "—" else "无板块", icon, dirn)
+        if f.get("score") is not None:
+            seg += "(%d)" % f["score"]
+        seg += " → **%s**" % _watch_action_by_sector(x.get("action"), dirn)
+        bz = x.get("buy_zone") or [None, None]
+        if bz[0] and (x.get("action") or "") in ("建议买入", "回踩买入", "加仓"):
+            seg += " ｜ 买区%.2f~%.2f" % (bz[0], bz[1])
+        elif (x.get("action") or "").startswith("卖出") and x.get("stop"):
+            seg += " ｜ 止损%.2f" % x["stop"]
+        out.append(seg)
     return out
 
 
@@ -1856,11 +1979,18 @@ def format_stock_summary(data, url="", mode="close", con=None):
             L.append("")
             L.append("**③ ⭐ 自选/持仓操作（跟着做）**")
             L.extend(_wr_lines)
-        # ④ 盘前策略（聚合仓位/主线/接力/关注池/风险）
+        # ④ 📌 关注票操作说明 = 板块当日涨跌预判 × 个股动作（用户需求5）
+        _wf_lines = watch_forecast_lines(data, n=8)
+        if _wf_lines:
+            L.append("")
+            L.append("**④ 📌 关注票操作（板块当日预判 → 动作）**")
+            L.append("> 预判口径：板块昨日涨停高度 + 接力方向 + 主力资金 + 情绪/外围，仅作当日节奏参考。")
+            L.extend(_wf_lines)
+        # ⑤ 盘前策略（聚合仓位/主线/接力/关注池/风险）
         pp = data.get("preopen_plan") or {}
         if pp.get("position"):
             L.append("")
-            L.append("**④ 盘前策略**")
+            L.append("**⑤ 盘前策略**")
             L.append("- 建议仓位：**%s**" % pp["position"])
             if pp.get("main_line"):
                 L.append("- 主线预判：%s" % "、".join(pp["main_line"]))
@@ -1872,7 +2002,7 @@ def format_stock_summary(data, url="", mode="close", con=None):
                 L.append("- 关注池：" + "、".join("%s(%s)" % (w["name"], w.get("reason", "")) for w in pp["watch"][:8]))
             if pp.get("risks"):
                 L.append("- 风险提醒：%s" % "；".join(pp["risks"]))
-        # ⑤ ⚡ 短线/超短线盘前操作提示（追板回落/破位/停滞 当日离场或换强）
+        # ⑥ ⚡ 短线/超短线盘前操作提示（追板回落/破位/停滞 当日离场或换强）
         _zs = (data.get("zones") or {}).get("items") or []
         _zst = [x for x in _zs if x.get("horizon") in ("短线", "超短线")]
         if _zst:
@@ -1880,7 +2010,7 @@ def format_stock_summary(data, url="", mode="close", con=None):
                                      0 if x.get("rotate") else 1,
                                      -(x.get("pnl_pct") or 0)))
             L.append("")
-            L.append("**⑤ ⚡ 短线/超短线盘前操作（持仓/关注）**")
+            L.append("**⑥ ⚡ 短线/超短线盘前操作（持仓/关注）**")
             L.append("> 追板回落/破位/停滞一律当日离场或换强；完整买卖区见看板。")
             for x in _zst[:8]:
                 nm = x.get("name", "?")
@@ -1971,6 +2101,11 @@ def format_sc(data, url="", mode="close", con=None):
         if _wr_lines:
             L.append("③⭐自选/持仓操作：")
             L.extend(_wr_lines)
+        # ③b 📌 关注票 × 板块当日预判（用户需求5）
+        _wf_lines = watch_forecast_lines(data, n=5)
+        if _wf_lines:
+            L.append("③b📌关注票·板块当日预判：")
+            L.extend(_wf_lines)
         # ④ 盘前策略
         pp = data.get("preopen_plan") or {}
         if pp.get("position"):

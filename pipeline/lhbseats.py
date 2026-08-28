@@ -49,11 +49,18 @@ def scan(date):
     from collections import Counter
     reasons = Counter((x.get("reason") or "").split("日")[0][:12]
                       for x in items if x.get("reason"))
+    # 全量净买入名单（top10 之外也保留，供「机构/主力介入」引擎做个股级证据匹配）
+    net_buy = [{"code": x.get("code"), "name": x.get("name"),
+                "net_yi": round(fnum(x.get("net")) / 1e8, 2)}
+               for x in items if fnum(x.get("net")) > 0]
+    net_buy.sort(key=lambda x: -x["net_yi"])
     return {
         "date": date,
         "n": len(items),
         "top": top,
         "reasons": reasons.most_common(3),
+        "net_buy": net_buy[:40],
+        "net_buy_n": len(net_buy),
     }
 
 

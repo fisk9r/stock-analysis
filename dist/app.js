@@ -904,6 +904,31 @@
       h += card('🎯 盘前策略', _pp, '聚合仓位/主线/接力/关注池/风险，开盘前一眼看清今日该怎么打');
     }
 
+    /* 板块当日涨跌预判（用户需求：结合板块预测当日涨跌，给关注票操作依据） */
+    var SF = D.sector_forecast || null;
+    if (SF) {
+      var MK = SF.__market__ || null;
+      var _sfKeys = Object.keys(SF).filter(function (k) { return k !== '__market__'; });
+      _sfKeys.sort(function (a, b) { return (SF[b].score || 0) - (SF[a].score || 0); });
+      var _sf = MK
+        ? '<div class="chips" style="margin-bottom:8px">' +
+          '<span class="chip" style="border-color:' + C.gold + ';color:' + C.gold + '">大盘环境 <b>' + E(MK.dir) + '</b>（' + (MK.score || 0) + '分）</span>' +
+          '<span class="chip muted">' + E(MK.why || '') + '</span></div>'
+        : '';
+      if (_sfKeys.length) {
+        _sf += '<div class="grid g2">' + _sfKeys.slice(0, 8).map(function (k) {
+          var v = SF[k] || {};
+          var col = v.dir === '偏强' ? C.up : v.dir === '偏弱' ? C.down : C.gray;
+          return '<div class="rec"><div class="rh"><span class="nm">' + E(k) + '</span>' +
+            '<span class="bd" style="border-color:' + col + ';color:' + col + ';font-size:11px;padding:0 4px">' +
+            E(v.dir || '震荡') + ' ' + (v.score || 0) + '</span></div>' +
+            '<div class="note" style="margin-top:3px;color:var(--muted)">' + E(v.why || '') + '</div></div>';
+        }).join('') + '</div>';
+      }
+      h += card('🔮 板块当日涨跌预判', _sf,
+        '板块昨日涨停高度 + 接力方向 + 主力资金 + 情绪/外围环境合成，供关注票当日节奏参考（非收益承诺）');
+    }
+
     /* 竞价定调 */
     var A0 = D.auction || {};
     if (A0 && A0.summary) {
@@ -1978,6 +2003,24 @@
           ? '<span class="bd" style="border-color:' + C.up + ';color:' + C.up + ';font-size:11px;padding:0 4px">🆕 新入选</span>'
           : (t.times > 1 ? '<span class="bd" style="border-color:' + C.gray + ';color:' + C.gray + ';font-size:11px;padding:0 4px">历史 ' + E((t.first_seen || '').slice(0, 7)) + ' · 跟踪' + t.times + '天</span>' : '');
         var bm = t.trend_meta || {};
+        /* 趋势双态徽标：加速上行/匀速上行/增速放缓（用户要求区分「缓」与「加速」） */
+        var stateBadge = '';
+        if (bm.trend_state) {
+          var sc2 = bm.trend_state === '加速上行' ? C.up : bm.trend_state === '增速放缓' ? C.down : C.gold;
+          stateBadge = '<span class="bd" style="margin-left:4px;font-size:11px;padding:0 4px;border-color:' + sc2 + ';color:' + sc2 + '">' +
+            (bm.trend_state === '加速上行' ? '🚀 ' : bm.trend_state === '增速放缓' ? '🐢 ' : '') + E(bm.trend_state) +
+            (bm.accel ? ' ' + f(bm.accel, 1) + 'x' : '') + '</span>';
+        }
+        /* 机构/主力介入徽标（用户要求：机构介入情况及时点名） */
+        var instHtml = '';
+        if (t.institution && t.institution.level && t.institution.level !== '无') {
+          var iv = t.institution;
+          var ic = iv.level === '强' ? C.up : iv.level === '中' ? C.gold : C.gray;
+          instHtml = '<div style="margin-top:4px;padding:4px 8px;border-left:3px solid ' + ic + ';background:rgba(128,128,128,.06);border-radius:4px">' +
+            '<b style="color:' + ic + '">🏦 机构/主力介入：' + E(iv.level) + '</b>' +
+            (iv.tags && iv.tags.length ? '<span class="muted" style="font-size:10px"> · ' + E(iv.tags.join(' · ')) + '</span>' : '') +
+            (iv.action ? '<div class="muted" style="font-size:10px;margin-top:2px">' + E(iv.action) + '</div>' : '') + '</div>';
+        }
         var band = (t.buy_zone && t.sell_zone)
           ? '<span class="chip">回踩买 <b>' + f(t.buy_zone[0], 2) + '~' + f(t.buy_zone[1], 2) + '</b></span>' +
             '<span class="chip">反弹卖 <b>' + f(t.sell_zone[0], 2) + '~' + f(t.sell_zone[1], 2) + '</b></span>' +
@@ -2008,12 +2051,13 @@
             '<div class="muted" style="font-size:10px;margin-top:2px">' + E(vd.reason || '') + '</div>' + holdLine + '</div>';
         }
         return '<div class="rec trend"><div class="rh"><span class="nm">' + stk(t.code, t.name) + '</span>' +
-          (bm.band ? '<span class="bd ok" style="margin-left:4px;font-size:11px">' + E(bm.band) + '</span>' : '') + badge +
+          (bm.band ? '<span class="bd ok" style="margin-left:4px;font-size:11px">' + E(bm.band) + '</span>' : '') +
+          stateBadge + badge +
           '<span class="sc" style="color:' + C.up + '">' + f(t.close || 0, 2) + '</span></div>' +
-          '<div class="chips" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:5px">' + band + '</div>' + adv + vdHtml + '</div>';
+          '<div class="chips" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:5px">' + band + '</div>' + adv + vdHtml + instHtml + '</div>';
       }).join('');
       h += card('📈 趋势主升 · 候选（' + TR.length + '，🆕=新入选 / 历史=持续跟踪）', body,
-        '均线多头+近5日日均≥2%+≥4天收涨+横盘≤1；🆕为当日新入选，历史=持续跟踪的趋势票（不随单日波动天天换），每只附回踩买/反弹卖波段价');
+        '双通道入选：强趋势（日均≥2%+4涨）与缓坡慢牛（斜率≥1.5%+20日涨≥8%）；🚀加速/🐢放缓标签看涨速变化，🏦标签为机构或主力资金介入证据（龙虎榜净买/大宗机构专用/板块主力净流入）');
     })();
     h += group('⚡ 强动量 · 连板余波（' + (R.momentum || []).length + '）', R.momentum, 'momentum',
       '近期≥2次涨停/≥2连板基因 + 多头未破位 + 距高点回撤≤18%（接住“连板妖股型、今日非涨停”掉缝里的票，如风范股份）');

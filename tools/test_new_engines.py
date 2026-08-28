@@ -529,6 +529,144 @@ def main():
               "wechat_pushplus": {"token": [{"token": "T", "user": "mmmmmm"}]}})
           == {"owner", "mmmmmm"})
 
+    # ===== 需求：趋势双态（缓/加速）+ 机构介入信号 =====
+    import engine as _eg
+    check("趋势双态·加速判定", _eg.classify_trend_state(4.0, 1.2, 0.0)[0] == "加速上行",
+          "-> %s" % (_eg.classify_trend_state(4.0, 1.2, 0.0),))
+    check("趋势双态·放缓判定", _eg.classify_trend_state(1.2, 2.0, 0.0)[0] == "增速放缓",
+          "-> %s" % (_eg.classify_trend_state(1.2, 2.0, 0.0),))
+    check("趋势双态·匀速判定", _eg.classify_trend_state(2.0, 2.0, 0.0)[0] == "匀速上行",
+          "-> %s" % (_eg.classify_trend_state(2.0, 2.0, 0.0),))
+    check("趋势双态·斜率兜底（无加速度走斜率）",
+          _eg.classify_trend_state(1.0, 1.0, -1.2)[0] == "增速放缓"
+          and _eg.classify_trend_state(1.0, 1.0, 1.2)[0] == "加速上行")
+    check("趋势双态·零基准不除零", _eg.classify_trend_state(3.0, 0.0)[0] == "匀速上行",
+          "-> %s" % (_eg.classify_trend_state(3.0, 0.0),))
+
+    _ins = _eg.institution_evidence(
+        "600001",
+        {"lhbseats": {"top": [{"code": "600001", "net_yi": 0.8}]},
+         "blocktrade": {"inst": [{"code": "600001", "side": "buy", "amt_yi": 0.5}], "top": []},
+         "money": {"boards_in": [{"name": "半导体", "net": 3.2}], "boards_out": []},
+         "margin": {"delta_yi": 30}, "seats": {"hits": []}},
+        industry="半导体")
+    check("机构介入·强信号（龙虎榜+大宗机构+板块净流入）",
+          _ins["level"] == "强" and "龙虎榜净买" in "".join(_ins["tags"]),
+          "-> %s/%s/%s" % (_ins["level"], _ins["score"], _ins["tags"]))
+    _ins2 = _eg.institution_evidence(
+        "600002",
+        {"lhbseats": {"top": []},
+         "blocktrade": {"inst": [], "top": [{"code": "600002", "discount": -12.0}]},
+         "money": {"boards_in": [], "boards_out": [{"name": "医药", "net": -2.0}]},
+         "margin": {"delta_yi": -40}, "seats": {"hits": [{"code": "600002"}]}},
+        industry="医药")
+    check("机构介入·负向（折价出货+板块流出+游资）",
+          _ins2["level"] == "无" and _ins2["score"] < 0,
+          "-> %s/%s/%s" % (_ins2["level"], _ins2["score"], _ins2["tags"]))
+    _ins3 = _eg.institution_evidence("600003", {}, industry="—")
+    check("机构介入·无数据降级", _ins3["level"] == "无" and _ins3["score"] == 0)
+    _ins4 = _eg.institution_evidence(
+        "600005",
+        {"blocktrade": {"premium": [{"code": "600005", "discount": 3.5, "amt_yi": 0.6}]}})
+    check("机构介入·大宗溢价接盘", _ins4["level"] == "中" and "溢价" in "".join(_ins4["tags"]),
+          "-> %s/%s" % (_ins4["level"], _ins4["tags"]))
+    _ins5 = _eg.institution_evidence(
+        "600006", {"lhbseats": {"net_buy": [{"code": "600006", "net_yi": 0.2}]}})
+    check("机构介入·龙虎榜净买全量名单（非top10也命中）",
+          _ins5["level"] == "中" and "龙虎榜净买" in "".join(_ins5["tags"]),
+          "-> %s/%s" % (_ins5["level"], _ins5["tags"]))
+    # lhbseats.reasons 是 [标签,数量] 二元列表，不得被当成 dict（历史 AttributeError 回归）
+    check("机构介入·脏数据不崩",
+          _eg.institution_evidence("600004", {"lhbseats": {"top": [["游资", 3]],
+                                                           "reasons": [["机构专用", 5]]}})["level"] == "无")
+
+    # ===== 需求：板块当日涨跌预判 + 关注票操作说明 =====
+    _sfc_data = {
+        "sectors": {"industry": [
+            {"name": "半导体", "zt": 6, "max_lb": 2, "tier": "主线", "pct": 2.5},
+            {"name": "医药", "zt": 1, "max_lb": 1, "tier": "零星", "pct": -1.0}]},
+        "sector_relay": {"relay": [{"name": "半导体", "kind": "加速", "certainty": 80}],
+                         "broken": None},
+        "money": {"boards_in": [{"name": "半导体", "net": 5.0}],
+                  "boards_out": [{"name": "医药", "net": -3.0}],
+                  "total_main_net": 80},
+        "regime": {"level": "回暖"},
+        "global_market": {"available": True, "signal": "外围偏多"},
+    }
+    _sfc = _eg.sector_day_forecast(_sfc_data)
+    check("板块预判·强板块判定", (_sfc.get("半导体") or {}).get("dir") == "偏强",
+          "-> %s" % _sfc.get("半导体"))
+    check("板块预判·弱板块判定", (_sfc.get("医药") or {}).get("dir") == "偏弱",
+          "-> %s" % _sfc.get("医药"))
+    check("板块预判·大盘环境键", (_sfc.get("__market__") or {}).get("dir") == "偏强",
+          "-> %s" % _sfc.get("__market__"))
+    _sfc_empty = _eg.sector_day_forecast({})
+    check("板块预判·空数据不崩", "__market__" in _sfc_empty)
+
+    check("关注票动作·卖出纪律优先于板块偏强",
+          "纪律优先" in _nf._watch_action_by_sector("卖出（止损）", "偏强"),
+          "-> %s" % _nf._watch_action_by_sector("卖出（止损）", "偏强"))
+    check("关注票动作·板块偏弱降买入力度",
+          "轻仓" in _nf._watch_action_by_sector("建议买入", "偏弱"),
+          "-> %s" % _nf._watch_action_by_sector("建议买入", "偏弱"))
+    check("关注票动作·板块偏强持有待涨",
+          "持有待涨" in _nf._watch_action_by_sector("持有", "偏强"),
+          "-> %s" % _nf._watch_action_by_sector("持有", "偏强"))
+
+    _fc_pre = {
+        "sector_forecast": _sfc,
+        "recommend": {"watch_reco": {"items": [
+            {"name": "中化国际", "code": "600500", "close": 6.85, "pct": 1.2,
+             "action": "持有", "is_holding": True, "pnl_pct": 3.2,
+             "industry": "半导体", "buy_zone": [6.5, 6.7], "stop": 6.2},
+            {"name": "沃华医药", "code": "002107", "close": 7.31, "pct": -0.4,
+             "action": "卖出（止盈）", "is_holding": False, "pnl_pct": None,
+             "industry": "医药", "buy_zone": [None, None], "stop": 6.8}]}},
+    }
+    _wf = _nf.watch_forecast_lines(_fc_pre, n=5)
+    check("关注票预判行生成", len(_wf) >= 3 and "半导体" in _wf[1] and "医药" in _wf[2],
+          "-> %s" % _wf[:3])
+    check("关注票预判含大盘环境行", "大盘环境" in _wf[0], "-> %s" % _wf[0])
+
+    # 盘前推送必须出现「关注票操作（板块当日预判」段
+    _pre2 = dict(fake_pre)
+    _pre2["sector_forecast"] = _sfc
+    _pre2["recommend"] = dict(fake_pre.get("recommend") or {})
+    _pre2["recommend"]["watch_reco"] = _fc_pre["recommend"]["watch_reco"]
+    _pm2 = _nf.format_stock_summary(_pre2, "", mode="preauction")
+    check("盘前推送含关注票·板块预判段",
+          "关注票操作（板块当日预判" in _pm2["text"],
+          "-> %s" % [l for l in _pm2["text"].splitlines() if "关注票操作" in l][:1])
+    _sc2 = _nf.format_sc(_pre2, "", mode="preauction")
+    check("盘前SC精简版含板块预判", "关注票·板块当日预判" in _sc2["text"])
+
+    # 收盘推送：趋势三档分组 + 纪律收尾行
+    _close_data = {
+        "meta": {"date": "2026-08-28"},
+        "market": {"sentiment": {"score": 55, "label": "温和"}, "cycle": {"phase": "修复"}},
+        "recommend": {"trend": [
+            {"code": "1", "name": "加速票", "industry": "半导体", "close": 10.0,
+             "trend_meta": {"band": "主升强趋势", "avg_daily": 3.5, "up_days": 4,
+                            "trend_state": "加速上行"},
+             "verdict": {"action": "建议买入", "suggested_hold_days": 20, "early": True},
+             "institution": {"level": "强", "tags": ["龙虎榜净买 0.80亿"], "action": "可跟随建仓"}},
+            {"code": "2", "name": "缓坡票", "industry": "化工", "close": 6.0,
+             "trend_meta": {"band": "趋势平缓", "avg_daily": 1.4, "up_days": 3,
+                            "trend_state": "匀速上行", "slow_channel": True},
+             "verdict": {"action": "持有", "days_held": 8, "hold_limit_days": 20}},
+            {"code": "3", "name": "稳健票", "industry": "汽车", "close": 20.0,
+             "trend_meta": {"band": "稳健上行", "avg_daily": 2.4, "up_days": 4,
+                            "trend_state": "匀速上行"}}]},
+    }
+    _cl = _nf.format_stock_summary(_close_data, "", mode="close")
+    check("收盘推送·趋势加速档", "趋势 · 加速主升" in _cl["text"])
+    check("收盘推送·趋势缓坡档", "趋势 · 缓坡慢牛" in _cl["text"])
+    check("收盘推送·趋势稳健档", "趋势 · 稳健上行" in _cl["text"])
+    check("收盘推送·机构介入徽标", "🏦强介入" in _cl["text"])
+    check("收盘推送·纪律收尾行", "📌 纪律" in _cl["text"],
+          "-> %s" % [l for l in _cl["text"].splitlines() if "纪律" in l][:1])
+    check("收盘推送·买入持有天数", "建议买入·持有20天" in _cl["text"])
+
     print("\n================ 结果 ================")
     print("PASS=%d  FAIL=%d" % (PASS, FAIL))
     return 0 if FAIL == 0 else 1

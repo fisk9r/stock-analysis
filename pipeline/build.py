@@ -537,8 +537,14 @@ def run(date_override=None, dedup_close=False):
         _show = (_band_pick(_new_arr, "主升强趋势", 6)
                  + _band_pick(_new_arr, "稳健上行", 4)
                  + _band_pick(_new_arr, "趋势平缓", 3))
-        _hist_arr.sort(key=lambda x: -(x.get("score") or 0))
-        _show += _hist_arr[:7]
+        # 历史延续票同样按 band 配额（用户需求：加速型与缓坡慢牛都要有代表），
+        # 否则强趋势票天然占满前排，缓坡慢牛永远看不到。
+        _show += (_band_pick(_hist_arr, "主升强趋势", 4)
+                  + _band_pick(_hist_arr, "稳健上行", 3)
+                  + _band_pick(_hist_arr, "趋势平缓", 3))
+        _seen = set(x["code"] for x in _show)
+        _show += [x for x in sorted(_hist_arr, key=lambda x: -(x.get("score") or 0))
+                  if x["code"] not in _seen][:2]
         _seen_codes = set()
         _trend_final = []
         for _x in _show:
@@ -943,6 +949,42 @@ def run(date_override=None, dedup_close=False):
         log("  游资席位失败（无网/解析异常，跳过）：%r" % e)
         data["seats"] = None
 
+    # ---- 机构/主力介入证据（用户需求：机构介入情况及时点名）----
+    # 依赖 lhbseats/blocktrade/margin/money/seats，必须放在这些引擎之后。
+    try:
+        _src = {"lhbseats": data.get("lhbseats"), "blocktrade": data.get("blocktrade"),
+                "margin": data.get("margin"), "money": data.get("money"),
+                "seats": data.get("seats")}
+        _hit_n = 0
+        for _p in list(rec.get("trend") or []) + list(rec.get("momentum") or []):
+            if _p.get("institution"):
+                continue
+            _ev = engine.institution_evidence(_p.get("code"), _src,
+                                              industry=_p.get("industry"))
+            if _ev["level"] != "无":
+                _p["institution"] = _ev
+                _hit_n += 1
+                if _ev["level"] in ("强", "中") and _ev.get("action"):
+                    _rs = _p.setdefault("reasons", [])
+                    _tag = "【%s介入】%s（%s）" % (_ev["level"], _ev["action"],
+                                                "、".join(_ev["tags"][:2]) or "—")
+                    if _tag not in _rs:
+                        _rs.insert(0, _tag)
+        log("  机构介入证据：%d 只趋势/动量票命中" % _hit_n)
+    except Exception as e:
+        log("  机构介入证据失败（不影响主流程）：%r" % e)
+
+    # ---- 板块当日涨跌预判（用户需求：盘前结合板块预测当日涨跌，给关注票操作说明）----
+    try:
+        data["sector_forecast"] = engine.sector_day_forecast(data)
+        _sfc = data["sector_forecast"] or {}
+        _mk = _sfc.get("__market__") or {}
+        log("  板块当日预判：大盘%s(%d分) · 覆盖 %d 个板块"
+            % (_mk.get("dir"), _mk.get("score", 50), max(0, len(_sfc) - 1)))
+    except Exception as e:
+        log("  板块当日预判失败（不影响主流程）：%r" % e)
+        data["sector_forecast"] = None
+
     # ---- 题材主线识别（基于涨停股概念/行业聚类）----
     try:
         data["theme"] = theme.scan(date, data.get("limit_ups") or [])
@@ -1085,6 +1127,12 @@ def run(date_override=None, dedup_close=False):
         rec["watch_reco"] = watchreco.distill(
             data.get("zones"), holding_codes=set(_zc.keys()), watch_names=_wn)
         _wr = rec["watch_reco"]
+        # 补行业字段（zones 无行业信息）→ 供盘前「板块当日预判」关联到个股
+        def _industry_of(_c):
+            return next((n for _, n, k in (code2boards.get(_c) or []) if k == "industry"), "—")
+
+        for _it in _wr.get("items") or []:
+            _it["industry"] = _industry_of(_it.get("code"))
         log("  自选/持仓操作结论 %d 只（卖出 %d / 买入加仓 %d）"
             % (_wr["n"], _wr["sell_n"], _wr["buy_n"]))
     except Exception as e:

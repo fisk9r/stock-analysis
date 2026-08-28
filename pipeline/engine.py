@@ -2264,6 +2264,143 @@ def preopen_plan(rec, inds, relay, risks):
     }
 
 
+def sector_day_forecast(data, topn=10):
+    """盘前『板块当日涨跌预判』（用户需求：结合板块预测当日涨跌，给关注票操作说明）。
+
+    纯聚合已构建好的 data，不新增行情计算：
+      · sectors.industry  昨日板块涨停家数/最高连板/板块涨跌/主力净额/主线层级
+      · sector_relay      接力方向（新崛起/加速 + 晋级确定性）与退潮主线
+      · money.boards_in/out 昨日板块主力资金净流入/流出（真金白银）
+      · regime            连板情绪阶段（过热→兑现压力，退潮→普跌压力）
+      · global_market     外围定调（弱证据，只取方向）
+
+    返回 {"__market__": {...}, 板块名: {"dir","score","why","evidence"}}。
+    dir: 偏强(score≥62) / 震荡(43~61) / 偏弱(≤42)；
+    __market__ 给出大盘环境定调，供关注票整体仓位建议引用。
+    """
+    d = data or {}
+    inds = ((d.get("sectors") or {}).get("industry") or [])
+    relay_d = d.get("sector_relay") or {}
+    money = d.get("money") or {}
+    regime = d.get("regime") or {}
+    g = d.get("global_market") or {}
+
+    # ---- 市场环境系数（所有板块共用）----
+    env = 0
+    env_why = []
+    rl = (regime.get("level") or "")
+    if "过热" in rl or "高潮" in rl:
+        env -= 5
+        env_why.append("连板情绪过热（兑现压力大）")
+    elif "退潮" in rl or "冰点" in rl:
+        env -= 8
+        env_why.append("连板情绪退潮（赚钱效应弱）")
+    elif "回暖" in rl or "升温" in rl or "修复" in rl:
+        env += 5
+        env_why.append("连板情绪回暖")
+    _gs = (g.get("signal") or "") if g.get("available") else ""
+    if any(k in _gs for k in ("偏空", "走弱", "承压", "下跌")):
+        env -= 4
+        env_why.append("外围偏空")
+    elif any(k in _gs for k in ("偏多", "走强", "上涨", "乐观")):
+        env += 4
+        env_why.append("外围偏多")
+    total_main = money.get("total_main_net")
+    if isinstance(total_main, (int, float)):
+        if total_main > 50:
+            env += 3
+            env_why.append("全市场主力大幅净流入")
+        elif total_main < -50:
+            env -= 3
+            env_why.append("全市场主力净流出")
+
+    relay_names = {x.get("name"): x for x in (relay_d.get("relay") or [])}
+    broken_name = ((relay_d.get("broken") or {}) or {}).get("name")
+    in_boards = {b.get("name"): b for b in (money.get("boards_in") or [])}
+    out_boards = {b.get("name"): b for b in (money.get("boards_out") or [])}
+
+    out = {}
+    for a in inds:
+        nm = a.get("name")
+        if not nm:
+            continue
+        sc = 50.0
+        ev = []
+        tier = a.get("tier") or "零星"
+        if tier == "主线":
+            sc += 12
+            ev.append("昨日主线（%d家涨停/%d连板）" % (a.get("zt") or 0, a.get("max_lb") or 0))
+        elif tier == "支线":
+            sc += 5
+            ev.append("昨日支线（%d家涨停）" % (a.get("zt") or 0))
+        else:
+            sc -= 3
+        zt = a.get("zt") or 0
+        if zt >= 5:
+            sc += 14
+        elif zt >= 3:
+            sc += 8
+        r = relay_names.get(nm)
+        if r:
+            bump = 15 if r.get("kind") == "加速" else 12
+            sc += bump * (0.5 + 0.5 * ((r.get("certainty") or 0) / 100.0))
+            ev.append("接力方向·%s（确定性%d%%）" % (r.get("kind"), r.get("certainty") or 0))
+        if broken_name and nm == broken_name:
+            sc -= 12
+            ev.append("退潮主线（涨停数从%d降至%d）" % (
+                ((relay_d.get("broken") or {}).get("peak_zt") or 0),
+                ((relay_d.get("broken") or {}).get("latest_zt") or 0)))
+        if nm in in_boards:
+            sc += 22
+            ev.append("主力净流入 %.1f亿" % (in_boards[nm].get("net") or 0))
+            direct = True
+        elif nm in out_boards:
+            sc -= 10
+            ev.append("主力净流出 %.1f亿" % abs(out_boards[nm].get("net") or 0))
+            direct = True
+        pct = a.get("pct")
+        if isinstance(pct, (int, float)):
+            sc += clamp(pct, -2, 3) * 3
+        # 环境分打折叠加：大盘环境是背景而非板块自身动能，权重 0.6，
+        # 避免「市场热 → 所有板块一律偏强」的失真（弱板块仍应显弱）。
+        sc = clamp(sc + env * 0.6, 0, 100)
+        if sc >= 62:
+            dirn = "偏强"
+        elif sc <= 42:
+            dirn = "偏弱"
+        else:
+            dirn = "震荡"
+        out[nm] = {"dir": dirn, "score": round(sc), "why": "、".join(ev[:3]) or "无额外信号",
+                   "evidence": ev[:3], "env": round(env, 1)}
+
+    # 主力资金净流出的板块即便不在涨幅榜前列，也必须纳入（否则预判只会一边倒偏强）
+    for b in (money.get("boards_out") or []):
+        nm = b.get("name")
+        if not nm or nm in out:
+            continue
+        sc = clamp(50 - 10 + env * 0.6, 0, 100)
+        out[nm] = {"dir": "偏弱" if sc <= 42 else "震荡", "score": round(sc),
+                   "why": "主力净流出 %.1f亿" % abs(b.get("net") or 0),
+                   "evidence": ["主力净流出 %.1f亿" % abs(b.get("net") or 0)],
+                   "env": round(env, 1)}
+
+    # 输出配比：偏强 TOP6 + 偏弱 BOTTOM4（对照呈现，避免只报喜不报忧）
+    ranked = sorted(out.items(), key=lambda kv: -kv[1]["score"])
+    n_strong = max(1, int(topn * 0.6))
+    res = {k: v for k, v in ranked[:n_strong]}
+    for k, v in ranked[-(topn - n_strong):]:
+        if k not in res:
+            res[k] = v
+    mkt_score = clamp(50 + env, 0, 100)
+    res["__market__"] = {
+        "score": round(mkt_score),
+        "dir": "偏强" if mkt_score >= 58 else ("偏弱" if mkt_score <= 42 else "震荡"),
+        "why": "、".join(env_why[:3]) or "无强烈环境信号",
+        "env": round(env, 1),
+    }
+    return res
+
+
 def screen_uptrend(u, date, code2boards=None, topn=12):
     """趋势向上选股：在全市场 K 线中筛选『均线多头排列 + 价格站上短均 + MA20 上行
     + 量能配合』且非当日涨停的趋势票，作为主升段低吸候选。
@@ -2323,6 +2460,14 @@ def screen_uptrend(u, date, code2boards=None, topn=12):
                         and flat_days <= 2 and slope20 >= 1.5 and gain20 >= 8.0)
         if not (primary or slow_channel):
             continue
+        # ---- 趋势双态：加速 / 匀速 / 放缓（用户需求：区分「趋势缓」与「加速」两类）----
+        # 加速度 = 近5日日均涨幅 ÷ 近20日日均涨幅；>1.45 说明近期涨速明显快于自身中期节奏。
+        # 另用 MA20 斜率的 5 日变化量交叉验证，避免单日噪音导致误判。
+        daily20 = gain20 / 20.0
+        ma20_prev2 = mean(closes[-30:-10]) if len(closes) >= 30 else ma20_prev
+        slope20_prev2 = ((ma20_prev - ma20_prev2) / ma20_prev2 * 100) if ma20_prev2 else 0.0
+        slope_delta = slope20 - slope20_prev2
+        trend_state, accel = classify_trend_state(avg_daily, daily20, slope_delta)
         # ---- 评分（趋势强度以日均涨幅为主，均线结构为辅）----
         sc = 0.0
         sc += 28 if align else 0                       # 趋势结构
@@ -2343,6 +2488,11 @@ def screen_uptrend(u, date, code2boards=None, topn=12):
         # 缓坡通道票斜率分加成：慢牛的 MA20 斜率是核心动能，弥补日均涨幅吃亏
         if slow_channel and not primary:
             sc += clamp(slope20 / 3.0, 0, 10)
+        # 趋势双态调节：加速中的趋势更值得跟，涨速衰减的慢牛要打折
+        if trend_state == "加速上行":
+            sc += 5
+        elif trend_state == "增速放缓":
+            sc -= 5
         sc = clamp(sc, 0, 100)
         worth = clamp(0.5 * sc + 0.5 * (42 if momentum <= 45 else 12), 0, 100)
         # 趋势带三级判定（用于前端徽章与操作建议）：
@@ -2355,8 +2505,14 @@ def screen_uptrend(u, date, code2boards=None, topn=12):
             band = "趋势平缓"
         reasons = ["均线多头排列（MA5>MA10>MA20），短中期趋势向上"]
         reasons.append("近 5 日日均涨幅 %.1f%%（%s），非横盘" % (avg_daily, band))
+        if trend_state == "加速上行":
+            reasons.append("涨速加速中（近5日日均 %.1f%% 为近20日 %.1f%% 的 %.1f 倍）"
+                           % (avg_daily, daily20, accel))
+        elif trend_state == "增速放缓":
+            reasons.append("涨速放缓（近5日日均 %.1f%% vs 近20日 %.1f%%），注意兑现节奏"
+                           % (avg_daily, daily20))
         if slope20 > 0.5:
-            reasons.append("MA20 上行斜率 %.1f%%，趋势加速" % slope20)
+            reasons.append("MA20 上行斜率 %.1f%%，趋势向上" % slope20)
         if slow_channel and not primary:
             reasons.append("慢牛通道：近20日 +%.0f%%、斜率陡峭但节奏平缓，适合回踩低吸" % gain20)
         if up_days >= 4:
@@ -2391,11 +2547,152 @@ def screen_uptrend(u, date, code2boards=None, topn=12):
                 "band": band,
                 "momentum_pct": round(momentum, 1), "vol_ratio": round(vol_ratio, 2),
                 "slope20": round(slope20, 2),
+                # 趋势双态：加速上行 / 匀速上行 / 增速放缓（用户要求区分「缓」与「加速」）
+                "trend_state": trend_state, "accel": round(accel, 2),
+                "slope_delta": round(slope_delta, 2), "daily20": round(daily20, 2),
+                "slow_channel": bool(slow_channel and not primary),
             },
             "reasons": reasons[:5], "risks": risks[:3],
         })
     cands.sort(key=lambda x: -x["score"])
     return cands[:topn]
+
+
+def classify_trend_state(avg_daily, daily20, slope_delta=0.0):
+    """趋势双态分类（纯函数，可单测）：加速上行 / 匀速上行 / 增速放缓。
+
+    加速度 = 近5日日均涨幅 ÷ 近20日日均涨幅：
+      ≥1.45（或 MA20 斜率 5 日抬升 ≥0.8）→ 加速上行
+      ≤0.70（或 MA20 斜率 5 日回落 ≥0.8）→ 增速放缓
+      其余 → 匀速上行
+    返回 (state, accel)。
+    """
+    accel = (avg_daily / daily20) if (daily20 and daily20 > 0.05) else 1.0
+    if accel >= 1.45 or slope_delta >= 0.8:
+        return "加速上行", round(accel, 2)
+    if accel <= 0.70 or slope_delta <= -0.8:
+        return "增速放缓", round(accel, 2)
+    return "匀速上行", round(accel, 2)
+
+
+def institution_evidence(code, data=None, industry=None):
+    """机构/主力介入证据聚合（用户需求：及时获取机构介入情况并在推荐里点名）。
+
+    证据来源（全部可选、缺数据源则自动降级）：
+      · lhbseats.top    龙虎榜净买入/净卖出（个股级，最直接）
+      · blocktrade.inst 大宗交易「机构专用」席位买卖方向
+      · blocktrade.top  大宗折价出货（负向）
+      · money.boards_in/out  所属行业板块主力资金净流入/流出（行业级）
+      · margin.delta_yi 两融余额变化（杠杆资金环境，弱证据）
+      · seats.hits      知名游资席位（负向：偏游资博弈而非机构主导）
+
+    返回 {"level": "强/中/弱/无", "score": int, "tags": [...], "action": "..."}，
+    纯读数据不做预测，无证据时 level="无"（前端/推送不展示徽标）。
+    """
+    d = data or {}
+    score = 0
+    tags = []
+    direct = False      # 是否存在「个股/行业级」直接证据（两融这类市场环境证据不算）
+
+    def _f(x):
+        try:
+            return float(x)
+        except Exception:
+            return 0.0
+
+    # ① 龙虎榜个股净买（最直接的主力介入证据）
+    for row in ((d.get("lhbseats") or {}).get("top") or []):
+        if isinstance(row, dict) and row.get("code") == code:
+            net = _f(row.get("net_yi"))
+            if net > 0:
+                score += 40 if net >= 0.5 else 28
+                tags.append("龙虎榜净买 %.2f亿" % net)
+            elif net < 0:
+                score -= 18
+                tags.append("龙虎榜净卖 %.2f亿" % abs(net))
+            direct = True
+            break
+    else:
+        # top10 之外只要当日龙虎榜净买入为正，也算资金介入（弱一档）
+        for row in ((d.get("lhbseats") or {}).get("net_buy") or []):
+            if isinstance(row, dict) and row.get("code") == code:
+                score += 22
+                tags.append("龙虎榜净买 %.2f亿" % _f(row.get("net_yi")))
+                direct = True
+                break
+    # ② 大宗交易「机构专用」席位方向
+    for row in ((d.get("blocktrade") or {}).get("inst") or []):
+        if isinstance(row, dict) and row.get("code") == code:
+            amt = _f(row.get("amt_yi"))
+            if row.get("side") == "buy":
+                score += 35
+                tags.append("大宗机构专用买入 %.2f亿" % amt)
+            else:
+                score -= 22
+                tags.append("大宗机构专用卖出 %.2f亿" % amt)
+            direct = True
+            break
+    # ③ 大宗折价出货（≥8% 视为减持信号）
+    for row in ((d.get("blocktrade") or {}).get("top") or []):
+        if isinstance(row, dict) and row.get("code") == code:
+            disc = _f(row.get("discount"))
+            if disc <= -8:
+                score -= 20
+                tags.append("大宗折价 %.1f%% 出货" % disc)
+                direct = True
+            break
+    # ③b 大宗溢价成交（接盘方愿意加价拿货 = 资金主动介入）
+    for row in ((d.get("blocktrade") or {}).get("premium") or []):
+        if isinstance(row, dict) and row.get("code") == code:
+            score += 22
+            tags.append("大宗溢价 %.1f%% 接盘 %.2f亿" % (_f(row.get("discount")), _f(row.get("amt_yi"))))
+            direct = True
+            break
+    # ④ 所属行业板块主力资金（行业级资金介入）
+    mo = d.get("money") or {}
+    if industry and industry != "—":
+        _hit = False
+        for b in (mo.get("boards_in") or []):
+            if industry in (b.get("name") or ""):
+                score += 20
+                tags.append("所属板块主力净流入 %.1f亿" % _f(b.get("net")))
+                _hit = True
+                break
+        if not _hit:
+            for b in (mo.get("boards_out") or []):
+                if industry in (b.get("name") or ""):
+                    score -= 12
+                    tags.append("所属板块主力净流出 %.1f亿" % abs(_f(b.get("net"))))
+                    break
+    # ⑤ 两融余额（杠杆资金环境，弱证据）
+    dl = (d.get("margin") or {}).get("delta_yi")
+    if dl is not None:
+        if dl > 0:
+            score += 8
+            tags.append("两融余额 +%.0f亿（杠杆资金回补）" % _f(dl))
+        elif _f(dl) < -20:
+            score -= 6
+    # ⑥ 游资席位（负向：说明是游资博弈而非机构建仓）
+    for row in ((d.get("seats") or {}).get("hits") or []):
+        if isinstance(row, dict) and row.get("code") == code:
+            score -= 8
+            tags.append("游资席位博弈（非机构主导）")
+            direct = True
+            break
+
+    score = int(clamp(score, -60, 100))
+    # 只有市场环境证据（如两融余额回升）不构成「机构介入」结论——避免全市场一刀切打标
+    if not direct:
+        return {"level": "无", "score": score, "tags": tags[:4], "action": ""}
+    if score >= 55:
+        level, action = "强", "机构/主力介入明确 → 可跟随建仓，回踩买区加仓"
+    elif score >= 20:
+        level, action = "中", "有资金介入迹象 → 轻仓试探，回踩买区加仓"
+    elif score > 0:
+        level, action = "弱", "暂无强机构介入 → 按趋势纪律小仓参与"
+    else:
+        level, action = "无", ""
+    return {"level": level, "score": score, "tags": tags[:4], "action": action}
 
 
 def fuse_recommend(data):
@@ -2468,6 +2765,20 @@ def fuse_recommend(data):
             g["score_parts"].append(("区间破位", -25, zact))
         elif zact in ("逼近卖出", "突破持有"):
             g["score_parts"].append(("区间卖点", 5, zact))
+    # 机构/主力介入（新增引擎证据：龙虎榜净买 + 大宗机构专用 + 板块主力资金 + 两融）
+    for it in list(allp) + list(trend):
+        c = it.get("code")
+        if not c:
+            continue
+        if any(p[0] == "机构介入" for p in agg.get(c, {}).get("score_parts", [])):
+            continue
+        ev = institution_evidence(c, data, industry=it.get("industry"))
+        if ev["level"] in ("强", "中"):
+            grab(c)["score_parts"].append(
+                ("机构介入", 20 if ev["level"] == "强" else 12,
+                 "、".join(ev["tags"][:2]) or ("机构介入" + ev["level"])))
+        elif ev["level"] == "无" and ev["score"] < 0:
+            grab(c)["score_parts"].append(("机构介入", -10, "、".join(ev["tags"][:1]) or "资金流出"))
 
     out = []
     for c, g in agg.items():

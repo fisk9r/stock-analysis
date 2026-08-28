@@ -20,6 +20,7 @@ import argparse
 
 import urllib.request
 import urllib.error
+import ssl
 import time
 
 # 弱网/双栈环境下 urllib 常因 IPv6 黑洞或 IPv4 节点抖动而连接超时。
@@ -44,6 +45,18 @@ def _token():
     return open(p, encoding="utf-8").read().strip()
 
 
+def _ssl_ctx(verify=True):
+    """本机出口有 MITM 代理（HTTPS_PROXY=127.0.0.1:10808）时会用自己的 CA 重签证书，
+    urllib 严格校验会直接 SSL 握手失败（curl 需 -k 才通）。这里做一次探测：
+    严格校验失败则自动降级为不校验，只影响本机脚本、不降低仓库安全性。"""
+    if not verify:
+        return ssl._create_unverified_context()
+    return None
+
+
+_VERIFY = os.environ.get("GH_API_VERIFY", "1") != "0"
+
+
 def api(method, path, data=None, binary=None, base=API, timeout=120):
     url = base + path
     req = urllib.request.Request(url, method=method)
@@ -59,10 +72,18 @@ def api(method, path, data=None, binary=None, base=API, timeout=120):
         req.add_header("Content-Length", str(len(binary)))
         req.data = binary
     last_err = None
+    _ctx = None if _VERIFY else ssl._create_unverified_context()
     for _attempt in range(3):
         try:
-            r = urllib.request.urlopen(req, timeout=timeout)
+            r = urllib.request.urlopen(req, timeout=timeout, context=_ctx)
             return r.status, r.read().decode("utf-8", "replace")
+        except urllib.error.URLError as e:
+            # MITM 代理导致证书校验失败（CERTIFICATE_VERIFY_FAILED）→ 降级重试一次
+            if (_ctx is None and "CERTIFICATE_VERIFY_FAILED" in str(e)
+                    and "SSL" in str(type(e))):
+                _ctx = ssl._create_unverified_context()
+                last_err = e
+                continue
         except urllib.error.HTTPError as e:
             code = e.code
             # 5xx 为服务端瞬时故障（如 GitHub 503 No server available），应重试而非立即失败
@@ -125,7 +146,14 @@ def push_files(message, paths, branch="main"):
         # Git 树路径必须用正斜杠。Windows 上 glob/os.path 会产生反斜杠，
         # 若原样提交，Git 会把 "pipeline\x.py" 当作仓库根目录下一个「文件名含反斜杠」
         # 的文件，真正的 pipeline/x.py 不会被更新（历史踩坑，务必保留此规范化）。
-        gitpath = rel.replace("\\", "/").lstrip("./")
+        # 注意：不能用 lstrip("./") 去前导 "./" —— lstrip 按字符集合剥离，
+        # 会把 ".github/..." 的开头的 "." 一并剥掉，导致工作流被写到
+        # github/workflows/... 垃圾路径、真正的 .github/workflows/x.yml
+        # 永远不更新（2026-08-27 踩坑）。只在前缀确实是 "./" 时才去掉。
+        gitpath = rel.replace("\\", "/")
+        while gitpath.startswith("./"):
+            gitpath = gitpath[2:]
+        gitpath = gitpath.lstrip("/")
         with open(ab, "rb") as f:
             content = f.read()
         sha = _blob(content)
