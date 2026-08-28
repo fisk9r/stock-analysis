@@ -2765,6 +2765,19 @@ def fuse_recommend(data):
             g["score_parts"].append(("区间破位", -25, zact))
         elif zact in ("逼近卖出", "突破持有"):
             g["score_parts"].append(("区间卖点", 5, zact))
+    # 代码 → 名称兜底映射：游资席位/龙虎榜命中的票常不在推荐池里，
+    # 否则前端会渲染出「名称为空」的一行（实测出现过 `****(—) 综合55分`）。
+    _name_map = {}
+    for it in list(allp) + list(trend):
+        if it.get("code") and it.get("name"):
+            _name_map.setdefault(it["code"], it["name"])
+    for row in list((seats or {}).get("top") or []):
+        if isinstance(row, dict) and row.get("code") and row.get("name"):
+            _name_map.setdefault(row["code"], row["name"])
+    for row in (((data or {}).get("seats") or {}).get("hits") or []):
+        if isinstance(row, dict) and row.get("code") and row.get("name"):
+            _name_map.setdefault(row["code"], row["name"])
+
     # 机构/主力介入（新增引擎证据：龙虎榜净买 + 大宗机构专用 + 板块主力资金 + 两融）
     for it in list(allp) + list(trend):
         c = it.get("code")
@@ -2804,7 +2817,8 @@ def fuse_recommend(data):
                     r = round((_sl[0] - _cl) / denom, 2)
         if r is not None and r >= 2.0:
             ev.append({"engine": "盈亏比", "score": 0, "note": "R=%.1f 赔率优" % r})
-        out.append({"code": c, "name": g["name"], "industry": g.get("industry"),
+        out.append({"code": c, "name": g["name"] or _name_map.get(c) or c,
+                    "industry": g.get("industry"),
                     "fusion_score": round(fusion, 1), "n_engine": n_eng,
                     "r": r, "evidence": ev})
     out.sort(key=lambda x: -x["fusion_score"])

@@ -1380,13 +1380,21 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         L.append("🔥 今日无明确推荐，建议控仓或低位试错")
     # ---- 分区榜单：每板块独立标题，每股单独一行（用户要求：分区清晰不糊在一起）----
     def _sec(icon_title, rows):
-        """rows 为空则整块省略；否则输出『**标题**』+ 每行一只。"""
+        """rows 为空则整块省略；否则输出『**标题**』+ 每行一只。
+
+        行本身已带 Markdown 标记（'- ' 列表项 / '> ' 引用 / '#' 标题）时不再重复加前缀，
+        否则会出现「- - 自选 XX」「- > 提示」这类嵌套错乱（2026-08-28 修复）。"""
         if not rows:
             return
         L.append("")
         L.append("**%s**" % icon_title)
         for r in rows:
-            L.append("- %s" % r)
+            if not r:
+                continue
+            if isinstance(r, str) and r[:2] in ("- ", "> ", "# ", "  "):
+                L.append(r)
+            else:
+                L.append("- %s" % r)
 
     # ---- 连板机会计划单（用户需求：挖掘连板第二天有机会买的票 + 买卖区间 + 预期高度）----
     lps = rec.get("ladder_plans") or [] if _on("rec") else []
@@ -1456,9 +1464,11 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         _acc = _trend_group(
             lambda t: (t.get("trend_meta") or {}).get("trend_state") == "加速上行", 3)
         _used = set(id(x) for x in _acc)
+        # 「缓」的判据：涨得慢（趋势平缓）或涨速在衰减（增速放缓）——
+        # 不能用 slow_channel 字段：该字段只说明它靠缓坡通道入选，可能日均 4%+（并不慢）。
         _slow = _trend_group(
-            lambda t: (t.get("trend_meta") or {}).get("slow_channel")
-            or (t.get("trend_meta") or {}).get("band") == "趋势平缓", 3, _used)
+            lambda t: (t.get("trend_meta") or {}).get("band") == "趋势平缓"
+            or (t.get("trend_meta") or {}).get("trend_state") == "增速放缓", 3, _used)
         _used |= set(id(x) for x in _slow)
         _steady = _trend_group(lambda t: True, 4, _used)
         # 分档推送（用户需求：趋势票要同时给「缓」与「加速」两类，别只给强趋势）
