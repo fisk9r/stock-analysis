@@ -398,6 +398,16 @@ def _norm_narrative(v, label):
         bullets = [b.strip() for b in bullets.replace("。", "\n").split("\n") if b.strip()]
     bullets = [str(b).strip(" 。") for b in bullets if str(b).strip()][:6]
     outlook = (v.get("outlook") or v.get("comment") or "").strip()
+    # 拒绝占位/垃圾输出（2026-08-28 实测：模型偶发只回 "..." 却被当成有效叙事，
+    # 推送里出现三行「- ✨ ...」）。有实质内容的判定：去除标点后仍有 ≥4 个有效字符。
+    def _substantial(s):
+        t = "".join(ch for ch in str(s) if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+        return len(t) >= 4
+    bullets = [b for b in bullets if _substantial(b)]
+    if headline and not _substantial(headline):
+        headline = ""
+    if outlook and not _substantial(outlook):
+        outlook = ""
     if not (headline or bullets):
         return None
     return {

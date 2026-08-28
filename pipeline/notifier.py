@@ -1249,6 +1249,17 @@ def _pct(v):
     return ("%.0f%%" % v) if v is not None else "—"
 
 
+def _junk_free(s, minlen=4):
+    """字符串是否有实质内容（去掉标点/空白后仍有 ≥minlen 个中英文字符）。
+
+    用途：过滤 AI 偶发返回的 "..."、"—"、"无" 之类占位输出，避免推送里出现空壳行。"""
+    if not s:
+        return False
+    t = "".join(ch for ch in str(s)
+                if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+    return len(t) >= minlen
+
+
 def _board(it):
     s = it.get("streak", 0) or 0
     return ("%d板" % s) if s else "首板"
@@ -1335,7 +1346,9 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         L.append("")
         L.append("🧭 %s" % " ｜ ".join(bits))
     # ---- 要点（≤3 条）----
-    bl = [b for b in (narr.get("bullets") or []) if b][:3] if _on("bullets") else []
+    # 过滤占位/无效要点（历史数据里可能残留 "..." 之类，渲染出来很难看）
+    bl = [_b for _b in (narr.get("bullets") or [])
+          if _b and _junk_free(_b)][:3] if _on("bullets") else []
     if bl:
         L.append("")
         for b in bl:
