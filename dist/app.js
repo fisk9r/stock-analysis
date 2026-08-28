@@ -1995,11 +1995,16 @@
           if (isBuy && vd.buy_price) priceLine.push('买点价 <b>' + vd.buy_price + '</b>');
           if (isSell && vd.sell_price) priceLine.push('卖点价 <b>' + vd.sell_price + '</b>');
           if (vd.stop_price) priceLine.push('破 ' + vd.stop_price + ' 止损');
+          /* 趋势早期：主动提示「建议买入·持有X天」（用户需求） */
+          var earlyTag = '';
+          if (vd.early && vd.suggested_hold_days && isBuy) {
+            earlyTag = '<span class="bd ok" style="margin-left:6px;font-size:11px;padding:0 5px">持有 ' + vd.suggested_hold_days + ' 个交易日</span>';
+          }
           var holdLine = '<span class="muted" style="font-size:10px">波段上限 ' + vd.hold_limit_days +
             ' 个交易日' + (vd.days_held ? ' · 已跟踪 ' + vd.days_held + ' 天' : '') +
             (vd.expired ? ' · <b style="color:' + C.warn + '">已到期</b>' : '') + '</span>';
           vdHtml = '<div style="margin-top:5px;padding:5px 8px;border-left:3px solid ' + vc + ';background:rgba(128,128,128,.08);border-radius:4px">' +
-            '<b style="color:' + vc + '">→ 结论：' + E(act) + '</b> ' + priceLine.join(' ｜ ') +
+            '<b style="color:' + vc + '">→ 结论：' + E(act) + '</b>' + earlyTag + ' ' + priceLine.join(' ｜ ') +
             '<div class="muted" style="font-size:10px;margin-top:2px">' + E(vd.reason || '') + '</div>' + holdLine + '</div>';
         }
         return '<div class="rec trend"><div class="rh"><span class="nm">' + stk(t.code, t.name) + '</span>' +

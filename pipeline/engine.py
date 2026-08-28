@@ -1844,6 +1844,10 @@ def trend_verdict(bars, band=None, first_seen=None, date=None, cost=None):
     bz_lo, bz_hi = (buy_zone[0], buy_zone[1]) if buy_zone and buy_zone[0] else (None, None)
     sz_lo, sz_hi = (sell_zone[0], sell_zone[1]) if sell_zone and sell_zone[0] else (None, None)
 
+    # 趋势早期判定：刚入选（is_new/首次跟踪≤3天）→ 趋势尚未走完、主升在前，
+    # 应主动给「建议买入」而非等回踩；买入后明确持有期限。
+    early = (first_seen is None) or (days_held <= 3)
+
     if stop and cur <= stop:
         action = "卖出（破位止损）"
         reason = "已跌破止损 %.2f，纪律执行离场" % stop
@@ -1860,12 +1864,30 @@ def trend_verdict(bars, band=None, first_seen=None, date=None, cost=None):
         reason = "回踩买入区 %s~%s，轻仓低吸、破 %s 止损" % (
             ("%.2f" % bz_lo) if bz_lo else "?", "%.2f" % bz_hi,
             ("%.2f" % stop) if stop else "?")
+    elif early and sz_lo and cur < sz_lo:
+        # 趋势早期 + 未到卖区 → 主动建议买入（现价即可分批，破位止损兜底）
+        action = "建议买入"
+        reason = ("趋势早期（跟踪第%d天），多头结构完好、主升未到卖点 %.2f："
+                  "现价轻仓起步、回踩 %s 加仓，破 %s 止损" % (
+                      days_held,
+                      sz_lo,
+                      ("%.2f" % bz_hi) if bz_hi else "低点",
+                      ("%.2f" % stop) if stop else "MA20"))
     elif days_held >= 15:
         action = "减仓"
         reason = "持有 %d 天接近波段上限，且处区间中段：先减半仓锁定利润" % days_held
     else:
         action = "持有观察"
-        reason = "区间中段（买区上方、卖区下方），等回踩或冲高再动手"
+        # 明确给出「还能持有多少天」的期限提示（用户需求：持有X天）
+        rest_days = max(0, HOLD_LIMIT - days_held)
+        reason = ("趋势中段（买区上方、卖区下方），持有第%d/%d天（剩%d个交易日到期）——"
+                  "破 %s 或到卖区 %s 前继续持有" % (
+                      days_held, HOLD_LIMIT, rest_days,
+                      ("%.2f" % stop) if stop else "MA20",
+                      ("%.2f" % sz_lo) if sz_lo else "上沿"))
+
+    # 趋势早期票：显式输出建议持有天数（波段纪律 20 日上限，早期留足空间）
+    suggested_hold = HOLD_LIMIT - days_held if (early and action in ("建议买入", "买入")) else None
 
     return {
         "action": action,
@@ -1876,6 +1898,8 @@ def trend_verdict(bars, band=None, first_seen=None, date=None, cost=None):
         "stop_price": "%.2f" % stop if stop else None,
         "hold_limit_days": HOLD_LIMIT,
         "days_held": days_held,
+        "early": bool(early),
+        "suggested_hold_days": suggested_hold,
         "expired": bool(expired),
         "close": round(cur, 2),
         "cost": cost,
@@ -2150,6 +2174,13 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
         for it in items[:8]:
             it.setdefault("tag", "主线接力")
             relay.append(it)
+    # ── 分桶内重排序（2026-08-28 用户反馈排序错乱）──
+    # 分组循环前 items 虽按原分降序，但循环中 WARN 负反馈会把 score×0.92 降权，
+    # 桶内顺序不再等于新分降序 → 每个桶输出前必须按最终 score 重排一次。
+    core.sort(key=lambda x: -(x.get("score") or 0))
+    relay.sort(key=lambda x: -(x.get("score") or 0))
+    ambush.sort(key=lambda x: -(x.get("score") or 0))
+    avoid.sort(key=lambda x: -(x.get("score") or 0))
     # 仓位与策略
     sc = sent["score"]
     if sc >= 72:
@@ -2282,10 +2313,15 @@ def screen_uptrend(u, date, code2boards=None, topn=12):
         momentum = (price / ma20 - 1) * 100          # 距 MA20 偏离%
         vol20 = mean([b["v"] for b in hist[-21:-1]]) if len(hist) > 5 else (last["v"] or 1)
         vol_ratio = (last["v"] / vol20) if vol20 else 1
-        # ---- 硬门槛：剔除横盘 ----
-        # 仅保留『均线多头 + 近5日日均涨幅≥2% + 至少4天收涨 + 横盘日≤1』的真实趋势票；
-        # 日均<2% 或 多日几无波动的一律淘汰，确保“趋势”名副其实。
-        if not align or avg_daily < 2.0 or up_days < 4 or flat_days > 1:
+        # ---- 硬门槛（双通道，2026-08-28 用户反馈金牛化工型缓坡趋势被误杀）----
+        # 主通道：真实进攻型趋势——『均线多头 + 近5日日均涨幅≥2% + 至少4天收涨 + 横盘日≤1』。
+        # 缓坡通道：MA20 斜率≥1.5% 且 中期(20日)涨幅≥8% 的慢牛——日均涨幅不足 2% 但
+        #   趋势结构扎实（金牛化工实测：日均1.99% 差 0.01 被旧门槛刷掉，slope20=7.88%）。
+        primary = align and avg_daily >= 2.0 and up_days >= 4 and flat_days <= 1
+        gain20 = (price / mean(closes[-21:-1]) - 1) * 100 if len(closes) >= 21 else 0
+        slow_channel = (align and avg_daily >= 1.0 and up_days >= 3
+                        and flat_days <= 2 and slope20 >= 1.5 and gain20 >= 8.0)
+        if not (primary or slow_channel):
             continue
         # ---- 评分（趋势强度以日均涨幅为主，均线结构为辅）----
         sc = 0.0
@@ -2304,14 +2340,25 @@ def screen_uptrend(u, date, code2boards=None, topn=12):
         elif vol_ratio > 5:
             sc -= 6                                     # 过旺
         sc += heat_boost                               # 市场热度（标杆成交额）调节
+        # 缓坡通道票斜率分加成：慢牛的 MA20 斜率是核心动能，弥补日均涨幅吃亏
+        if slow_channel and not primary:
+            sc += clamp(slope20 / 3.0, 0, 10)
         sc = clamp(sc, 0, 100)
         worth = clamp(0.5 * sc + 0.5 * (42 if momentum <= 45 else 12), 0, 100)
-        # 趋势带判定（用于前端徽章）：日均≥3% 为主升强趋势，否则稳健上行
-        band = "主升强趋势" if avg_daily >= 3.0 else "稳健上行"
+        # 趋势带三级判定（用于前端徽章与操作建议）：
+        #   主升强趋势（日均≥3%）/ 稳健上行（≥2%）/ 趋势平缓（缓坡通道慢牛）
+        if avg_daily >= 3.0:
+            band = "主升强趋势"
+        elif avg_daily >= 2.0:
+            band = "稳健上行"
+        else:
+            band = "趋势平缓"
         reasons = ["均线多头排列（MA5>MA10>MA20），短中期趋势向上"]
         reasons.append("近 5 日日均涨幅 %.1f%%（%s），非横盘" % (avg_daily, band))
         if slope20 > 0.5:
             reasons.append("MA20 上行斜率 %.1f%%，趋势加速" % slope20)
+        if slow_channel and not primary:
+            reasons.append("慢牛通道：近20日 +%.0f%%、斜率陡峭但节奏平缓，适合回踩低吸" % gain20)
         if up_days >= 4:
             reasons.append("近 5 日 %d 天收涨，上攻连续性好" % up_days)
         if 5 <= momentum <= 45:
@@ -2373,10 +2420,10 @@ def fuse_recommend(data):
     for s in (theme_d.get("mainline") if isinstance(theme_d, dict) else []) or []:
         if s.get("tier") == "主线":
             mainline_secs.add(s.get("name"))
-    # 龙虎榜活跃标的
+    # 龙虎榜活跃标的（reasons 是 [标签, 数量] 二元列表，top 才是 dict——用 isinstance 守卫）
     seat_codes = set()
     for row in (list(seats.get("reasons") or []) + list(seats.get("top") or [])):
-        if row.get("code"):
+        if isinstance(row, dict) and row.get("code"):
             seat_codes.add(row["code"])
     # 连续信号活跃标的
     sig_codes = set()

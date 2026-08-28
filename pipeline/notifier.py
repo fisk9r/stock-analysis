@@ -1207,7 +1207,11 @@ def _rec_line(it, idx, tag=""):
 
 
 def _top_recs(core, relay, allit, n):
-    """推荐去重合并：优先 core→relay，不足 n 则用全量按分数补齐，确保展示前 n 只最佳标的。"""
+    """推荐去重合并：优先 core→relay，不足 n 则用全量按分数补齐，确保展示前 n 只最佳标的。
+
+    2026-08-28 修复排序错乱：core 与 relay 是不同分数段的两只桶，直接拼接会出现
+    「core 46 分排在 relay 70 分前面」的乱序——合并去重后必须统一按
+    worth_score（买入价值，与展示分一致）降序重排，保证第一名永远是最值得买的。"""
     out, seen = [], set()
     for it in (core or []) + (relay or []):
         c = it.get("code")
@@ -1225,7 +1229,9 @@ def _top_recs(core, relay, allit, n):
             out.append(it)
             if len(out) >= n:
                 break
-    return out[:n]
+    out = out[:n]
+    out.sort(key=lambda x: -(x.get("worth_score") or x.get("score") or 0))
+    return out
 
 
 def _global_signal(g):
@@ -1396,16 +1402,39 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
             for p in lps[:6]])
 
     trend = rec.get("trend") or [] if _on("trend") else []
-    _sec("📈 趋势主升", [
-        "**%s**%s(%s) %.2f ｜ 近5日%d涨%s"
-        % (t.get("name", "?"),
-           "🆕" if t.get("is_new") else ("（历史%s·%d天）" % (t.get("first_seen", "")[:7], t.get("times", 0)) if t.get("continued") or t.get("times", 0) > 1 else ""),
-           t.get("industry", "—") or "—",
-           t.get("close", 0) or 0, (t.get("trend_meta") or {}).get("up_days", 0) or 0,
-           (" ｜ 买%s~%s卖%s~%s" % (t.get("buy_zone", ["", ""])[0], t.get("buy_zone", ["", ""])[1],
-                                    t.get("sell_zone", ["", ""])[0], t.get("sell_zone", ["", ""])[1])
-            if t.get("buy_zone") else ""))
-        for t in trend[:5]])
+
+    def _trend_line(t):
+        meta = t.get("trend_meta") or {}
+        vd = t.get("verdict") or {}
+        act = vd.get("action") or t.get("advice") or ""
+        # 趋势早期票：显式「建议买入·持有X天」（用户需求：前期就给买入+持有期限）
+        sfx = ""
+        if act:
+            if vd.get("suggested_hold_days"):
+                sfx = " → **%s·持有%d天**" % (act, vd["suggested_hold_days"])
+            elif act.startswith("持有"):
+                rest = max(0, (vd.get("hold_limit_days") or 20) - (vd.get("days_held") or 0))
+                sfx = " → **持有·剩%d个交易日**" % rest
+            else:
+                sfx = " → **%s**" % act
+        zone_s = (" ｜ 买%s~%s卖%s~%s" % (
+            t.get("buy_zone", ["", ""])[0], t.get("buy_zone", ["", ""])[1],
+            t.get("sell_zone", ["", ""])[0], t.get("sell_zone", ["", ""])[1])
+            if t.get("buy_zone") else "")
+        return ("**%s**%s(%s) %.2f ｜ %s·近5日%d涨%s%s"
+                % (t.get("name", "?"),
+                   "🆕" if t.get("is_new") else ("（历史%s·%d天）" % (t.get("first_seen", "")[:7], t.get("times", 0)) if t.get("continued") or t.get("times", 0) > 1 else ""),
+                   t.get("industry", "—") or "—",
+                   t.get("close", 0) or 0,
+                   meta.get("band") or "趋势",
+                   meta.get("up_days", 0) or 0,
+                   zone_s, sfx))
+
+    _sec("📈 趋势主升", [_trend_line(t) for t in trend[:6]])
+    # ---- 自选/持仓操作结论（P1/P4：跟着做）----
+    _wr = rec.get("watch_reco")
+    if _wr and _wr.get("items") and _on("rec"):
+        _sec("⭐ 自选/持仓操作", watchreco_lines({"recommend": rec}, n=6))
     # ---- 综合最优解（融合连板/趋势/席位/题材/连续信号/区间，多引擎共振优先）----
     fused = rec.get("fused") or []
     if fused:
@@ -1733,6 +1762,43 @@ def _ladder_plan_lines(rec, aitems=None, n=6, compact=False):
     return lines
 
 
+def _rec_action_line(it, lp_map):
+    """推荐候选第二行：明确「跟着做」的动作 + 买卖价格（P4 用户需求）。
+
+    lp_map：{code: 连板计划单}——有计划单直接引用其买卖区/止损/目标；
+    无计划按断板概率/风险标注给通用竞价纪律。"""
+    code = it.get("code")
+    p = (lp_map or {}).get(code)
+    if p:
+        bz = p.get("buy_zone") or [0, 0]
+        sz = p.get("sell_zone") or [0, 0]
+        return ("→ ✅ 竞价达标买 **%.2f~%.2f** ｜ 目标 %.2f~%.2f ｜ 止损 %.2f（低开<-0.1%%弃）"
+                % (bz[0], bz[1], sz[0], sz[1], p.get("stop") or 0))
+    if it.get("risk_flag"):
+        return "→ ⚠ 高危标注：轻仓/快进快出，竞价弱直接放弃"
+    if (it.get("p_break") or 0) >= 78:
+        return "→ 冲高兑现为主，不追高；低开(<-0.1%)一律放弃"
+    return "→ 竞价强势可跟（首仓轻），低开(<-0.1%)放弃"
+
+
+def watchreco_lines(data, n=6, compact=False):
+    """自选/持仓操作结论 → 推送行（watchreco.distill 产物渲染）。"""
+    wr = (data.get("recommend") or {}).get("watch_reco")
+    if not wr or not (wr.get("items")):
+        return []
+    try:
+        import watchreco as _wc
+    except Exception:
+        try:
+            from pipeline import watchreco as _wc
+        except Exception:
+            return []
+    out = _wc.lines(wr, n=n, compact=compact)
+    if out and not compact:
+        out.insert(0, "> 持仓给卖出/加仓/持有动作，自选给买入时机；完整买卖区见看板。")
+    return out
+
+
 def format_stock_summary(data, url="", mode="close", con=None):
     """ServerChan/PushPlus(markdown) 排版：盘面数据 / 复盘要点 / 推荐 / 风险，分区清晰、留白克制。
     mode='close' 收盘后；mode='preauction' 竞价前。"""
@@ -1754,38 +1820,47 @@ def format_stock_summary(data, url="", mode="close", con=None):
         if regime.get("level"):
             L.append("**连板热度**：%s" % regime.get("note", ""))
         L.append("")
+        # ① 今日候选（按买入价值降序，_top_recs 已统一排序）
         pool = _top_recs(rec.get("core"), rec.get("relay"), rec.get("all"), MAX_RECS)
         gated = [x for x in pool if _dual_ok(x)]
         ungated = [x for x in pool if not _dual_ok(x)]
-        # 🎯 连板机会计划（昨日收盘产出的次日竞价介入单）
-        _lp_lines = _ladder_plan_lines(rec, n=6)
-        if _lp_lines:
-            L.append("")
-            L.append("**🎯 连板机会计划（次日竞价介入口径）**")
-            L.append("> 低开(< -0.1%)一律放弃；只在不低开时按买区接力，止损-8%铁律。")
-            L.extend(_lp_lines)
-        L.append("**昨日推荐 · 今日竞价强弱（评分%.0f+晋级%.0f%% 双重认证）**"
+        _lp_map = {p.get("code"): p for p in (rec.get("ladder_plans") or [])}
+        L.append("**① 今日候选（价值分降序 · 评分%.0f+晋级%.0f%%双认证）**"
                  % _push_gate())
-        L.append("> 认证标的：竞价强=续强确认；竞价弱/爆量派发=回避。")
+        L.append("> 每票两行：第一行评分与标签，第二行明确动作与价格。竞价弱=回避。")
         L.append("")
         if gated:
             for i, it in enumerate(gated, 1):
                 L.append(_rec_line(it, i, tag="✅续强"))
+                L.append("  %s" % _rec_action_line(it, _lp_map))
             if ungated:
-                names = "、".join("%s(%.0f分/%.0f%%)" % (u.get("name", "?"),
-                                u.get("worth_score", 0), u.get("p_continue", 0))
-                                for u in ungated[:6])
-                L.append("- ⚠ 未认证观察：%s" % names)
+                names = "、".join("%s(%.0f分)" % (u.get("name", "?"),
+                                                  u.get("worth_score", 0))
+                                  for u in ungated[:6])
+                L.append("- ⚠ 未认证观察（只看不动）：%s" % names)
             if len(rec.get("all") or []) > MAX_RECS:
                 L.append("")
                 L.append("> 共 %d 只候选，仅列前 %d 只；完整强弱判定见看板。" % (len(rec.get("all") or []), MAX_RECS))
         else:
-            L.append("今日无通过「评分+晋级率」双重认证的标的，建议观望。")
-        # 盘前策略（聚合仓位/主线/接力/关注池/风险）
+            L.append("今日无通过双重认证的标的，建议观望。")
+        # ② 🎯 连板机会计划（昨日收盘产出的次日竞价介入单）
+        _lp_lines = _ladder_plan_lines(rec, n=6)
+        if _lp_lines:
+            L.append("")
+            L.append("**② 🎯 连板机会计划（次日竞价介入口径）**")
+            L.append("> 低开(< -0.1%)一律放弃；只在不低开时按买区接力，止损-8%铁律。")
+            L.extend(_lp_lines)
+        # ③ ⭐ 自选/持仓操作结论（P1/P4：自选进推荐体系、持仓给明确动作）
+        _wr_lines = watchreco_lines(data, n=6)
+        if _wr_lines:
+            L.append("")
+            L.append("**③ ⭐ 自选/持仓操作（跟着做）**")
+            L.extend(_wr_lines)
+        # ④ 盘前策略（聚合仓位/主线/接力/关注池/风险）
         pp = data.get("preopen_plan") or {}
         if pp.get("position"):
             L.append("")
-            L.append("**盘前策略**")
+            L.append("**④ 盘前策略**")
             L.append("- 建议仓位：**%s**" % pp["position"])
             if pp.get("main_line"):
                 L.append("- 主线预判：%s" % "、".join(pp["main_line"]))
@@ -1797,7 +1872,7 @@ def format_stock_summary(data, url="", mode="close", con=None):
                 L.append("- 关注池：" + "、".join("%s(%s)" % (w["name"], w.get("reason", "")) for w in pp["watch"][:8]))
             if pp.get("risks"):
                 L.append("- 风险提醒：%s" % "；".join(pp["risks"]))
-        # ⚡ 短线/超短线盘前操作提示（追板回落/破位/停滞 当日离场或换强）
+        # ⑤ ⚡ 短线/超短线盘前操作提示（追板回落/破位/停滞 当日离场或换强）
         _zs = (data.get("zones") or {}).get("items") or []
         _zst = [x for x in _zs if x.get("horizon") in ("短线", "超短线")]
         if _zst:
@@ -1805,7 +1880,7 @@ def format_stock_summary(data, url="", mode="close", con=None):
                                      0 if x.get("rotate") else 1,
                                      -(x.get("pnl_pct") or 0)))
             L.append("")
-            L.append("**⚡ 短线/超短线盘前操作（持仓/关注）**")
+            L.append("**⑤ ⚡ 短线/超短线盘前操作（持仓/关注）**")
             L.append("> 追板回落/破位/停滞一律当日离场或换强；完整买卖区见看板。")
             for x in _zst[:8]:
                 nm = x.get("name", "?")
@@ -1862,34 +1937,53 @@ def format_sc(data, url="", mode="close", con=None):
         L.append("外围：%s" % _global_signal(g))
         if regime.get("note"):
             L.append("连板：%s" % regime.get("note", ""))
+        # ① 今日候选（SC 紧凑：每票一行 = 序号+名+分+动作尾巴）
         pool = _top_recs(rec.get("core"), rec.get("relay"), rec.get("all"), MAX_RECS)
         gated = [x for x in pool if _dual_ok(x)]
         ungated = [x for x in pool if not _dual_ok(x)]
-        # 🎯 连板机会计划（SC 紧凑版）
-        _lp_lines = _ladder_plan_lines(rec, n=4, compact=True)
-        if _lp_lines:
-            L.append("🎯连板计划（低开即弃·止损-8%）：")
-            L.extend(_lp_lines)
-        L.append("双重认证（评分%.0f+晋级%.0f%%）· 今日竞价强弱：" % _push_gate())
+        _lp_map = {p.get("code"): p for p in (rec.get("ladder_plans") or [])}
+        L.append("①候选（价值分降序·双认证 评分%.0f+晋级%.0f%%）：" % _push_gate())
         if gated:
             for i, it in enumerate(gated, 1):
-                L.append(_rec_line(it, i, tag="✅续强"))
+                code = it.get("code")
+                p = _lp_map.get(code)
+                if p:
+                    bz = p.get("buy_zone") or [0, 0]
+                    act = "买%.2f~%.2f 止损%.2f" % (bz[0], bz[1], p.get("stop") or 0)
+                elif it.get("risk_flag") or (it.get("p_break") or 0) >= 78:
+                    act = "⚠轻仓/冲高兑现"
+                else:
+                    act = "强势可跟·低开弃"
+                L.append("- %d. **%s**(%s) %.0f分/%.0f%% %s" % (
+                    i, it.get("name", "?"), _board(it),
+                    it.get("worth_score", 0), it.get("p_continue", 0), act))
             if ungated:
-                L.append("- ⚠ 未认证：" + "、".join(u.get("name", "?") for u in ungated[:8]))
+                L.append("- ⚠未认证只看不动：" + "、".join(u.get("name", "?") for u in ungated[:8]))
         else:
             L.append("无双重认证标的，建议观望")
+        # ② 🎯 连板机会计划（SC 紧凑版）
+        _lp_lines = _ladder_plan_lines(rec, n=4, compact=True)
+        if _lp_lines:
+            L.append("②🎯连板计划（低开即弃·止损-8%）：")
+            L.extend(_lp_lines)
+        # ③ ⭐ 自选/持仓操作
+        _wr_lines = watchreco_lines(data, n=5, compact=True)
+        if _wr_lines:
+            L.append("③⭐自选/持仓操作：")
+            L.extend(_wr_lines)
+        # ④ 盘前策略
         pp = data.get("preopen_plan") or {}
         if pp.get("position"):
-            L.append("盘前策略：仓位 %s ｜ 主线 %s ｜ 接力 %s"
+            L.append("④策略：仓位 %s ｜ 主线 %s ｜ 接力 %s"
                      % (pp["position"], "、".join(pp.get("main_line", []) or []),
                         "、".join(pp.get("relay_dir", []) or [])))
-        # ⚡ 短线/超短线盘前操作（追板回落/破位/停滞 当日离场或换强）
+        # ⑤ ⚡ 短线/超短线盘前操作（追板回落/破位/停滞 当日离场或换强）
         _zs = (data.get("zones") or {}).get("items") or []
         _zst = [x for x in _zs if x.get("horizon") in ("短线", "超短线")]
         if _zst:
             _zst.sort(key=lambda x: (0 if x.get("zhuiban") else 1,
                                      0 if x.get("rotate") else 1))
-            L.append("⚡短线操作：")
+            L.append("⑤⚡短线操作：")
             for x in _zst[:6]:
                 zb = x.get("zhuiban")
                 if zb:

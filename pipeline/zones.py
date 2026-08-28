@@ -520,7 +520,7 @@ def scan(u, date, codes=None, extra_names=None, costs=None,
         给出「更换建议」；exclude_codes: 不参与更换建议的代码集合（关注池自身）。"""
     if codes is None:
         import watchlist
-        codes, extra_names = watchlist.load_watch_codes()
+        codes, extra_names, _added = watchlist.load_watch_codes()
     extra_names = extra_names or {}
     costs = costs or {}
     horizons = horizons or {}

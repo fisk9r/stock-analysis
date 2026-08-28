@@ -523,9 +523,30 @@ def run(date_override=None, dedup_close=False):
             store.trend_track_drop(con, _broken)
         if con:
             store.trend_track_upsert(con, date, list(_merged.values()))
-        rec["trend"] = sorted(_merged.values(),
-                              key=lambda x: (0 if x.get("is_new") else 1,
-                                             -(x.get("score") or 0)))[:20]
+        # ── 分层配额展示（2026-08-28 用户反馈金牛化工型缓坡趋势看不到）──
+        # 主升强趋势票天然占满前排，「趋势平缓」慢牛永远挤不进 topn。
+        # 改为按 band 配额：强趋势 6 / 稳健 4 / 平缓 3 + 历史延续 7，各类型都有代表。
+        _new_arr = [x for x in _merged.values() if x.get("is_new")]
+        _hist_arr = [x for x in _merged.values() if not x.get("is_new")]
+
+        def _band_pick(arr, bandname, k):
+            sub = [x for x in arr if (x.get("trend_meta") or {}).get("band") == bandname]
+            sub.sort(key=lambda x: -(x.get("score") or 0))
+            return sub[:k]
+
+        _show = (_band_pick(_new_arr, "主升强趋势", 6)
+                 + _band_pick(_new_arr, "稳健上行", 4)
+                 + _band_pick(_new_arr, "趋势平缓", 3))
+        _hist_arr.sort(key=lambda x: -(x.get("score") or 0))
+        _show += _hist_arr[:7]
+        _seen_codes = set()
+        _trend_final = []
+        for _x in _show:
+            if _x["code"] in _seen_codes:
+                continue
+            _seen_codes.add(_x["code"])
+            _trend_final.append(_x)
+        rec["trend"] = _trend_final[:20]
         log("  趋势持久化：展示 %d 只（新 %d / 历史延续 %d）" % (
             len(rec["trend"]),
             sum(1 for x in rec["trend"] if x.get("is_new")),
@@ -815,7 +836,7 @@ def run(date_override=None, dedup_close=False):
 
     # 关注池清单（供前端「网页管理」读取/编辑）——仅 code/name，不含任何私密数据
     try:
-        _wc, _wn = watchlist.load_watch_codes()
+        _wc, _wn, _wa = watchlist.load_watch_codes()
         data["watch_meta"] = [{"code": c, "name": _wn.get(c, "")} for c in _wc]
     except Exception:
         data["watch_meta"] = []
@@ -990,7 +1011,7 @@ def run(date_override=None, dedup_close=False):
     # ---- 买卖区间与操作提示（关注池优先，其次推荐池头部；带持仓成本盈亏）----
     try:
         import watchlist as _wl
-        w_codes, w_names = _wl.load_watch_codes()
+        w_codes, w_names, w_added = _wl.load_watch_codes()
         rec_codes_z = [it.get("code") for it in (data.get("recommend", {}).get("all") or [])]
         z_codes = list(dict.fromkeys((w_codes or []) + (rec_codes_z or [])))[:40]
         # 强势备选池（用于破位/停滞/割肉时的「更换建议」）：取推荐池全量，含价值分与续板概率
@@ -1054,6 +1075,22 @@ def run(date_override=None, dedup_close=False):
         log("  买卖区间失败（不影响主流程）：%r" % e)
         data["zones"] = None
 
+    # ---- 自选/持仓操作结论（2026-08-28 用户需求 P1/P4）：
+    # 自选股也要进推荐体系、每只给「跟着做」动作（买/卖/加仓/持有）。
+    # 从 zones.items 提炼归一化结论，挂 rec["watch_reco"] 供看板与推送。----
+    try:
+        import watchreco
+        _wn = w_names if 'w_names' in locals() and isinstance(w_names, dict) else {}
+        _zc = z_costs if 'z_costs' in locals() else {}
+        rec["watch_reco"] = watchreco.distill(
+            data.get("zones"), holding_codes=set(_zc.keys()), watch_names=_wn)
+        _wr = rec["watch_reco"]
+        log("  自选/持仓操作结论 %d 只（卖出 %d / 买入加仓 %d）"
+            % (_wr["n"], _wr["sell_n"], _wr["buy_n"]))
+    except Exception as e:
+        log("  自选/持仓操作结论失败（不影响主流程）：%r" % e)
+        rec["watch_reco"] = None
+
 
     # ---- 持股监测：预测未来 + 持续跟踪（无持仓配置则为空）----
     try:
@@ -1101,11 +1138,13 @@ def run(date_override=None, dedup_close=False):
         data["sector_trade"] = None
 
     # ---- B5 龙虎榜席位可跟性排序：按历史胜率排可跟席位 ----
+    # 注意：局部变量不可叫 seats——会遮蔽模块级 import seats，
+    # 导致上游 seats.scan(date) 触发 UnboundLocalError（曾致游资席位引擎每次构建必失败）。
     try:
-        seats = data.get("seats")
-        if seats:
-            stats = seats.get("stats") or {}
-            hits = seats.get("hits") or []
+        _seat_data = data.get("seats")
+        if _seat_data:
+            stats = _seat_data.get("stats") or {}
+            hits = _seat_data.get("hits") or []
             ranked = sorted(stats.items(), key=lambda kv: -kv[1].get("win_rate", 0))
             items = []
             for label, st in ranked:
@@ -1675,7 +1714,7 @@ def _live_watch_movers(threshold=3.0):
     或触及涨停/跌停的标的。走东财 push2（CI 有网）；任一失败仅跳过该只。"""
     import em_api
     try:
-        codes, names = watchlist.load_watch_codes()
+        codes, names, _added = watchlist.load_watch_codes()
     except Exception:
         return []
     if not codes:
