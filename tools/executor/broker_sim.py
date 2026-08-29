@@ -43,6 +43,11 @@ CREATE TABLE IF NOT EXISTS sim_trades(
   open_gap REAL, source TEXT, verdict_reason TEXT,
   PRIMARY KEY(date, code, action)
 );
+CREATE TABLE IF NOT EXISTS sim_rejects(
+  ts TEXT, date TEXT, code TEXT, name TEXT,
+  action TEXT, reason TEXT,
+  PRIMARY KEY(date, code, action)
+);
 CREATE TABLE IF NOT EXISTS sim_positions(
   buy_date TEXT, code TEXT, name TEXT,
   open_gap REAL, buy_price REAL, volume INTEGER,
@@ -199,6 +204,47 @@ class SimBroker:
                 "pnl_pct": round(pnl, 2), "buy_date": buy_date}
 
     # ---------- 战报 ----------
+
+    def record_reject(self, code: str, action: str, reason: str, name: str = ""):
+        """操作前被拒（一字板买不进/跌停卖不出/资金不足等）——按用户要求必须留痕。"""
+        d = time.strftime("%Y-%m-%d")
+        try:
+            self.con.execute(
+                "INSERT OR REPLACE INTO sim_rejects VALUES(?,?,?,?,?,?)",
+                (time.strftime("%Y-%m-%d %H:%M:%S"), d, code, name or "", action, reason))
+            self.con.commit()
+        except Exception:
+            pass
+
+    def rejects(self, date: str = None) -> list:
+        """当日（或全部）被拒记录，供复盘推送与网站展示。"""
+        if date:
+            rows = self.con.execute(
+                "SELECT ts,date,code,name,action,reason FROM sim_rejects WHERE date=? "
+                "ORDER BY ts", (date,)).fetchall()
+        else:
+            rows = self.con.execute(
+                "SELECT ts,date,code,name,action,reason FROM sim_rejects ORDER BY ts").fetchall()
+        return [{"ts": r[0], "date": r[1], "code": r[2], "name": r[3],
+                 "action": r[4], "reason": r[5]} for r in rows]
+
+    def day_summary(self, date: str = None) -> dict:
+        """当日复盘数据：当日成交、当日平仓盈亏、总资产、被拒记录——推送与网站共用。"""
+        d = date or time.strftime("%Y-%m-%d")
+        trades = [{"ts": r[0], "code": r[1], "name": r[2], "action": r[3],
+                   "price": r[4], "volume": r[5], "amount": r[6], "reason": r[7]}
+                  for r in self.con.execute(
+                      "SELECT ts,code,name,action,price,volume,amount,verdict_reason "
+                      "FROM sim_trades WHERE date=? ORDER BY ts", (d,))]
+        closed_today = [{"code": r[0], "name": r[1], "pnl_pct": r[2], "sell_reason": r[3]}
+                        for r in self.con.execute(
+                            "SELECT code,name,pnl_pct,sell_reason FROM sim_positions "
+                            "WHERE sell_date=? ORDER BY sell_price*volume", (d,))]
+        day_realized = sum((c["pnl_pct"] or 0) for c in closed_today)
+        bal = self.balance()
+        return {"date": d, "trades": trades, "closed": closed_today,
+                "day_realized_pct": round(day_realized, 2),
+                "rejects": self.rejects(d), "balance": bal}
 
     def summary(self) -> str:
         """模拟盘战绩摘要（供推送/日志）。"""

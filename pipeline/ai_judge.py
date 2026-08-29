@@ -77,6 +77,16 @@ PROVIDER_PRESETS = {
                   "model": "claude-sonnet-4-6", "label": "Anthropic Claude"},
     "gemini":    {"kind": "gemini",   "base_url": "https://generativelanguage.googleapis.com/v1beta",
                   "model": "gemini-2.5-pro", "label": "Google Gemini"},
+    # Cloudflare Workers AI（2026-08-29 加入）：OpenAI 兼容端点，零额外成本
+    # （复用部署站点的 CLOUDFLARE_API_TOKEN）。base_url 里 {CF_ACCOUNT_ID} 由
+    # get_active_providers 动态解析（CI 的 CLOUDFLARE_ACCOUNT_ID / config 覆盖均可）。
+    # glm-4.5-air：CF 上质量最好的中文模型之一；失败自动落到 llama-3.3-70b。
+    "cloudflare": {"kind": "openai",
+                   "base_url": "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1",
+                   "model": "@cf/zai-org/glm-4.5-air-fp8", "label": "Cloudflare GLM-4.5-Air"},
+    "cloudflare_llama": {"kind": "openai",
+                         "base_url": "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1",
+                         "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast", "label": "Cloudflare Llama-3.3-70B"},
 }
 
 
@@ -202,17 +212,30 @@ def get_active_providers():
     """返回 (name -> 有效配置) 字典，配置来源为 models.json 或环境变量 AI_<NAME>_KEY。"""
     cfg = load_model_config()
     out = {}
+    # Cloudflare 账户 ID：CI 有 CLOUDFLARE_ACCOUNT_ID（部署 Pages 用），本地可 config 覆盖
+    cf_account = (os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+                  or _env_resolve((cfg.get("cloudflare") or {}).get("account_id")) or "")
     for name, preset in PROVIDER_PRESETS.items():
         pc = cfg.get(name) or {}
         key = _env_resolve(pc.get("api_key"))
         if not key:
-            key = os.environ.get("AI_%s_KEY" % name.upper()) \
-                or os.environ.get("%s_API_KEY" % name.upper())
+            if name.startswith("cloudflare"):
+                # CF 专用：key = CLOUDFLARE_API_TOKEN（部署已配置，零额外成本）
+                key = (os.environ.get("CLOUDFLARE_API_TOKEN")
+                       or _env_resolve(pc.get("account_id") and None) or "")
+            else:
+                key = os.environ.get("AI_%s_KEY" % name.upper()) \
+                    or os.environ.get("%s_API_KEY" % name.upper())
         if not key:
             continue
         merged = dict(preset)
         merged.update({k: v for k, v in pc.items() if k != "api_key"})
         merged["api_key"] = key
+        # {CF_ACCOUNT_ID} 占位符替换；无账户 ID 时该接口不可用
+        if "{CF_ACCOUNT_ID}" in (merged.get("base_url") or ""):
+            if not cf_account:
+                continue
+            merged["base_url"] = merged["base_url"].replace("{CF_ACCOUNT_ID}", cf_account)
         out[name] = merged
     return out
 
@@ -432,9 +455,11 @@ def generate_narrative_backup(data, preferred=None):
     cfg = load_model_config()
     if preferred is None:
         nb = cfg.get("narrative_backup")
-        # 默认保底链（2026-08-25 用户拍板）：Hy3 不可用时 GLM 优先 → kimi 次之 → 其余
-        # （云端无 models.json 时同样生效；config 里显式配了 narrative_backup 列表则尊重配置）
-        pref_list = nb if isinstance(nb, list) and nb else ["zhipu", "kimi"]
+        # 默认保底链（2026-08-25 用户拍板；2026-08-29 加 Cloudflare 兜底）：
+        # Hy3 不可用时 GLM → kimi → Cloudflare GLM-4.5-Air → Cloudflare Llama
+        # （CF 走 api.cloudflare.com，与国产模型故障域隔离，作为最终稳定性兜底）
+        pref_list = nb if isinstance(nb, list) and nb else \
+            ["zhipu", "kimi", "cloudflare", "cloudflare_llama"]
     elif isinstance(preferred, str):
         pref_list = [preferred]
     else:

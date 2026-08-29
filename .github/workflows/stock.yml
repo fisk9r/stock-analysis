@@ -205,6 +205,8 @@ jobs:
         env:
           NOTIFY_JSON: ${{ secrets.NOTIFY_JSON }}   # 凭据只走 Secrets，仓库无明文
           HOLDINGS_JSON: ${{ secrets.HOLDINGS_JSON }}
+          CLOUDFLARE_ACCOUNT_ID: dc99e973372018bc225135ff47ea8650   # AI 兜底（Workers AI）用
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -o pipefail
           case "${{ steps.task.outputs.task }}" in

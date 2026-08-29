@@ -2055,6 +2055,23 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
             # 接力方向：旧主线退潮后资金切入的新抱团，给与加权并打标
             worth = clamp(worth + 7, 0, 100)
             score = clamp(score + 4, 0, 100)
+        # ---- 换手率×连板高度健康度标注（factor_ext：a-stock-data 实测口径）----
+        # 缩量板（高位低换手）/ 巨量分歧（高位高换手）降权，健康结构不动
+        turn_flag = None
+        try:
+            from factor_ext import turnover_flag as _tflag
+        except Exception:
+            try:
+                from pipeline.factor_ext import turnover_flag as _tflag
+            except Exception:
+                _tflag = None
+        if _tflag:
+            turn_flag = _tflag(r.get("turn") or 0, r.get("streak") or 0)
+            if turn_flag["flag"] == "divergent":
+                worth = clamp(worth - 6, 0, 100)
+                score = clamp(score - 5, 0, 100)
+            elif turn_flag["flag"] == "thin":
+                worth = clamp(worth - 4, 0, 100)
         items.append({
             "code": r["code"], "name": r["name"], "streak": r["streak"],
             "industry": r["industry"], "concepts": r["concepts"][:3],
@@ -2064,6 +2081,7 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
             "demon": dm.get("score"), "sector_strength": sec.get("strength"),
             "sector_tier": sec.get("tier"), "relay_dir": relay_dir, "score": round(score, 1),
             "worth_score": round(worth, 1), "hist_factor": round(hf, 3),
+            "turn_flag": (turn_flag or {}).get("flag"),
             "similar": dm.get("similar", [])[:1],
             "yizi": r["yizi"], "seal_time": r.get("seal_time"), "zb_count": r.get("zb_count"),
             "gain20": r.get("gain20"),
@@ -2599,6 +2617,22 @@ def screen_uptrend(u, date, code2boards=None, topn=12):
             sc += 5
         elif trend_state == "增速放缓":
             sc -= 5
+        # ---- Kronos 式结构健康度加成（kronos_lite，纯 Python 零依赖）----
+        # 动量持续性 + 量价配合 + K 线形态：健康结构加分、上影压制/波动放大扣分
+        kscore = 0.0
+        try:
+            from kronos_lite import annotate_bars as _kab
+        except Exception:
+            try:
+                from pipeline.kronos_lite import annotate_bars as _kab
+            except Exception:
+                _kab = None
+        if _kab:
+            kbars = [{"d": b.get("d"), "o": b.get("o"), "h": b.get("h"),
+                      "l": b.get("l"), "c": b.get("c"), "v": b.get("v")}
+                     for b in hist[-30:]]
+            kscore = _kab(kbars)
+            sc += (kscore - 50) * 0.12          # ±6 分封顶的温和调节
         sc = clamp(sc, 0, 100)
         worth = clamp(0.5 * sc + 0.5 * (42 if momentum <= 45 else 12), 0, 100)
         # 趋势带三级判定（用于前端徽章与操作建议）：
@@ -2657,6 +2691,7 @@ def screen_uptrend(u, date, code2boards=None, topn=12):
                 "trend_state": trend_state, "accel": round(accel, 2),
                 "slope_delta": round(slope_delta, 2), "daily20": round(daily20, 2),
                 "slow_channel": bool(slow_channel and not primary),
+                "kronos_score": round(kscore, 1),
             },
             "reasons": reasons[:5], "risks": risks[:3],
         })

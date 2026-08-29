@@ -44,6 +44,14 @@ tools/naclbuild/b2b.js
 tools/naclbuild/testkey.json
 tools/naclbuild/sealed.json
 
+# ---- 本地执行器：模拟盘账本不进 git（复盘数据经 runner 自动回传 state/sim_review.json） ----
+tools/executor/sim.db
+tools/executor/sim.db-journal
+tools/executor/sim_test.db*
+tools/executor/sim_review.json
+tools/executor/risk_state.json
+tools/executor/*.trash
+
 # ---- 系统 ----
 __pycache__/
 *.pyc

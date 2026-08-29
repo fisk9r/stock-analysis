@@ -17,6 +17,14 @@
   python tools/executor/runner.py --loop       # 常驻模式，每天 09:26 自动执行
   python tools/executor/runner.py --summary    # 查看模拟盘持仓概览
   python tools/executor/runner.py --report     # 月度盈亏报告（全流水+统计）
+  python tools/executor/runner.py --review     # 当日复盘总结（收盘后跑，推送 PushPlus）
+
+交易纪律（用户 2026-08-29 拍板）：
+  1. 操作前先判可成交性：一字板/封板买不进、跌停封死卖不出，全部留痕记录
+  2. 先预判后成交：按实时价成交（不是预设数值无脑成交），预判后价格已升高
+     也只能以当前实时价买入，卖出同理
+  3. 买卖理由与明细推送 PushPlus（模拟盘操作段），每日复盘总结盈亏
+  4. 每日操作+复盘写入网站「模拟盘」模块（build.py 从 sim_review.json 读）
 """
 import json
 import os
@@ -32,6 +40,7 @@ import broker_sim
 import strategy
 
 CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+REVIEW_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sim_review.json")
 
 
 def load_cfg():
@@ -44,19 +53,64 @@ def _log(msg):
 
 
 def _notify(cfg, title, text):
-    key = ((cfg.get("notify") or {}).get("serverchan_key") or "").strip()
-    if not key:
-        _log("（未配置 ServerChan，跳过推送）")
-        return
-    try:
-        import urllib.request
-        import urllib.parse
-        data = urllib.parse.urlencode({"title": title, "desp": text}).encode()
-        urllib.request.urlopen(
-            "https://sctapi.ftqq.com/%s.send" % key, data=data, timeout=15)
-        _log("已推送：%s" % title)
-    except Exception as e:
-        _log("推送失败（不影响执行）：%r" % e)
+    """双通道推送：PushPlus（模拟盘主通道，owner+接收人2）+ ServerChan（可选）。
+    任一通道失败不影响执行。"""
+    results = []
+    ncfg = cfg.get("notify") or {}
+    # --- PushPlus ---
+    pp_tokens = ncfg.get("pushplus_tokens") or []
+    if isinstance(pp_tokens, str):
+        pp_tokens = [pp_tokens]
+    if not pp_tokens:
+        # 回落：复用 pipeline/config/notify.json 里的 wechat_pushplus 配置（多接收人）
+        try:
+            root_ncfg = os.path.join(ROOT, "config", "notify.json")
+            if os.path.exists(root_ncfg):
+                with open(root_ncfg, encoding="utf-8") as f:
+                    pp = (json.load(f).get("wechat_pushplus") or {}).get("token") or []
+                    for x in (pp if isinstance(pp, list) else [pp]):
+                        if isinstance(x, dict) and x.get("token"):
+                            pp_tokens.append(x["token"])
+                        elif isinstance(x, str) and x.strip():
+                            pp_tokens.append(x.strip())
+        except Exception:
+            pass
+    if pp_tokens:
+        try:
+            import urllib.request
+            ok = 0
+            for tk in pp_tokens:
+                try:
+                    payload = json.dumps({"token": tk, "title": title, "content": text,
+                                          "template": "markdown"}).encode()
+                    req = urllib.request.Request(
+                        "http://www.pushplus.plus/send", data=payload,
+                        headers={"Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        js = json.loads(r.read().decode("utf-8"))
+                    if js.get("code") == 200:
+                        ok += 1
+                except Exception as e:
+                    _log("PushPlus 单 token 失败：%r" % e)
+            results.append("PushPlus %d/%d" % (ok, len(pp_tokens)))
+        except Exception as e:
+            results.append("PushPlus失败:%r" % e)
+    # --- ServerChan（可选备用通道）---
+    key = (ncfg.get("serverchan_key") or "").strip()
+    if key:
+        try:
+            import urllib.request
+            import urllib.parse
+            data = urllib.parse.urlencode({"title": title, "desp": text[:4000]}).encode()
+            urllib.request.urlopen(
+                "https://sctapi.ftqq.com/%s.send" % key, data=data, timeout=15)
+            results.append("ServerChan ok")
+        except Exception as e:
+            results.append("ServerChan失败:%r" % e)
+    if not results:
+        _log("（未配置任何推送通道，跳过推送）")
+    else:
+        _log("已推送 %s：%s" % (" + ".join(results), title))
 
 
 def pick_broker(cfg):
@@ -106,6 +160,16 @@ def run_sells(broker, mode, cfg):
             _log("策略异常 %s：%r" % (p["code"], e))
             dec = {"verdict": "HOLD", "price": 0, "reason": "策略异常，顺延"}
         if dec["verdict"] == "SELL" and dec.get("price"):
+            # 可卖性检查（操作前留痕）：跌停封死卖不出 → 顺延并记录
+            cs = strategy.can_sell(q or {}, p["code"])
+            if not cs["ok"]:
+                _log("卖出被拒 %s：%s" % (p["code"], cs["reason"]))
+                if hasattr(broker, "record_reject"):
+                    broker.record_reject(p["code"], "SELL", cs["reason"], p.get("name") or "")
+                lines.append("- ⛔ **顺延** %s(%s)｜%s"
+                             % (p.get("name"), p["code"], cs["reason"]))
+                gate_note = dec["reason"]
+                continue
             r = broker.sell_limit(p["code"], dec["price"], sig={
                 "name": p.get("name"), "reason": dec["reason"], "source": "strategy"})
             if r.get("ok"):
@@ -115,6 +179,9 @@ def run_sells(broker, mode, cfg):
                                 r["pnl_pct"], dec["reason"]))
                 _log("卖出 %s：%s" % (p["code"], dec["reason"]))
             else:
+                if hasattr(broker, "record_reject"):
+                    broker.record_reject(p["code"], "SELL",
+                                         "委托失败：%s" % r.get("reason"), p.get("name") or "")
                 lines.append("- %s(%s) 卖出失败：%s" % (p.get("name"), p["code"], r.get("reason")))
         else:
             lines.append("- HOLD %s(%s)：%.2f%%｜%s"
@@ -164,25 +231,48 @@ def run_buys(broker, mode, cfg, sigs):
                          % (verdict["name"], verdict["code"],
                             verdict["open_gap"] or 0, sf["reason"]))
             continue
+        # 可买性检查（操作前留痕）：一字板/封板买不进
+        cb = strategy.can_buy(q, verdict["code"])
+        if not cb["ok"]:
+            gate.record(verdict, "SKIP", 0, cb["reason"])
+            if hasattr(broker, "record_reject"):
+                broker.record_reject(verdict["code"], "BUY", cb["reason"], verdict.get("name") or "")
+            lines.append("- ⛔ **买不进** %s(%s)：%.2f%%｜%s"
+                         % (verdict["name"], verdict["code"],
+                            verdict["open_gap"] or 0, cb["reason"]))
+            _log("买入被拒 %s：%s" % (verdict["code"], cb["reason"]))
+            continue
         amount = int((gate.cfg["max_trade_amount"]) * sf["weight"])
         if total:
             amount = int(min(amount, total * gate.cfg["max_position_pct"]))
         chk = gate.check(verdict, total)
         if not chk["ok"]:
             gate.record(verdict, "REJECT", 0, chk["reason"])
+            if hasattr(broker, "record_reject"):
+                broker.record_reject(verdict["code"], "BUY", "风控：%s" % chk["reason"],
+                                     verdict.get("name") or "")
             lines.append("- %s(%s) 过闸拒绝：%s" % (verdict["name"], verdict["code"], chk["reason"]))
             continue
-        price = verdict.get("close") or 0
-        r = broker.buy_limit(verdict["code"], price, amount, sig=verdict)
+        # 实时价成交（用户纪律2）：预判后价格已升高也只能以当前实时价买入，
+        # 绝不能用昨日收盘价/预设数值无脑成交
+        price = q.get("price") or verdict.get("close") or 0
+        if not price or price <= 0:
+            gate.record(verdict, "REJECT", 0, "无有效实时价")
+            continue
+        r = broker.buy_limit(verdict["code"], price, amount, sig=dict(
+            verdict, reason="%s｜实时价%.2f成交" % (sf["reason"], price)))
         ok = "✓" if r.get("ok") else "✗ %s" % r.get("reason")
         gate.record(verdict, "BUY", amount, ok)
-        lines.append("- **BUY %s**(%s) %s 高开 %.2f%% %d 元｜%s"
+        lines.append("- **BUY %s**(%s) %s 高开 %.2f%% 实时价%.2f %d 元｜%s"
                      % (verdict["name"], verdict["code"], sf["grade"],
-                        verdict["open_gap"], amount, sf["reason"]))
+                        verdict["open_gap"], price, amount, sf["reason"]))
         if r.get("ok"):
             n_buy += 1
-            _log("买入 %s %s：%s" % (verdict["code"], sf["grade"], sf["reason"]))
+            _log("买入 %s %s @实时价%.2f：%s" % (verdict["code"], sf["grade"], price, sf["reason"]))
         else:
+            if hasattr(broker, "record_reject"):
+                broker.record_reject(verdict["code"], "BUY",
+                                     "委托失败：%s" % r.get("reason"), verdict.get("name") or "")
             _log("买入失败 %s：%s" % (verdict["code"], r.get("reason")))
     return lines, n_buy
 
@@ -299,6 +389,123 @@ def run_report(month: str = None):
             r[0], r[3], r[2], r[1], r[4], r[5], r[6], (r[7] or "")[:40]))
 
 
+def run_review(cfg=None, push=True):
+    """当日复盘总结（收盘后 15:30 左右跑）：
+    1. 汇总当日成交/平仓盈亏/被拒记录/总资产
+    2. 写 tools/executor/sim_review.json（build.py 读它生成网站「模拟盘」模块）
+    3. PushPlus 推送「模拟盘操作+当日复盘」
+    """
+    cfg = cfg or load_cfg()
+    if mode_check_no_sim(cfg):
+        return
+    b = broker_sim.SimBroker()
+    ds = b.day_summary()
+    bal = ds["balance"]
+    init = broker_sim._initial_cash()
+    total_pct = (bal["total"] / init - 1) * 100 if init else 0
+
+    # ---- 组装推送文本 ----
+    lines = ["**总资产 %.0f 元（初始 %.0f，累计 %+.2f%%）**" % (bal["total"], init, total_pct),
+             "- 当日已实现盈亏：%+.2f%%" % ds["day_realized_pct"],
+             "- 可用现金 %.0f / 持仓市值 %.0f" % (bal["cash"], bal["market_value"]), ""]
+    if ds["trades"]:
+        lines.append("## 当日操作（%d 笔）" % len(ds["trades"]))
+        for t in ds["trades"]:
+            act = "买入" if t["action"] == "BUY" else "卖出"
+            lines.append("- **%s %s**(%s) %.2f × %d股 = %.0f元｜%s"
+                         % (act, t["name"], t["code"], t["price"], t["volume"],
+                            t["amount"], (t["reason"] or "")[:60]))
+    else:
+        lines.append("## 当日无操作")
+    if ds["closed"]:
+        lines.append("")
+        lines.append("## 当日平仓")
+        for c in ds["closed"]:
+            lines.append("- %s(%s) %+.2f%%｜%s" % (c["name"], c["code"],
+                                                   c["pnl_pct"], c["sell_reason"]))
+    if ds["rejects"]:
+        lines.append("")
+        lines.append("## 被拒留痕（%d 条）" % len(ds["rejects"]))
+        for rj in ds["rejects"]:
+            lines.append("- ⛔ %s %s(%s)：%s" % (rj["action"], rj["name"], rj["code"], rj["reason"]))
+    # 持仓中
+    holding = b.positions(open_only=True)
+    if holding:
+        lines.append("")
+        lines.append("## 持仓中（%d 笔）" % len(holding))
+        for p in holding:
+            lines.append("- %s(%s) 成本%.2f %d股 %s日买入 st=%d"
+                         % (p["name"], p["code"], p["avg_price"], p["volume"],
+                            p["buy_date"], p["streak"]))
+    verdict = "今日盈利 ✅" if ds["day_realized_pct"] > 0 else (
+        "今日亏损 ❌（后续按归因改进策略）" if ds["day_realized_pct"] < 0 else "今日持平")
+    text = "\n".join(lines)
+    _log(text)
+    if push:
+        _notify(cfg, "📊 模拟盘复盘 %s（%+.2f%%）%s" % (ds["date"], ds["day_realized_pct"], verdict),
+                text)
+
+    # ---- 写 sim_review.json（网站模块数据源；历史按日累积）----
+    try:
+        hist = {}
+        if os.path.exists(REVIEW_PATH):
+            try:
+                hist = json.load(open(REVIEW_PATH, encoding="utf-8"))
+            except Exception:
+                hist = {}
+        hist["days"] = hist.get("days") or {}
+        hist["days"][ds["date"]] = {
+            "date": ds["date"],
+            "total": bal["total"], "cash": bal["cash"], "market_value": bal["market_value"],
+            "total_pct": round(total_pct, 2),
+            "day_realized_pct": ds["day_realized_pct"],
+            "trades": ds["trades"], "closed": ds["closed"], "rejects": ds["rejects"],
+            "n_holding": len(holding),
+            "summary_line": (b.summary() if hasattr(b, "summary") else ""),
+        }
+        # 只保留最近 120 个交易日
+        keys = sorted(hist["days"].keys())
+        for k in keys[:-120]:
+            del hist["days"][k]
+        hist["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(REVIEW_PATH, "w", encoding="utf-8") as f:
+            json.dump(hist, f, ensure_ascii=False, indent=1)
+        _log("复盘已写入 %s（累计 %d 个交易日）" % (os.path.basename(REVIEW_PATH), len(hist["days"])))
+        # 上云：推到仓库 state/sim_review.json，CI build 时读它生成网站「模拟盘」模块
+        _push_review_to_repo()
+    except Exception as e:
+        _log("sim_review.json 写入失败：%r" % e)
+    return ds
+
+
+def _push_review_to_repo():
+    """把 sim_review.json 推到仓库 state/（best-effort，失败只记日志）。"""
+    try:
+        tools_dir = os.path.join(ROOT, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import gh_api
+        # 只推最近 60 个交易日，控制 blob 体积
+        hist = json.load(open(REVIEW_PATH, encoding="utf-8"))
+        days = hist.get("days") or {}
+        ks = sorted(days.keys())
+        for k in ks[:-60]:
+            del days[k]
+        st, body = gh_api.push_files(
+            "sim-review: 模拟盘每日复盘数据（executor 自动回传）", ["state/sim_review.json"])
+        # push_files 内部直接 commit；无需检查返回（失败抛异常）
+        _log("sim_review.json 已推送到仓库 state/")
+    except SystemExit as e:
+        _log("sim_review 推送失败（SystemExit）：%s" % e)
+    except Exception as e:
+        _log("sim_review 推送失败（不影响复盘）：%r" % e)
+
+
+def mode_check_no_sim(cfg):
+    """qmt 实盘模式下不写复盘文件（避免覆盖模拟盘数据）。"""
+    return (cfg.get("broker") or "sim") != "sim"
+
+
 def main():
     args = sys.argv[1:]
     cfg = load_cfg()
@@ -310,19 +517,31 @@ def main():
             if a == "--month" and i + 1 < len(args):
                 month = args[i + 1]
         run_report(month)
+    elif "--review" in args:
+        run_review(cfg)
     elif "--now" in args:
         run_once(cfg)
     elif "--loop" in args:
         target = ((cfg.get("schedule") or {}).get("auction_time") or "09:26")
-        _log("常驻模式：每天 %s 自动执行（平仓+开仓）（Ctrl+C 退出）" % target)
+        rtarget = ((cfg.get("review") or {}).get("time") or "15:35")
+        _log("常驻模式：每天 %s 执行（平仓+开仓），%s 复盘总结（Ctrl+C 退出）" % (target, rtarget))
+        fired = set()
         while True:
             now = time.strftime("%H:%M")
-            if now == target:
+            if now == target and "trade" not in fired:
+                fired.add("trade")
                 try:
                     run_once(cfg)
                 except Exception as e:
                     _log("执行异常：%r" % e)
-                time.sleep(60)  # 跳过同一分钟
+            if now == rtarget and "review" not in fired and not mode_check_no_sim(cfg):
+                fired.add("review")
+                try:
+                    run_review(cfg)
+                except Exception as e:
+                    _log("复盘异常：%r" % e)
+            if now < target:  # 跨天重置
+                fired.clear()
             time.sleep(5)
     else:
         print(__doc__)

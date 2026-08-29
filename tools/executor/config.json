@@ -30,6 +30,11 @@
   },
   "notify": {
     "serverchan_key": "",
-    "_hint": "可选：ServerChan sendkey，下单后推送回报；留空则只写本地日志"
+    "pushplus_tokens": [],
+    "_hint": "模拟盘推送：pushplus_tokens 填 token 列表（推荐）；留空则自动复用项目根 config/notify.json 的 wechat_pushplus 多接收人配置。serverchan_key 为可选备用通道。"
+  },
+  "review": {
+    "time": "15:35",
+    "_hint": "收盘后复盘时间（--loop 模式下自动执行）：汇总当日操作+盈亏总结，写 sim_review.json 供网站「模拟盘」模块使用，并推送 PushPlus"
   }
 }

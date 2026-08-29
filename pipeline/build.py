@@ -1472,6 +1472,70 @@ def run(date_override=None, dedup_close=False):
     except Exception:
         pass
 
+
+    # ---- 模拟盘模块（executor 复盘产物）：每日操作+盈亏+被拒留痕 → data["sim"] ----
+    # 数据链路：本机 runner.py --review 写 sim_review.json 并自动回传仓库
+    # state/sim_review.json（gh_api Contents 推送）→ CI checkout 天然可见 →
+    # build 读入嵌入 data.js → 网站新增「模拟盘」视图。
+    # 本机直跑 build.py 时回落读 tools/executor/sim_review.json（开发模式）。
+    # 文件不存在（如云端首跑）时静默降级为空段。
+    try:
+        simp = os.path.join(ROOT, "state", "sim_review.json")
+        if not os.path.exists(simp):
+            simp = os.path.join(ROOT, "tools", "executor", "sim_review.json")
+        if os.path.exists(simp):
+            simrev = json.load(open(simp, encoding="utf-8"))
+            days = simrev.get("days") or {}
+            if days:
+                skeys = sorted(days.keys())
+                dlast = days[skeys[-1]]
+                # 累计收益曲线（按日）
+                curve = [{"d": k, "total": days[k].get("total"),
+                          "pct": days[k].get("total_pct"),
+                          "day": days[k].get("day_realized_pct")} for k in skeys]
+                init_cash = 100000
+                try:
+                    _ecfg = json.load(open(os.path.join(ROOT, "tools", "executor",
+                                                        "config.json"), encoding="utf-8"))
+                    init_cash = float((_ecfg.get("sim") or {}).get("initial_cash") or 100000)
+                except Exception:
+                    pass
+                # 月度汇总
+                months = {}
+                for k in skeys:
+                    mk = k[:7]
+                    m = months.setdefault(mk, {"month": mk, "n_trades": 0, "n_closed": 0,
+                                               "wins": 0, "day_pnl_sum": 0.0, "n_days": 0})
+                    m["n_trades"] += len(days[k].get("trades") or [])
+                    m["n_days"] += 1
+                    m["day_pnl_sum"] += days[k].get("day_realized_pct") or 0
+                    for c in (days[k].get("closed") or []):
+                        m["n_closed"] += 1
+                        if (c.get("pnl_pct") or 0) > 0:
+                            m["wins"] += 1
+                for m in months.values():
+                    m["win_rate"] = round(m["wins"] * 100.0 / m["n_closed"], 1) if m["n_closed"] else None
+                    m["day_pnl_sum"] = round(m["day_pnl_sum"], 2)
+                data["sim"] = {
+                    "updated_at": simrev.get("updated_at") or "",
+                    "initial_cash": init_cash,
+                    "last": {"date": dlast.get("date"), "total": dlast.get("total"),
+                             "cash": dlast.get("cash"), "market_value": dlast.get("market_value"),
+                             "total_pct": dlast.get("total_pct"),
+                             "day_realized_pct": dlast.get("day_realized_pct"),
+                             "n_holding": dlast.get("n_holding"),
+                             "trades": dlast.get("trades") or [],
+                             "closed": dlast.get("closed") or [],
+                             "rejects": dlast.get("rejects") or [],
+                             "summary_line": dlast.get("summary_line") or ""},
+                    "curve": curve,
+                    "months": [months[k] for k in sorted(months.keys())],
+                }
+                log("  模拟盘模块：%d 个交易日（最新 %s，累计 %+.2f%%）"
+                    % (len(skeys), dlast.get("date"), dlast.get("total_pct") or 0))
+    except Exception as e:
+        log("  模拟盘数据读取失败（不影响主流程）：%r" % e)
+
     # ---- 多源交叉校验（东方财富 + 新浪 + 腾讯）：抽查头条标的，标“数据存疑” ----
     try:
         try:

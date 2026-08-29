@@ -3956,7 +3956,97 @@
         '<span class="sub">本机自选池（免密钥）· 浏览器直连行情实时计算止损/目标与破位提醒</span></div>' +
         '<div class="body"><div id="wlxPanel"></div></div></div>';
     }
-    var views = { overview: viewOverview, watch: viewWatch, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings };
+    /* 🤖 模拟盘：10 万初始资金的 T+1 自动交易模拟。数据由执行器每日复盘写入 */
+    function viewSim() {
+      var S = D.sim;
+      var h = '';
+      var desc = '10万初始资金 · T+1 纪律执行（先预判后成交 · 实时价成交 · 一字板不买 · 跌停卖不出留痕顺延）· 双边冲击成本0.1%。非实盘，仅供策略验证。';
+      if (!S || !S.curve || !S.curve.length) {
+        return card('🤖 模拟盘', '<div class="empty">暂无模拟盘数据。执行器每日复盘后自动更新（首日运行后次日可见）。</div>', desc);
+      }
+      var L = S.last || {};
+      var totalPct = L.total_pct;
+      var dayPnl = L.day_realized_pct;
+      var initCash = S.initial_cash || 100000;
+      /* KPI 行 */
+      h += '<div class="grid g4" style="margin-bottom:14px">' +
+        kpi('总资产', '¥' + Math.round(L.total || 0).toLocaleString(), '初始 ' + Math.round(initCash / 10000) + ' 万 · 累计 ' + (totalPct >= 0 ? '+' : '') + f(totalPct) + '%', (totalPct >= 0 ? 'up' : 'down')) +
+        kpi('当日盈亏', (dayPnl != null ? (dayPnl >= 0 ? '+' : '') + f(dayPnl) + '%' : '—'), '已实现（费后口径）', (dayPnl > 0 ? 'up' : (dayPnl < 0 ? 'down' : ''))) +
+        kpi('可用现金', '¥' + Math.round(L.cash || 0).toLocaleString(), '持仓市值 ¥' + Math.round(L.market_value || 0).toLocaleString(), '') +
+        kpi('持仓中', n2(L.n_holding) + ' 笔', '更新于 ' + E((S.updated_at || '').slice(0, 10)), '') +
+        '</div>';
+      /* 资金曲线 */
+      var cv = S.curve;
+      var totals = cv.map(function (x) { return x.total; });
+      var w = Math.min(900, Math.max(320, cv.length * 46)), ch = 180;
+      var mx = Math.max.apply(null, totals.concat([initCash])), mn = Math.min.apply(null, totals.concat([initCash]));
+      var rng = (mx - mn) || 1; mx += rng * 0.06; mn -= rng * 0.06; rng = mx - mn;
+      var pts = totals.map(function (v, i) {
+        var x = cv.length === 1 ? w / 2 : (i / (cv.length - 1)) * (w - 40) + 30;
+        var y = ch - 24 - ((v - mn) / rng) * (ch - 40);
+        return x.toFixed(1) + ',' + y.toFixed(1);
+      });
+      var baseY = ch - 24 - ((initCash - mn) / rng) * (ch - 40);
+      var col = (totals[totals.length - 1] >= initCash) ? C.up : C.down;
+      var lastPt = pts[pts.length - 1] || '';
+      var curveHtml = '<svg width="100%" viewBox="0 0 ' + w + ' ' + ch + '" preserveAspectRatio="none" style="display:block">' +
+        '<line x1="30" y1="' + baseY.toFixed(1) + '" x2="' + (w - 10) + '" y2="' + baseY.toFixed(1) + '" stroke="' + C.gray + '" stroke-dasharray="4 4" stroke-width="1"/>' +
+        '<text x="' + (w - 8) + '" y="' + (baseY - 5).toFixed(1) + '" text-anchor="end" font-size="10" fill="' + C.gray + '">初始' + Math.round(initCash / 10000) + '万</text>' +
+        '<polyline points="' + pts.join(' ') + '" fill="none" stroke="' + col + '" stroke-width="2.2" stroke-linejoin="round"/>' +
+        '<circle cx="' + lastPt.split(',')[0] + '" cy="' + lastPt.split(',')[1] + '" r="3.5" fill="' + col + '"/>' +
+        '</svg>' +
+        '<div style="display:flex;justify-content:space-between;margin-top:4px" class="muted">' +
+        '<span>' + E(cv[0].d) + '</span><span>' + E(cv[cv.length - 1].d) + ' · 共 ' + cv.length + ' 个交易日</span></div>';
+      h += card('📈 资金曲线', curveHtml, '每日收盘后复盘快照（费后口径）');
+      /* 月度总结 */
+      var months = S.months || [];
+      if (months.length) {
+        var mrows = months.map(function (m) {
+          var wr = m.win_rate;
+          return '<tr><td><b>' + E(m.month) + '</b></td>' +
+            '<td class="r">' + n2(m.n_trades) + '</td>' +
+            '<td class="r">' + n2(m.n_closed) + '</td>' +
+            '<td class="r">' + (wr != null ? f(wr) + '%' : '—') + '</td>' +
+            '<td class="r">' + sign(m.day_pnl_sum) + '%</td></tr>';
+        }).join('');
+        h += card('🗓 月度总结', '<table class="tbl"><tr><th>月份</th><th class="r">操作笔数</th><th class="r">平仓</th><th class="r">胜率</th><th class="r">日盈亏合计</th></tr>' + mrows + '</table>',
+          '一个月后看这里：赚了还是亏了');
+      }
+      /* 当日操作明细 */
+      var trades = L.trades || [];
+      var tHtml = trades.length ? trades.map(function (t) {
+        var isBuy = t.action === 'BUY';
+        var acol = isBuy ? C.up : C.down;
+        return '<div class="kv" style="padding:6px 0;border-bottom:1px solid var(--line)">' +
+          '<span class="bd" style="border-color:' + acol + ';color:' + acol + '">' + (isBuy ? '买入' : '卖出') + '</span> ' +
+          stk(t.code, t.name) + ' <b>' + f(t.price) + '</b> × ' + n2(t.volume) + '股 = ¥' + Math.round(t.amount || 0).toLocaleString() +
+          '<div class="muted" style="font-size:12px;margin-top:2px">理由：' + E((t.reason || '').slice(0, 80)) + '</div></div>';
+      }).join('') : '<div class="empty">当日无操作</div>';
+      h += card('🧾 当日操作（' + E(L.date || '') + '）', tHtml, '先预判后成交 · 实时价');
+      /* 当日平仓 */
+      var closed = L.closed || [];
+      if (closed.length) {
+        var cHtml = closed.map(function (c) {
+          var pc = c.pnl_pct || 0;
+          return '<div class="kv" style="padding:6px 0;border-bottom:1px solid var(--line)">' +
+            stk(c.code, c.name) + ' <span class="' + (pc >= 0 ? 'up' : 'down') + '">' + (pc >= 0 ? '+' : '') + f(pc) + '%</span>' +
+            '<div class="muted" style="font-size:12px;margin-top:2px">' + E(c.sell_reason || '') + '</div></div>';
+        }).join('');
+        h += card('✅ 当日平仓', cHtml, '');
+      }
+      /* 被拒留痕 */
+      var rej = L.rejects || [];
+      if (rej.length) {
+        var rHtml = rej.map(function (r) {
+          return '<div class="kv" style="padding:5px 0;border-bottom:1px solid var(--line)">' +
+            '<span class="bd" style="border-color:' + C.gray + ';color:' + C.muted + '">' + (r.action === 'BUY' ? '买' : '卖') + '被拒</span> ' +
+            stk(r.code, r.name) + '<div class="muted" style="font-size:12px;margin-top:2px">' + E(r.reason || '') + '</div></div>';
+        }).join('');
+        h += card('⛔ 被拒留痕', rHtml, '一字板买不进 / 跌停卖不出顺延，全部留痕');
+      }
+      return h;
+    }
+    var views = { overview: viewOverview, watch: viewWatch, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings, sim: viewSim };
     var done = {};
     function show(k) {
       var el = document.getElementById('v-' + k);

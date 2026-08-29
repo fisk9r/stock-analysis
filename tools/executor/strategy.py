@@ -133,6 +133,67 @@ def sell_decision(pos: dict, quote: dict, klines: list, today: str = None) -> di
             "reason": "昨日行情不足判断，暂持有（浮盈%.2f%%）" % pnl}
 
 
+def limit_prices(prev_close: float, code: str) -> dict:
+    """按板块计算今日涨跌停价（A股制度：主板±10% / 创业板科创板±20% / 北交所±30%）。
+
+    返回 {limit_up, limit_down}，四舍五入到分（交易所规则）。
+    prev_close 无效时返回 {limit_up: 0, limit_down: 0}。
+    """
+    if not prev_close or prev_close <= 0:
+        return {"limit_up": 0.0, "limit_down": 0.0}
+    if code.startswith(("30", "68")):
+        pct = 0.20
+    elif code.startswith(("4", "8", "92")):
+        pct = 0.30
+    else:
+        pct = 0.10
+    return {"limit_up": round(prev_close * (1 + pct), 2),
+            "limit_down": round(prev_close * (1 - pct), 2)}
+
+
+def can_buy(quote: dict, code: str) -> dict:
+    """可买性检查：一字涨停板买不进（开盘=涨停价且现价仍封死 → 全天无卖单成交）。
+
+    判定：开盘价 ≥ 涨停价×0.998（允许 0.2% 精度容差）→ 一字板/开盘即封板，放弃。
+    返回 {ok: True} 或 {ok: False, reason: "..."}。
+    """
+    q = quote or {}
+    prev_close = q.get("prev_close") or 0
+    opn = q.get("open") or 0
+    cur = q.get("price") or 0
+    if not prev_close or not opn:
+        return {"ok": False, "reason": "无有效行情（停牌/未开盘），放弃"}
+    lp = limit_prices(prev_close, code)
+    limit_up = lp["limit_up"]
+    if limit_up and opn >= limit_up * 0.998:
+        return {"ok": False,
+                "reason": "开盘%.2f=涨停价%.2f（一字板/开盘即封板），买不进，放弃" % (opn, limit_up)}
+    # 盘中已封板也买不进（排板队列轮不到模拟盘）
+    if limit_up and cur >= limit_up * 0.998 and cur > opn:
+        return {"ok": False,
+                "reason": "现价%.2f已封涨停（%.2f），封单无法成交，放弃" % (cur, limit_up)}
+    return {"ok": True, "limit_up": limit_up, "limit_down": lp["limit_down"]}
+
+
+def can_sell(quote: dict, code: str) -> dict:
+    """可卖性检查：跌停封死卖不出（全天无买单 → 只能顺延明日）。
+
+    判定：现价 ≤ 跌停价×1.002 → 跌停，顺延。
+    返回 {ok: True} 或 {ok: False, reason: "..."}。
+    """
+    q = quote or {}
+    prev_close = q.get("prev_close") or 0
+    cur = q.get("price") or 0
+    if not prev_close or not cur:
+        return {"ok": False, "reason": "无有效行情（停牌），顺延"}
+    lp = limit_prices(prev_close, code)
+    limit_down = lp["limit_down"]
+    if limit_down and cur <= limit_down * 1.002:
+        return {"ok": False,
+                "reason": "现价%.2f封死跌停（%.2f），无买单接盘卖不出，顺延明日" % (cur, limit_down)}
+    return {"ok": True, "limit_up": lp["limit_up"], "limit_down": limit_down}
+
+
 def strategy_filter(sig: dict, quote: dict,流通市值亿: float = None) -> dict:
     """买入端最优变体过滤（回测 62.2%/+2.71% 那条）。
 

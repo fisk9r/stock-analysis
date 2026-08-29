@@ -123,19 +123,25 @@ def realtime_quote(codes: list, timeout: int = 10) -> dict:
         full = var.split("_")[-1]  # sh600000
         code = full[2:]
         try:
-            # 腾讯字段：1=名称 2=代码 3=现价 4=昨收 5=今开 44=流通市值(亿) 45=总市值(亿)
-            mc = 0.0
-            if len(fields) > 44:
+            # 腾讯字段表（factor_ext.py 完整版；a-stock-data 实测知识）：
+            # 1=名称 3=现价 4=昨收 5=今开 6=成交量(手) 37=成交额(万) 38=换手率
+            # 39=PE(TTM) 43=振幅 44=流通市值(亿) 45=总市值(亿) 46=市净率PB
+            def _fl(i):
                 try:
-                    mc = float(fields[44] or 0)
+                    return float(fields[i] or 0) if len(fields) > i else 0.0
                 except ValueError:
-                    mc = 0.0
+                    return 0.0
             out[code] = {
                 "name": fields[1],
                 "price": float(fields[3] or 0),
                 "prev_close": float(fields[4] or 0),
                 "open": float(fields[5] or 0),
-                "float_mv": mc,  # 流通市值（亿元）
+                "float_mv": _fl(44),      # 流通市值（亿元）
+                "turnover": _fl(38),      # 换手率 %
+                "amplitude": _fl(43),     # 振幅 %
+                "pb": _fl(46),            # 市净率
+                "pe_ttm": _fl(39),        # 市盈率 TTM
+                "amount_wan": _fl(37),    # 成交额（万元）
             }
         except (ValueError, IndexError):
             continue
