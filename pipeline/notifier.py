@@ -2022,7 +2022,15 @@ def format_stock_summary(data, url="", mode="close", con=None):
             for _s in (pp.get("strategies") or [])[:4]:
                 L.append("- %s" % _s)
             if pp.get("watch"):
-                L.append("- 关注池：" + "、".join("%s(%s)" % (w["name"], w.get("reason", "")) for w in pp["watch"][:8]))
+                # 2026-08-29 竞价决策线（13 个月全样本回测：高开≥2%胜率70%+/低开≤-2%仅17~38%）
+                _ws = []
+                for w in pp["watch"][:8]:
+                    _ar = (w.get("auction_rule") or "").replace("（", "(").replace("）", ")")
+                    _ws.append("%s(%s%s)" % (
+                        w["name"], w.get("reason", ""),
+                        ("｜" + _ar) if _ar else ""))
+                L.append("- 关注池：" + "、".join(_ws))
+                L.append("- ⏰ 竞价总纪律（全样本13个月回测）：涨停票次日**高开≥2%才跟进**、**低开≤-2%直接放弃**——高开>5%胜率85.9%/+6.8%，低开<-2%仅26.5%/-3.0%")
             if pp.get("risks"):
                 L.append("- 风险提醒：%s" % "；".join(pp["risks"]))
         # ⑥ ⚡ 短线/超短线盘前操作提示（追板回落/破位/停滞 当日离场或换强）

@@ -658,10 +658,12 @@ def run(date_override=None, dedup_close=False):
     try:
         for it in (rec.get("trend") or []):
             store.upsert_rec_pick(con, date, it["code"], it["name"], 0, None,
-                                  "趋势·%s" % ((it.get("trend_meta") or {}).get("band") or "入选"))
+                                  "趋势·%s" % ((it.get("trend_meta") or {}).get("band") or "入选"),
+                                  quality=it.get("quality"), turn=it.get("turn"))
         for it in (rec.get("momentum") or []):
             store.upsert_rec_pick(con, date, it["code"], it["name"], 0, None,
-                                  "动量·%s" % ((it.get("momentum_meta") or {}).get("band") or "入选"))
+                                  "动量·%s" % ((it.get("momentum_meta") or {}).get("band") or "入选"),
+                                  quality=it.get("quality"), turn=it.get("turn"))
         con.commit()
     except Exception as e:
         log("  趋势/动量入池失败（不影响主流程）：%r" % e)
@@ -1337,8 +1339,15 @@ def run(date_override=None, dedup_close=False):
         store.upsert_rec_day(con, date, maxst, lb_cnt, len(lus),
                              sent.get("score"), cyc.get("phase"), rec.get("env_k"), len(rec.get("all") or []))
         for it in (rec.get("all") or []):
-            store.upsert_rec_pick(con, date, it["code"], it["name"], it["streak"],
-                                  it.get("p_break"), it.get("tag"))
+            # 2026-08-29 特征扩列：连板票落库带上板块强度/质量/换手/竞价形态，
+            # 供回测多维归因（复盘「为什么这批推荐强/弱」）。
+            store.upsert_rec_pick(
+                con, date, it["code"], it["name"], it["streak"],
+                it.get("p_break"), it.get("tag"),
+                sector_strength=it.get("sector_strength"),
+                quality=it.get("quality"),
+                turn=it.get("turn"),
+                auction_pattern=it.get("auction_pattern"))
         con.commit()
         log("  历史连板库已更新（%s：高度 %d / 连板 %d 只）" % (date, maxst, lb_cnt))
     except Exception as e:

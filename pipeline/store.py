@@ -36,7 +36,11 @@ CREATE TABLE IF NOT EXISTS rec_history(
 CREATE TABLE IF NOT EXISTS rec_picks(
   date TEXT NOT NULL, code TEXT NOT NULL, name TEXT, streak INTEGER,
   p_break REAL, tag TEXT, next_continue INTEGER DEFAULT -1,
-  next_pct REAL DEFAULT NULL, PRIMARY KEY(date, code)
+  next_pct REAL DEFAULT NULL,
+  sector_strength REAL DEFAULT NULL, quality REAL DEFAULT NULL,
+  turn REAL DEFAULT NULL, auction_pattern TEXT,
+  next_open_gap REAL DEFAULT NULL,
+  PRIMARY KEY(date, code)
 );
 CREATE TABLE IF NOT EXISTS global_market(
   region TEXT, code TEXT, name TEXT, price REAL, pct REAL,
@@ -74,6 +78,19 @@ def connect():
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
     con.executescript(SCHEMA)
+    # 2026-08-29 rec_picks 特征扩列迁移：老库补列（已存在则忽略）。
+    # 特征列用于回测多维归因（板块强度/封板质量/换手/竞价形态/次日开盘溢价）。
+    for _col, _ddl in (
+        ("sector_strength", "ALTER TABLE rec_picks ADD COLUMN sector_strength REAL DEFAULT NULL"),
+        ("quality", "ALTER TABLE rec_picks ADD COLUMN quality REAL DEFAULT NULL"),
+        ("turn", "ALTER TABLE rec_picks ADD COLUMN turn REAL DEFAULT NULL"),
+        ("auction_pattern", "ALTER TABLE rec_picks ADD COLUMN auction_pattern TEXT"),
+        ("next_open_gap", "ALTER TABLE rec_picks ADD COLUMN next_open_gap REAL DEFAULT NULL"),
+    ):
+        try:
+            con.execute(_ddl)
+        except sqlite3.OperationalError:
+            pass  # 列已存在
     return con
 
 
@@ -204,15 +221,27 @@ def upsert_rec_day(con, date, max_streak, lb_count, zt_count, sent_score,
          n_rec, time.strftime("%Y-%m-%d %H:%M:%S")))
 
 
-def upsert_rec_pick(con, date, code, name, streak, p_break, tag):
+def upsert_rec_pick(con, date, code, name, streak, p_break, tag,
+                    sector_strength=None, quality=None, turn=None,
+                    auction_pattern=None):
+    """2026-08-29 特征扩列：记录推荐当日的板块强度/封板质量/换手/竞价形态，
+    供回测多维归因（此前 8 列表无法分析「为什么 st=2 推荐胜率仅 38.6%」）。"""
     con.execute(
         "INSERT OR REPLACE INTO rec_picks"
-        "(date,code,name,streak,p_break,tag) VALUES(?,?,?,?,?,?)",
-        (date, code, name, streak, p_break, tag))
+        "(date,code,name,streak,p_break,tag,sector_strength,quality,turn,auction_pattern)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (date, code, name, streak, p_break, tag,
+         sector_strength, quality, turn, auction_pattern))
 
 
 def backfill_rec_outcomes(con, u):
-    """回填前一日推荐标的的次日真实结局（续板=1 / 断板=0）。"""
+    """回填前一日推荐标的的次日真实结局（续板=1 / 断板=0）。
+
+    2026-08-29：顺带回填 next_open_gap（次日开盘溢价 = T+1开盘/T收盘-1）。
+    大样本回测（13 个月）证实开盘溢价是最强执行层信号：
+      首板次日高开>5% → 胜率 85.9% / +6.83%；低开<-2% → 胜率 26.5% / -3.04%。
+    落库后可按推荐票分组验证「竞价决策线」的实际执行收益。
+    """
     row = con.execute("SELECT MAX(date) FROM rec_history").fetchone()
     if not row or not row[0]:
         return 0
@@ -228,8 +257,15 @@ def backfill_rec_outcomes(con, u):
         b = u.bar(code, nd)
         cont = 1 if code in zt_next else 0
         npct = round(b["pct"], 2) if b else None
-        con.execute("UPDATE rec_picks SET next_continue=?, next_pct=? WHERE date=? AND code=?",
-                    (cont, npct, date, code))
+        ogap = None
+        if b and b.get("o") and b["o"] > 0:
+            tb = u.bar(code, prev)
+            if tb and tb.get("c") and tb["c"] > 0:
+                ogap = round((b["o"] / tb["c"] - 1) * 100, 2)
+        con.execute(
+            "UPDATE rec_picks SET next_continue=?, next_pct=?, next_open_gap=? "
+            "WHERE date=? AND code=?",
+            (cont, npct, ogap, date, code))
         cnt += 1
     con.commit()
     return cnt

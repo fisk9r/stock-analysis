@@ -797,7 +797,8 @@ def cycle_phase(series):
     if lastperf < -1.5 and prom_now < 10 and zt[-1] < mean(zt[:-1]):
         ph, desc = "退潮期", "赚钱效应转负、晋级率坍塌，高位股批量断板，宜空仓或只做低位first board"
     elif zt[-1] <= 20 and lastperf < 0 and hi_now <= 3:
-        ph, desc = "冰点期", "情绪极度低迷，往往是下一轮反弹的孕育期，关注低位首板与超跌反包"
+        # 超跌反包已弱化（大样本 55.6%/+0.50%），低位首板才是冰点期主信号
+        ph, desc = "冰点期", "情绪极度低迷，往往是下一轮反弹的孕育期，关注低位首板，超跌反弹仅轻仓"
     elif hi_now >= 5 and lastperf > 1 and prom_now >= 15:
         ph, desc = "高潮期", "高度板与赚钱效应共振，可参与但需快进快出，警惕见顶回落"
     elif zt_tr > 0 and perf_tr > 0 and lastperf > 0:
@@ -1988,6 +1989,26 @@ def compute_regime(hist_rows, picks_rows, bars_series=None):
             "src": src, "declines": declines}
 
 
+def auction_discipline(streak):
+    """次日竞价开盘溢价决策线（2026-08-29 大样本回测落地，全市场 118 万根 K 线验证）。
+
+    13 个月逐月回测方向 100% 一致（无一个月翻车）——开盘溢价是最强执行层信号：
+      首板次日高开>5%  → 胜率 85.9% / +6.83%（高开=强势确认，溢价延续）
+      首板次日高开2-5% → 胜率 70.3% / +3.21%
+      首板次日平开±2%  → 胜率 46.7% / +0.07%（无方向，观望）
+      首板次日低开<-2% → 胜率 26.5% / -3.04%（低开不是黄金坑，是弱势确认！）
+    连板高度越高次日胜率越高（st=8 达 82.4%/+6.02%）。
+    断板反包/首阴反包同时被证伪（1683/786 条样本，胜率 40% 上下，均值 -1%）。
+    """
+    if (streak or 0) >= 3:
+        return {
+            "rule": "高开≥2%积极跟进（高度票高开即强势确认）/ 低开≤-2%当日放弃",
+            "basis": "全样本13个月：高度票次日胜率64%~82%，高开延续性显著；低开<-2%胜率仅17~38%"}
+    return {
+        "rule": "高开≥2%跟进 / 低开≤-2%放弃 / 平开±2%观望等方向",
+        "basis": "全样本13个月：首板次日高开2-5%胜率70.3%、>5%达85.9%；低开<-2%仅26.5%"}
+
+
 def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=None, hist=None, relay_info=None):
     rmap = {r["code"]: r for r in risks}
     dmap = {d["code"]: d for d in demons}
@@ -2050,6 +2071,8 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
         })
         items[-1]["auction_pattern"] = aq.get("pattern")
         items[-1]["vol_anomaly"] = aq.get("vol_anomaly")
+        # 次日竞价决策线（大样本回测背书的执行纪律，盘前推送/看板共用）
+        items[-1]["auction_rule"] = auction_discipline(r["streak"])
         items[-1]["hist_calib"] = {
             "level": (hist or {}).get("level", "—"),
             "note": (hist or {}).get("note", ""), "factor": round(hf, 3),
@@ -2060,6 +2083,10 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
         rs = []
         if it["streak"] >= 2:
             rs.append("已走出 %d 连板，具备接力资金关注度" % it["streak"])
+        if it["streak"] >= 6:
+            rs.append("全样本回测：%d 板以上空间板次日胜率 69%%~82%%、均值 +3.5%%~+6%%，高度溢价显著" % it["streak"])
+        elif it["streak"] >= 4:
+            rs.append("全样本回测：4 板以上次日胜率 64%%，高于二板（59%%）与首板（56%%）")
         if it["sector_tier"] == "主线":
             rs.append("所属【%s】为当日主线板块（强度 %.0f）" % (it["industry"], it["sector_strength"] or 0))
         elif it["sector_tier"] == "支线":
@@ -2086,14 +2113,20 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
                 rs.append("妖股基因 %.0f 分" % it["demon"])
         if it["float_mv"] and it["float_mv"] < 60e8:
             rs.append("流通盘 %.0f 亿，盘子轻易拉升" % (it["float_mv"] / 1e8))
-        return rs[:5]
+        # 竞价决策线置顶（执行纪律优先级最高，13 个月全样本回测背书）
+        ar = it.get("auction_rule") or {}
+        if ar.get("rule"):
+            rs.insert(0, "⏰ 竞价纪律：%s" % ar["rule"])
+        return rs[:6]
 
     def risknote(it):
         rs = []
         if (it["p_break"] or 0) >= 78:
             rs.append("同高度历史断板率偏高，次日冲高回落概率大")
         if it["streak"] >= 4:
-            rs.append("高位连板，一旦断板容易连续调整")
+            # 断板反包已被 1683 条大样本证伪（胜率 40.6%/均值-0.86%）：
+            # 高位票断板后止损离场，不要等反包。
+            rs.append("高位连板一旦断板即离场——断板反包历史胜率仅 40%，勿恋战")
         if (it["gain20"] or 0) > 70:
             rs.append("20 日累计 +%.0f%%，获利盘沉重" % it["gain20"])
         if (it["zb_count"] or 0) >= 1:
@@ -2216,10 +2249,14 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
     elif sc >= 30:
         pos, ps = "2-3 成", "情绪走弱，只做低位、低吸，控制单票仓位"
     else:
-        pos, ps = "0-2 成", "退潮期空仓等待，等首阴反包或新题材出现再进场"
+        # 2026-08-29 大样本证伪修正：首阴反包 786 条胜率仅 39.9%/均值-1.06%，
+        # 断板反包 1683 条 40.6%/-0.86%——退潮期等反包是负期望打法，改为等新题材。
+        pos, ps = "0-2 成", "退潮期空仓等待新题材或情绪冰点企稳信号（勿做首阴反包——大样本胜率仅40%）"
     strategies = [ps]
     if cyc["phase"] in ("退潮期", "冰点期"):
-        strategies.append("重点观察【低位首板】与【超跌反包】，放弃高位接力")
+        # 超跌反弹大样本 13977 条胜率 55.6%/+0.50%——弱正期望，只配轻仓试探；
+        # 低位首板仍是真金（p_break<70 胜率 78.6%/+3.97%）。
+        strategies.append("重点观察【低位首板】（p_break<70 胜率78.6%）；超跌反弹仅轻仓试探，放弃高位接力")
     if cyc["phase"] in ("发酵期", "启动期"):
         strategies.append("主线板块的【二板梯队】性价比最高，是本阶段核心打法")
     if cyc["phase"] == "高潮期":
@@ -2260,9 +2297,13 @@ def preopen_plan(rec, inds, relay, risks):
     relay_dir = [x["name"] for x in relay.get("relay", [])] if relay.get("available") else []
 
     def _wi(it, reason):
+        # 竞价决策线透传（2026-08-29 大样本回测：次日开盘溢价是最强执行信号，
+        # 高开≥2%胜率70%+ / 低开≤-2%胜率仅17~38%，13 个月方向 100% 一致）
+        ar = it.get("auction_rule") or auction_discipline(it.get("streak"))
         return {"name": it.get("name"), "code": it.get("code"),
                 "streak": it.get("streak"), "reason": reason,
-                "relay_dir": bool(it.get("relay_dir"))}
+                "relay_dir": bool(it.get("relay_dir")),
+                "auction_rule": ar.get("rule") or ""}
 
     seen, watch = set(), []
     for it in (rec.get("core") or [])[:6]:

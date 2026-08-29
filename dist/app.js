@@ -944,9 +944,11 @@
         _pp += '<div style="margin-top:8px"><b style="color:var(--muted);font-size:12px">关注池（前排）</b><div class="chips" style="margin-top:4px">' +
           PP.watch.map(function (w) {
             var _tag = w.relay_dir ? '<span class="bd" style="border-color:' + C.purple + ';color:' + C.purple + ';font-size:10px;padding:0 4px">接力</span>' : '';
+            var _ar = w.auction_rule ? '<span class="bd" style="border-color:' + C.gold + ';color:' + C.gold + ';font-size:10px;padding:0 4px" title="' + E(w.auction_rule) + '">⏰</span>' : '';
             return '<span class="chip">' + E(w.name) + (w.streak ? ' <b>' + w.streak + '板</b>' : '') +
-              ' <span class="muted">' + E(w.reason) + '</span>' + _tag + '</span>';
+              ' <span class="muted">' + E(w.reason) + '</span>' + _tag + _ar + '</span>';
           }).join('') + '</div></div>';
+        _pp += '<div class="note" style="margin-top:6px">⏰ 竞价总纪律：涨停票次日高开≥2%才跟进、低开≤-2%直接放弃（全样本13个月回测：高开&gt;5%胜率85.9%/+6.8%，低开&lt;-2%仅26.5%/-3.0%）</div>';
       }
       if (PP.risks && PP.risks.length) {
         _pp += '<div style="margin-top:8px"><b style="color:var(--muted);font-size:12px">风险提醒</b><div class="note" style="margin-top:4px">' +
