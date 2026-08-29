@@ -820,15 +820,32 @@
     var ST = D.seats;
     if (ST && ST.n_hits) {
       var stBody = '<div class="chips" style="margin-bottom:8px"><span class="chip">知名席位动作 <b>' + n2(ST.n_hits) + '</b> 条</span></div>';
+      /* 2026-08-30 样本回填后胜率可用：低胜率(<40%且n≥20)席位标红警示=负期望跟随 */
+      var stAvoid = {};
+      if (D.seat_avoid && D.seat_avoid.items) {
+        D.seat_avoid.items.forEach(function (a) { stAvoid[a.label] = a; });
+      }
       var stRows = (ST.hits || []).slice(0, 8).map(function (t) {
-        var wr = (ST.stats && ST.stats[t.label]) ? (' · 跟随胜率' + ST.stats[t.label].win_rate + '%(' + ST.stats[t.label].n + '次)') : '';
+        var wr = '', wrSt = ST.stats && ST.stats[t.label];
+        if (wrSt) {
+          wr = '跟随胜率' + wrSt.win_rate + '%(' + wrSt.n + '次)';
+          if (stAvoid[t.label]) wr = '⚠ ' + wr + ' · 负期望回避';
+        }
+        var wrColor = wrSt ? (stAvoid[t.label] ? C.down : (wrSt.win_rate >= 55 ? C.up : 'inherit')) : 'inherit';
         return '<tr><td><b>' + E(t.name) + '</b> <span class="muted">' + E(t.code) + '</span></td>' +
           '<td class="muted" style="font-size:11px">' + E(t.label) + '</td>' +
           '<td class="r" style="color:' + (t.net_yi >= 0 ? C.up : C.down) + '">净买 ' + f(t.net_yi, 2) + '亿</td>' +
-          '<td class="r muted" style="font-size:11px">' + E(wr) + '</td></tr>';
+          '<td class="r" style="font-size:11px;color:' + wrColor + '">' + E(wr) + '</td></tr>';
       });
       if (stRows.length) stBody += table([{ t: '个股' }, { t: '席位(坊间)' }, { t: '净买', a: 'r' }, { t: '跟随', a: 'r' }], stRows);
-      h += card('🐉 游资席位画像', stBody, '识别当日龙虎榜上的知名游资营业部（坊间归因，仅供参考），并给出其历史 T+1 跟随胜率，辅助判断是否值得跟');
+      /* 回避席位汇总条 */
+      if (D.seat_avoid && D.seat_avoid.items && D.seat_avoid.items.length) {
+        stBody += '<div style="margin-top:8px;font-size:12px;color:' + C.down + '">⚠ 回避席位（历史跟随负期望）：' +
+          D.seat_avoid.items.map(function (a) {
+            return E(a.label) + '（胜率' + f(a.win_rate, 0) + '%/' + a.n + '次' + (a.avg_pct != null ? '，均值' + (a.avg_pct > 0 ? '+' : '') + f(a.avg_pct, 2) + '%' : '') + '）';
+          }).join('、') + '</div>';
+      }
+      h += card('🐉 游资席位画像', stBody, '识别当日龙虎榜上的知名游资营业部（坊间归因，仅供参考），并给出其历史 T+1 跟随胜率，辅助判断是否值得跟；胜率<40% 的席位标红回避（如散户集中营）；样本≥8 才显示胜率');
     }
 
     /* 题材主线 */

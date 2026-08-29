@@ -14,7 +14,8 @@
 
 用法：
   python tools/executor/runner.py --now        # 立即执行一轮（测试/手动）
-  python tools/executor/runner.py --loop       # 常驻模式，每天 09:26 自动执行
+  python tools/executor/runner.py --tail       # 立即执行尾盘确认通道（14:45 版，测试/手动）
+  python tools/executor/runner.py --loop       # 常驻模式，每天 09:26 开仓 + 14:45 尾盘确认自动执行
   python tools/executor/runner.py --summary    # 查看模拟盘持仓概览
   python tools/executor/runner.py --report     # 月度盈亏报告（全流水+统计）
   python tools/executor/runner.py --review     # 当日复盘总结（收盘后跑，推送 PushPlus）
@@ -34,7 +35,8 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from exec_core import fetch_user_data, extract_signals, realtime_quote, auction_gate, market_gate, SITE
+from exec_core import (fetch_user_data, extract_signals, realtime_quote,
+                       auction_gate, late_gate, market_gate, SITE)
 from risk_gate import RiskGate
 import broker_sim
 import strategy
@@ -381,6 +383,93 @@ def run_buys(broker, mode, cfg, sigs, mkt=None):
     return lines, n_buy
 
 
+# ---------------- 尾盘确认通道（14:45 版） ----------------
+
+def run_tailgate(broker, mode, cfg):
+    """14:45 尾盘确认：只做持仓管理，不开新仓（回测：尾盘追强期望仅 +0.6%）。
+
+    规则（strategy.tailgate_decision，全部来自 309 日全样本回测）：
+      · 深亏(现价较开盘≤-3%) → 尾盘止损（深亏过夜次日 -0.31%/红盘率 45%）
+      · 微红(0~+2%) → 尾盘确认持有（最强过夜信号：+3.01%/红盘率 62.9%）
+      · 其他 → 不干预（常规策略明日裁决）
+    只影响「当日新买入」的持仓（尾盘确认的价值就在买入当天）；
+    老持仓的卖出决策由次日早盘 Phase1 的 sell_decision 全权负责，避免双重裁决。
+    """
+    lines = []
+    try:
+        poss = broker.positions(open_only=True)
+    except Exception as e:
+        _log("尾盘通道：持仓读取失败：%r" % e)
+        return ["- 持仓读取失败"]
+    if not poss:
+        return ["- 无持仓，尾盘通道无事可做"]
+    today = time.strftime("%Y-%m-%d")
+    # 只看当日买入的持仓（尾盘确认的语义边界）
+    todays = [p for p in poss if (p.get("buy_date") or "") == today]
+    if not todays:
+        _log("尾盘通道：今日无新买入持仓（%d 笔老持仓交给明日早盘策略）" % len(poss))
+        return ["- 今日无新买入持仓，老持仓由明日早盘策略裁决"]
+    codes = [p["code"] for p in todays]
+    try:
+        quote = realtime_quote(codes)
+    except Exception as e:
+        _log("尾盘通道：行情失败：%r" % e)
+        return ["- 行情失败，尾盘确认顺延"]
+    if not quote:
+        return ["- 行情为空（可能非交易时段）"]
+
+    n_act = 0
+    for p in todays:
+        q = quote.get(p["code"]) or {}
+        dec = strategy.tailgate_decision(p, q)
+        if dec.get("verdict") is None:
+            _log("尾盘 %s：%s" % (p["code"], dec["reason"]))
+            if hasattr(broker, "record_decision"):
+                broker.record_decision(p["code"], "HOLD",
+                                       "尾盘确认：%s" % dec["reason"],
+                                       p.get("name") or "",
+                                       dec.get("price") or 0)
+            lines.append("- %s(%s) 尾盘中性，不干预｜%s"
+                         % (p.get("name"), p["code"], dec["reason"]))
+            continue
+        if dec["verdict"] == "SELL":
+            cs = strategy.can_sell(q, p["code"])
+            if not cs["ok"]:
+                _log("尾盘止损被拒 %s：%s" % (p["code"], cs["reason"]))
+                if hasattr(broker, "record_decision"):
+                    broker.record_decision(p["code"], "HOLD",
+                                           "尾盘拟止损被拒顺延：%s" % cs["reason"],
+                                           p.get("name") or "", dec["price"] or 0)
+                lines.append("- ⛔ 尾盘止损被拒 %s(%s)：%s" % (p.get("name"), p["code"], cs["reason"]))
+                continue
+            _act_notify(cfg,
+                        "🔔 操作前确认：尾盘止损 %s(%s)" % (p.get("name"), p["code"]),
+                        "**止损理由**：%s\n\n- 现价 %.2f｜成本 %.2f\n- 纪律依据：尾盘确认通道回测（深亏过夜次日 -0.31%%/红盘率 45%%），先推送后执行"
+                        % (dec["reason"], dec["price"], p["avg_price"]))
+            r = broker.sell_limit(p["code"], dec["price"], sig={
+                "name": p.get("name"), "reason": dec["reason"], "source": "tailgate"})
+            if r.get("ok"):
+                n_act += 1
+                lines.append("- **尾盘止损 SELL %s**(%s) @%.2f %+.2f%%｜%s"
+                             % (p.get("name"), p["code"], r["price"], r["pnl_pct"], dec["reason"]))
+                _log("尾盘止损 %s：%s" % (p["code"], dec["reason"]))
+            else:
+                lines.append("- %s(%s) 尾盘止损失败：%s" % (p.get("name"), p["code"], r.get("reason")))
+        elif dec["verdict"] == "HOLD":
+            if hasattr(broker, "record_decision"):
+                broker.record_decision(p["code"], "HOLD",
+                                       "尾盘确认：%s" % dec["reason"],
+                                       p.get("name") or "", dec.get("price") or 0)
+            lines.append("- ✅ **尾盘确认持有** %s(%s)：%s" % (p.get("name"), p["code"], dec["reason"]))
+            _act_notify(cfg,
+                        "✅ 尾盘确认持有 %s(%s)" % (p.get("name"), p["code"]),
+                        "**确认理由**：%s\n\n- 现价 %.2f｜成本 %.2f\n- 过夜持有，明日早盘按策略裁决"
+                        % (dec["reason"], dec.get("price") or 0, p["avg_price"]),
+                        dedup_key="TAILHOLD:%s:%s" % (today, p["code"]))
+            _log("尾盘确认持有 %s：%s" % (p["code"], dec["reason"]))
+    return lines, n_act
+
+
 # ---------------- 主流程 ----------------
 
 def run_once(cfg):
@@ -423,6 +512,130 @@ def run_once(cfg):
         except Exception as e:
             _log("战绩汇总失败：%r" % e)
     _notify(cfg, "执行器回报（卖%d 买%d）" % (n_sold, n_buy), "\n".join(all_lines))
+
+
+def _tail_buys(broker, cfg, sigs, mkt):
+    """尾盘入场通道：late_gate（微红横盘）确认买入，半仓。
+
+    依据（exec_core.late_gate 文档，309 交易日全市场涨停票，前提开盘≥2%）：
+      高开≥2% + 14:45 现价较开盘 +0~2%（微红横盘不回补）→ 次日 +3.01%/62.9%
+      （1623 样本，14 个月逐月全正）——14:45 买入价≈收盘价，口径一致。
+      深亏/强拉桶分别 -0.31%/+0.62%，全部放弃。
+    早盘已委托的票由 RiskGate 幂等拒绝，天然防重复。
+    """
+    lines, n_buy = [], 0
+    if not sigs:
+        return lines, 0
+    codes = [s["code"] for s in sigs]
+    try:
+        quote = realtime_quote(codes)
+    except Exception as e:
+        _log("✗ 尾盘行情失败：%r" % e)
+        return lines, 0
+    if not quote:
+        return lines, 0
+    gate = RiskGate((cfg.get("risk") or {}))
+    bal = broker.balance() if hasattr(broker, "balance") else {}
+    total = bal.get("total")
+    cut = 0.5 if mkt.get("mode") == "CAUTION" else 1.0
+    if mkt.get("mode") == "FREEZE":
+        _log("尾盘入场：大盘环境 FREEZE，不开新仓")
+        return ["- 🧊 尾盘 FREEZE：%s" % mkt.get("reason", "")], 0
+
+    def _track(code, name, action, reason):
+        if hasattr(broker, "record_decision"):
+            broker.record_decision(code, action, reason, name or "")
+
+    for s in sigs:
+        v = late_gate(s, quote)
+        if v["verdict"] != "BUY":
+            _track(v["code"], v.get("name"), "WATCH", "尾盘确认:%s" % v["reason"])
+            continue
+        q = quote.get(v["code"]) or {}
+        sf = strategy.strategy_filter(v, q, q.get("float_mv") or None)
+        if sf["grade"] == "X":
+            gate.record(v, "TAIL_SKIP", 0, "尾盘分级:" + sf["reason"])
+            _track(v["code"], v.get("name"), "SKIP", "尾盘分级过滤:%s" % sf["reason"])
+            continue
+        cb = strategy.can_buy(q, v["code"])
+        if not cb["ok"]:
+            gate.record(v, "TAIL_SKIP", 0, "尾盘买不进:" + cb["reason"])
+            _track(v["code"], v.get("name"), "SKIP", "尾盘买不进:%s" % cb["reason"])
+            continue
+        amount = int(gate.cfg["max_trade_amount"] * 0.5 * cut)
+        if total:
+            amount = int(min(amount, total * gate.cfg["max_position_pct"]))
+        chk = gate.check(v, total)
+        if not chk["ok"]:
+            if "幂等" in chk["reason"]:
+                continue  # 早盘已买，正常
+            gate.record(v, "REJECT", 0, "尾盘风控:" + chk["reason"])
+            _track(v["code"], v.get("name"), "SKIP", "尾盘风控拒绝:%s" % chk["reason"])
+            continue
+        price = q.get("price") or 0
+        if price <= 0:
+            continue
+        _act_notify(cfg,
+                    "🌇 尾盘确认买入 %s(%s) [%s级·半仓]" % (v["name"], v["code"], sf["grade"]),
+                    "**尾盘确认理由**：%s\n\n- 开盘 %.2f%%｜14:45 现价 %.2f（较开盘 +%.2f%% 微红横盘）\n"
+                    "- 实证依据：高开+微红横盘桶次日 +3.01%%/红盘率 62.9%%（14个月全正）\n"
+                    "- 金额 %d 元（尾盘半仓）｜环境：%s"
+                    % (v["reason"], v.get("open_gap") or 0, price,
+                       v.get("day_fade") or 0, amount, mkt.get("reason", "")))
+        r = broker.buy_limit(v["code"], price, amount, sig=dict(
+            v, reason="尾盘确认｜%s" % v["reason"]))
+        ok = "✓" if r.get("ok") else "✗ %s" % r.get("reason")
+        gate.record(v, "BUY", amount, "尾盘:" + ok)
+        if r.get("ok"):
+            n_buy += 1
+            lines.append("- **尾盘BUY %s**(%s) %s 开盘%.2f%% 现价%.2f %d 元"
+                         % (v["name"], v["code"], sf["grade"],
+                            v.get("open_gap") or 0, price, amount))
+        else:
+            _track(v["code"], v.get("name"), "SKIP", "尾盘委托失败:%s" % r.get("reason"))
+    return lines, n_buy
+
+
+def run_tail(cfg):
+    """14:45 尾盘确认通道（2026-08-30 定稿）——两条子通道合一：
+
+    A. 持仓管理（run_tailgate，只管「今日买入」的持仓）：
+       深亏(≤-3% vs 开盘)→尾盘止损（14个月11个月次日为负）；
+       微红(+0~2%)→确认持有（最强过夜形态）；中性区间不干预。
+    B. 尾盘入场（_tail_buys，late_gate）：高开≥2% + 微红横盘的信号票，
+       14:45≈收盘价买入（该口径次日 +3.01%/62.9%，14个月全正），半仓。
+       深亏/强拉桶明确放弃；早盘已买票被 RiskGate 幂等拒绝。
+    老持仓由次日早盘 sell_decision 全权裁决，避免双重决策。
+    """
+    acc = cfg.get("account") or {}
+    if not acc.get("user_id") or not acc.get("passwd"):
+        _log("未配置 account，退出")
+        return
+    broker, mode = pick_broker(cfg)
+    _log("=" * 30 + " 14:45 尾盘确认通道 " + "=" * 30)
+
+    # A. 持仓管理
+    hold_lines, n_act = run_tailgate(broker, mode, cfg)
+
+    # B. 尾盘入场
+    buy_lines, n_buy = [], 0
+    mkt = {"mode": "NORMAL", "reason": "线上数据未取到"}
+    try:
+        data = fetch_user_data(acc["user_id"], acc["passwd"])
+        sigs = extract_signals(data)
+        mkt = market_gate(data)
+        buy_lines, n_buy = _tail_buys(broker, cfg, sigs, mkt)
+    except Exception as e:
+        _log("✗ 尾盘入场数据拉取失败：%r" % e)
+        buy_lines = ["- 数据拉取失败：%r" % e]
+
+    out = (["## 尾盘确认（14:45）环境：%s" % mkt.get("mode"),
+            "- %s" % mkt.get("reason", ""), "",
+            "## 持仓管理"] + hold_lines +
+           ["", "## 尾盘入场（%d 笔）" % n_buy] + (buy_lines or ["- 无"]))
+    for ln in out:
+        _log(ln)
+    _notify(cfg, "尾盘确认回报（买%d）" % n_buy, "\n".join(out))
 
 
 def run_summary():
@@ -673,10 +886,14 @@ def main():
         run_review(cfg)
     elif "--now" in args:
         run_once(cfg)
+    elif "--tail" in args:
+        run_tail(cfg)
     elif "--loop" in args:
         target = ((cfg.get("schedule") or {}).get("auction_time") or "09:26")
+        ttarget = ((cfg.get("schedule") or {}).get("tail_time") or "14:45")
         rtarget = ((cfg.get("review") or {}).get("time") or "15:35")
-        _log("常驻模式：每天 %s 执行（平仓+开仓），%s 复盘总结（Ctrl+C 退出）" % (target, rtarget))
+        _log("常驻模式：每天 %s 执行（平仓+开仓），%s 尾盘确认通道，%s 复盘总结（Ctrl+C 退出）"
+             % (target, ttarget, rtarget))
         fired = set()
         while True:
             now = time.strftime("%H:%M")
@@ -686,6 +903,12 @@ def main():
                     run_once(cfg)
                 except Exception as e:
                     _log("执行异常：%r" % e)
+            if now == ttarget and "tail" not in fired:
+                fired.add("tail")
+                try:
+                    run_tail(cfg)
+                except Exception as e:
+                    _log("尾盘通道异常：%r" % e)
             if now == rtarget and "review" not in fired and not mode_check_no_sim(cfg):
                 fired.add("review")
                 try:

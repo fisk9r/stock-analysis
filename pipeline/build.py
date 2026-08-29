@@ -1299,6 +1299,18 @@ def run(date_override=None, dedup_close=False):
             data["seat_follow"] = {"n": len(items), "items": items} if items else None
             if data["seat_follow"]:
                 log("  可跟席位：%d 个（胜率≥55%%）" % len(items))
+            # 2026-08-30 席位样本回填后数据够看胜率了：低胜率席位 = 回避信号。
+            # 东财拉萨 88 日 89 样本胜率仅 30.3%/均值 -3.52%——散户集中营跟随是负期望，
+            # 这类席位上榜的票要在网页与推送里明确标「回避」而不是只字不提。
+            avoid = []
+            for label, st in ranked:
+                if st.get("win_rate", 0) < 40 and st.get("n", 0) >= 20:
+                    reps = [h for h in hits if h.get("label") == label][:3]
+                    avoid.append({"label": label, "win_rate": st["win_rate"],
+                                  "n": st["n"], "avg_pct": st.get("avg_pct"), "reps": reps})
+            data["seat_avoid"] = {"n": len(avoid), "items": avoid} if avoid else None
+            if data["seat_avoid"]:
+                log("  回避席位：%d 个（胜率<40%% 且样本≥20）" % len(avoid))
     except Exception as e:
         log("  可跟席位失败：%r" % e)
         data["seat_follow"] = None

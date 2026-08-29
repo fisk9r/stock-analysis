@@ -124,4 +124,13 @@ def summary_lines(r, stats=None):
         out.append("- %s【%s】净买 %s亿 → %s%s"
                    % (h["name"], h["label"], h["net_yi"],
                       ("%+.1f%%" % h["chg"]), tail))
-    return out or ["龙虎榜：今日无知名席位显著动作"]
+    if not out:
+        out = ["龙虎榜：今日无知名席位显著动作"]
+    # 2026-08-30 回避席位提示（样本回填后胜率可用）：低胜率知名席位上榜 = 负期望跟随
+    bad = [(lb, st) for lb, st in sorted(stats.items(), key=lambda kv: kv[1].get("win_rate", 0))
+           if st.get("win_rate", 100) < 40 and st.get("n", 0) >= 20]
+    if bad:
+        out.append("⚠ 回避席位：%s"
+                   % "、".join("%s（胜率%.0f%%/%d次，跟随负期望）" % (lb, st["win_rate"], st["n"])
+                               for lb, st in bad[:3]))
+    return out

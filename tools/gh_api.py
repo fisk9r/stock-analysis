@@ -145,6 +145,18 @@ def push_files(message, paths, branch="main"):
         if not os.path.isfile(ab):
             print("⚠ 跳过不存在的文件：%s" % rel)
             continue
+        # 2026-08-30 新坑：调用方传 Windows 绝对路径（C:\Users\...\pipeline\x.py）时，
+        # replace("\\","/") 只会得到 "C:/Users/..."——整份文件被当成
+        # 「C:/ 开头的垃圾路径新文件」入库，真正的 pipeline/x.py 不会更新
+        # （表现为推送成功+CI 成功但线上全是旧代码）。因此：先相对化到仓库根。
+        norm = rel.replace("\\", "/")
+        root_norm = ROOT.replace("\\", "/").rstrip("/")
+        low, root_low = norm.lower(), root_norm.lower() + "/"
+        if low.startswith(root_low):
+            norm = norm[len(root_low):]
+        norm = norm.lstrip("/")
+        if not norm or norm.lower().startswith(("c:/", "d:/")) or ":" in norm:
+            raise SystemExit("拒绝绝对路径/非法路径入库：%r → %r" % (rel, norm))
         # Git 树路径必须用正斜杠。Windows 上 glob/os.path 会产生反斜杠，
         # 若原样提交，Git 会把 "pipeline\x.py" 当作仓库根目录下一个「文件名含反斜杠」
         # 的文件，真正的 pipeline/x.py 不会被更新（历史踩坑，务必保留此规范化）。
@@ -152,7 +164,7 @@ def push_files(message, paths, branch="main"):
         # 会把 ".github/..." 的开头的 "." 一并剥掉，导致工作流被写到
         # github/workflows/... 垃圾路径、真正的 .github/workflows/x.yml
         # 永远不更新（2026-08-27 踩坑）。只在前缀确实是 "./" 时才去掉。
-        gitpath = rel.replace("\\", "/")
+        gitpath = norm
         while gitpath.startswith("./"):
             gitpath = gitpath[2:]
         gitpath = gitpath.lstrip("/")

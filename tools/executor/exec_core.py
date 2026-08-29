@@ -136,6 +136,8 @@ def realtime_quote(codes: list, timeout: int = 10) -> dict:
                 "price": float(fields[3] or 0),
                 "prev_close": float(fields[4] or 0),
                 "open": float(fields[5] or 0),
+                "high": _fl(33),          # 当日最高价（尾盘冲高回落判定）
+                "low": _fl(34),           # 当日最低价
                 "float_mv": _fl(44),      # 流通市值（亿元）
                 "turnover": _fl(38),      # 换手率 %
                 "amplitude": _fl(43),     # 振幅 %
@@ -207,3 +209,42 @@ def auction_gate(sig: dict, quote: dict) -> dict:
                     reason="低开%.2f%%≤-2%%，弱势确认，回避（回测胜率仅26.5%%）" % gap)
     return dict(sig, verdict="WATCH", open_gap=round(gap, 2),
                 reason="平开%.2f%%，观望等方向" % gap)
+
+
+def late_gate(sig: dict, quote: dict) -> dict:
+    """尾盘确认门（14:45 版，2026-08-30 回测落地）。
+
+    实证（market.db 309 个交易日全市场涨停票样本，前提：当日高开≥2% 通过竞价纪律）：
+      14:45 现价在开盘价上方 0~2%（微红横盘不回补）→ 次日 +3.01% / 胜率 62.9%
+        （1623 样本，14 个月逐月全正 +2.28%~+4.11%——最强过夜形态）
+      现价低于开盘 3% 以上（尾盘深亏）  → 次日 -0.31% / 胜率 44.9%（11/14 个月为负）
+      现价高于开盘 5% 以上（尾盘强拉）  → 次日仅 +0.62%（尾盘大拉透支隔夜溢价）
+    结论：尾盘通道的正确形态是「确认横盘强」而非「追尾盘拉升」。
+
+    返回 {code, name, verdict: BUY/WATCH/ABORT, open_gap, day_fade, reason}
+    day_fade = 现价相对今日开盘的偏移 %（正=红盘，负=走弱）
+    """
+    q = quote.get(sig["code"]) or {}
+    prev_close = q.get("prev_close") or sig.get("close") or 0
+    opn = q.get("open") or 0
+    cur = q.get("price") or 0
+    if not prev_close or not opn or not cur:
+        return dict(sig, verdict="ABORT", open_gap=None, day_fade=None, reason="无有效行情")
+    gap = (opn / prev_close - 1) * 100
+    fade = (cur / opn - 1) * 100
+    base = dict(sig, open_gap=round(gap, 2), day_fade=round(fade, 2))
+    if gap < 2:
+        return dict(base, verdict="ABORT",
+                    reason="开盘溢价%.2f%%<2%%，尾盘通道只处理竞价纪律通过的票" % gap)
+    if fade <= -3:
+        return dict(base, verdict="ABORT",
+                    reason="尾盘较开盘%.2f%%深亏，次日负期望（胜率44.9%%），不接飞刀" % fade)
+    if 0 <= fade <= 2:
+        return dict(base, verdict="BUY",
+                    reason="高开%.2f%%+尾盘微红%.2f%%横盘不回补：最强过夜形态（62.9%%/+3.01%%，14个月全正）"
+                           % (gap, fade))
+    if fade > 5:
+        return dict(base, verdict="WATCH",
+                    reason="尾盘较开盘+%.2f%%强拉，隔夜溢价透支（次日仅+0.62%%），不追" % fade)
+    return dict(base, verdict="WATCH",
+                reason="尾盘较开盘%+.2f%%，形态中性观望" % fade)

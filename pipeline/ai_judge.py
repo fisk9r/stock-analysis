@@ -291,6 +291,36 @@ def chat(name, prompt, system=None, model=None, timeout=40):
     return _chat_once(name, prov, prompt, system, timeout)
 
 
+# 2026-08-30 用户要求：AI 超时等瞬时故障要重试或换模型，kimi / z.ai(智谱) 的 key 作保底。
+_RETRYABLE_HINTS = ("timeout", "timed out", "urlopen error", "429", "500", "502",
+                    "503", "504", "10060", "10054", "connection", "temporarily")
+
+
+def _is_retryable(e):
+    """瞬时故障（超时/限流/网关/连接重置）可重试；鉴权/参数错误重试无意义。"""
+    s = repr(e).lower()
+    return any(k in s for k in _RETRYABLE_HINTS)
+
+
+def chat_retry(name, prov, prompt, system=None, timeout=60, max_tokens=None,
+               tries=2, gap=3):
+    """带瞬时错误重试的单接口调用。鉴权/参数类错误不重试直接抛。"""
+    last = None
+    for i in range(tries):
+        try:
+            return _chat_once(name, prov, prompt, system=system, timeout=timeout,
+                              max_tokens=max_tokens)
+        except Exception as e:
+            last = e
+            if not _is_retryable(e):
+                raise
+            if i + 1 < tries:
+                print("[ai_judge] %s 瞬时故障（超时/限流），%ds 后重试（%d/%d）：%s"
+                      % (name, gap, i + 1, tries - 1, repr(e)))
+                time.sleep(gap)
+    raise last
+
+
 # ----------------------- 共识（供 build.py 调用） -----------------------
 
 def _build_prompt(data):
@@ -357,16 +387,18 @@ def judge(data):
                 })
         except Exception:
             pass
-    # 外部模型：所有已配置接口并行征询
+    # 外部模型：所有已配置接口并行征询（2026-08-30 加瞬时故障重试；
+    # Cloudflare 系是 Reasoning 模型思考慢，超时放宽到 150s，其余 60s）
     prompt = _build_prompt(data)
     for name, cfg in get_active_providers().items():
         try:
-            raw = _chat_once(name, cfg, prompt)
+            to = 150 if name.startswith("cloudflare") else 60
+            raw = chat_retry(name, cfg, prompt, tries=2, timeout=to)
             nv = _norm_verdict(raw, cfg.get("label", name))
             if nv:
                 verdicts.append(nv)
         except Exception as e:
-            print("[ai_judge] %s 调用失败，跳过：%s" % (name, repr(e)))
+            print("[ai_judge] %s 调用失败（含重试），跳过：%s" % (name, repr(e)))
 
     if not verdicts:
         return None
@@ -490,24 +522,33 @@ def generate_narrative_backup(data, preferred=None):
     for n in list(pref_list) + list(PROVIDER_PRESETS.keys()):
         if n in providers and n not in order:
             order.append(n)
+    # 终极保底（2026-08-30 用户拍板）：无论 narrative_backup 怎么配置，
+    # z.ai(智谱) 与 kimi 这两个已配 key 的国产接口必须排在链尾兜底。
+    for tail in ("zhipu", "kimi"):
+        if tail in providers and tail not in order:
+            order.append(tail)
     prompt = _build_narrative_prompt(data)
     system = "你是专业的A股复盘分析师，负责撰写盘后综述。严格只输出JSON，不要解释。"
     for name in order:
         nv = None
-        # 内重试：Kimi 等国产模型的 json_mode 偶发抽风（返回非 JSON / 截断），
-        # 首次拿到响应但解析为 None 时，再试一次往往成功；真正抛异常（429/超时）才跳下一接口。
-        # 超时 180s（2026-08-29 CI run 33258533163 实测）：glm-4.7-flash 是 Reasoning
-        # 模型，CI 里 90s 读超时——token 权限其实已通（之前 400 已消失），纯粹是慢。
+        # 超时策略（2026-08-29~30 实测）：Cloudflare glm-4.7-flash 是 Reasoning 模型
+        # 思考慢，180s（CI run 33258533163 曾 90s 超时）；国产模型 100s 足够。
+        # 重试策略：瞬时故障（超时/429/5xx/连接重置）重试一次；鉴权/参数错误直接换下一家。
+        to = 180 if name.startswith("cloudflare") else 100
+        # 内重试：解析为 None（json_mode 偶发抽风）再试一次；瞬时异常也重试一次。
         for _try in range(2):
             try:
-                raw = _chat_once(name, providers[name], prompt, system=system,
-                                 timeout=180, max_tokens=700)
+                raw = chat_retry(name, providers[name], prompt, system=system,
+                                 timeout=to, max_tokens=700, tries=2, gap=5)
             except Exception as e:
-                print("[ai_judge] 备用叙事 %s 失败，尝试下一接口：%s" % (name, repr(e)))
+                print("[ai_judge] 备用叙事 %s 失败（含重试），尝试下一接口：%s"
+                      % (name, repr(e)))
                 break
             nv = _norm_narrative(raw, providers[name].get("label", name))
             if nv:
                 break
+            if _try == 0:
+                print("[ai_judge] 备用叙事 %s 返回无效 JSON，重试一次" % name)
         if nv:
             print("[ai_judge] HY3 不可用，已用备用模型 %s 生成叙事" % name)
             return nv

@@ -133,6 +133,39 @@ def sell_decision(pos: dict, quote: dict, klines: list, today: str = None) -> di
             "reason": "昨日行情不足判断，暂持有（浮盈%.2f%%）" % pnl}
 
 
+def tailgate_decision(pos: dict, quote: dict) -> dict:
+    """尾盘确认通道（14:45 版，2026-08-29 回测落地）——持仓管理而非新买入。
+
+    实证（本地 309 个交易日全市场涨停票样本，仅统计按竞价纪律高开>=2%买入的）：
+      尾盘微红(0~2% vs 开盘)  → 过夜次日 +3.01% / 红盘率 62.9%（14 个月全部为正，最强过夜信号）
+      尾盘偏强(+2~5%)         → 过夜次日 +1.08% / 53.7%
+      尾盘强势(+5%以上)       → 过夜次日 +0.62% / 50.9%（强拉透支，反而不如微红）
+      尾盘小亏(-3~0%)         → 过夜次日 -0.11% / 44.0%
+      尾盘深亏(<-3%)          → 过夜次日 -0.31% / 44.9%（11/14 个月为负 → 该止损）
+    结论：14:45 时点不做新买入（尾盘追强期望仅 +0.6%），只做两件事：
+      ① 深亏(<-3% vs 开盘) → 尾盘止损离场（避免负期望过夜）
+      ② 微红(0~2%) → 尾盘确认持有过夜（最强过夜信号，推送确认）
+    14:45 时点现价≈尾盘价，用现价/开盘价比值判定（与回测口径一致）。
+    返回 {verdict: SELL/HOLD/None, price, reason}；None = 不适用（非买入日）
+    """
+    q = quote or {}
+    cur = q.get("price") or 0
+    opn = q.get("open") or 0
+    if not cur or not opn:
+        return {"verdict": None, "price": 0, "reason": "无行情"}
+    ratio = cur / opn - 1  # 现价相对开盘（回测口径：close/open）
+    if ratio <= -0.03:
+        return {"verdict": "SELL", "price": cur,
+                "reason": "尾盘确认通道：现价较开盘-3%%以下（%.1f%%），深亏过夜次日均值-0.31%%/红盘率45%%，尾盘止损离场"
+                          % (ratio * 100)}
+    if -0.001 <= ratio <= 0.02:
+        return {"verdict": "HOLD", "price": cur,
+                "reason": "尾盘确认通道：微红+%.1f%%（最强过夜信号，历史红盘率62.9%%/均值+3.0%%），确认持有过夜"
+                          % (ratio * 100)}
+    return {"verdict": None, "price": cur,
+            "reason": "尾盘中性（%+.1f%% vs 开盘），按常规策略" % (ratio * 100)}
+
+
 def limit_prices(prev_close: float, code: str) -> dict:
     """按板块计算今日涨跌停价（A股制度：主板±10% / 创业板科创板±20% / 北交所±30%）。
 
@@ -224,3 +257,39 @@ def strategy_filter(sig: dict, quote: dict,流通市值亿: float = None) -> dic
     return {"grade": "X", "weight": 0.0,
             "reason": "不满足最优变体（gap%.1f%%/st%d/市值%s），全样本口径仅48.7%%/+0.37%%"
                       % (gap, st, ("%.0f亿" % mc) if mc else "未知")}
+
+
+def late_hold_decision(pos: dict, quote: dict) -> dict:
+    """尾盘（14:45）持仓裁决（2026-08-30 回测落地）。
+
+    实证（高开≥2% 买入的涨停票样本，尾盘状态 → 次日）：
+      尾盘微红（较开盘 0~2% 横盘）→ 次日 +3.01% / 62.9%（14 个月全正）→ 确认持有
+      尾盘深亏（较开盘 <-3%）      → 次日 -0.31% / 44.9%（11/14 个月为负）→ 止损
+      尾盘强拉（>5%）              → 次日仅 +0.62%（透支）→ 收益兑现意愿优先
+    与 sell_decision 的关系：sell_decision 是开盘裁决（断板卖/续板持），
+    本函数是尾盘复核——开盘判断为 HOLD 但尾盘形态崩掉的票，当日 14:45 还能止损，
+    不必死扛到明日开盘（明日开盘卖平均再多亏 0.3~1.2%）。
+
+    返回 {verdict: SELL/HOLD/CONFIRM, price, reason}
+      CONFIRM = 尾盘形态确认 strongest，明日按计划持有（只是确认，不触发操作）
+    """
+    q = quote or {}
+    cur = q.get("price") or 0
+    opn = q.get("open") or 0
+    if not cur or not opn:
+        return {"verdict": "HOLD", "price": 0, "reason": "尾盘复核：无有效行情"}
+    fade = (cur / opn - 1) * 100
+    pnl = (cur / pos["avg_price"] - 1) * 100
+    if fade <= -3:
+        return {"verdict": "SELL", "price": cur,
+                "reason": "尾盘复核：现价较开盘%.2f%%深亏，隔夜负期望（44.9%%/44.9%%），"
+                          "尾盘止损优于明日开盘卖" % fade}
+    if 0 <= fade <= 2:
+        return {"verdict": "CONFIRM", "price": cur,
+                "reason": "尾盘复核：微红%.2f%%横盘不回补，最强过夜形态（62.9%%/+3.01%%），确认持有" % fade}
+    if fade > 5:
+        return {"verdict": "SELL", "price": cur,
+                "reason": "尾盘复核：较开盘+%.2f%%强拉透支隔夜溢价（次日仅+0.62%%），"
+                          "浮盈%.2f%%兑现" % (fade, pnl)}
+    return {"verdict": "HOLD", "price": cur,
+            "reason": "尾盘复核：较开盘%+.2f%%形态中性，维持开盘裁决持有" % fade}

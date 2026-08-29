@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS rec_picks(
   sector_strength REAL DEFAULT NULL, quality REAL DEFAULT NULL,
   turn REAL DEFAULT NULL, auction_pattern TEXT,
   next_open_gap REAL DEFAULT NULL,
+  next_max_runup REAL DEFAULT NULL, next_max_drawdown REAL DEFAULT NULL,
   PRIMARY KEY(date, code)
 );
 CREATE TABLE IF NOT EXISTS global_market(
@@ -86,6 +87,11 @@ def connect():
         ("turn", "ALTER TABLE rec_picks ADD COLUMN turn REAL DEFAULT NULL"),
         ("auction_pattern", "ALTER TABLE rec_picks ADD COLUMN auction_pattern TEXT"),
         ("next_open_gap", "ALTER TABLE rec_picks ADD COLUMN next_open_gap REAL DEFAULT NULL"),
+        # 2026-08-29 st=2 归因配套：次日盘中最大冲高/最大回落（相对 T 收盘价）。
+        # st=2 收益分布右偏（win 38.6% 但 avg +0.69%），需要盘中路径才能区分
+        # 「冲高没落袋」与「全天阴跌」两种亏损，以及验证落袋纪律的可行窗口。
+        ("next_max_runup", "ALTER TABLE rec_picks ADD COLUMN next_max_runup REAL DEFAULT NULL"),
+        ("next_max_drawdown", "ALTER TABLE rec_picks ADD COLUMN next_max_drawdown REAL DEFAULT NULL"),
     ):
         try:
             con.execute(_ddl)
@@ -241,6 +247,10 @@ def backfill_rec_outcomes(con, u):
     大样本回测（13 个月）证实开盘溢价是最强执行层信号：
       首板次日高开>5% → 胜率 85.9% / +6.83%；低开<-2% → 胜率 26.5% / -3.04%。
     落库后可按推荐票分组验证「竞价决策线」的实际执行收益。
+
+    2026-08-29 st=2 归因配套：顺带回填 next_max_runup / next_max_drawdown
+    （T+1 盘中最高/最低相对 T 收盘的百分比）。st=2 收益右偏，需要盘中路径
+    区分亏损形态（冲高回落 vs 全天阴跌）并验证落袋纪律窗口。
     """
     row = con.execute("SELECT MAX(date) FROM rec_history").fetchone()
     if not row or not row[0]:
@@ -258,14 +268,22 @@ def backfill_rec_outcomes(con, u):
         cont = 1 if code in zt_next else 0
         npct = round(b["pct"], 2) if b else None
         ogap = None
+        runup = dd = None
         if b and b.get("o") and b["o"] > 0:
             tb = u.bar(code, prev)
             if tb and tb.get("c") and tb["c"] > 0:
-                ogap = round((b["o"] / tb["c"] - 1) * 100, 2)
+                base = tb["c"]
+                ogap = round((b["o"] / base - 1) * 100, 2)
+                # 盘中路径：最高/最低相对 T 收盘（次日数据含 o/h/l/c）
+                if b.get("h"):
+                    runup = round((b["h"] / base - 1) * 100, 2)
+                if b.get("l"):
+                    dd = round((b["l"] / base - 1) * 100, 2)
         con.execute(
-            "UPDATE rec_picks SET next_continue=?, next_pct=?, next_open_gap=? "
+            "UPDATE rec_picks SET next_continue=?, next_pct=?, next_open_gap=?,"
+            " next_max_runup=?, next_max_drawdown=? "
             "WHERE date=? AND code=?",
-            (cont, npct, ogap, date, code))
+            (cont, npct, ogap, runup, dd, date, code))
         cnt += 1
     con.commit()
     return cnt
