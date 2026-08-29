@@ -1315,6 +1315,15 @@ def run(date_override=None, dedup_close=False):
         for it in (rec.get("all") or []):
             store.upsert_rec_pick(con, date, it["code"], it["name"], it["streak"],
                                   it.get("p_break"), it.get("tag"))
+        # 趋势/动量票也入池追踪（2026-08-29：此前仅连板票有 T+1 回测，
+        # 趋势选股质量从无数据验证；tag 前缀「趋势」/「动量」区分通道，
+        # next_pct 由 backfill_rec_outcomes 按 code+date 统一回填，天然兼容）
+        for it in (rec.get("trend") or []):
+            store.upsert_rec_pick(con, date, it["code"], it["name"], 0, None,
+                                  "趋势·%s" % ((it.get("trend_meta") or {}).get("band") or "入选"))
+        for it in (rec.get("momentum") or []):
+            store.upsert_rec_pick(con, date, it["code"], it["name"], 0, None,
+                                  "动量·%s" % ((it.get("momentum_meta") or {}).get("band") or "入选"))
         con.commit()
         log("  历史连板库已更新（%s：高度 %d / 连板 %d 只）" % (date, maxst, lb_cnt))
     except Exception as e:

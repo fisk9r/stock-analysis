@@ -139,6 +139,9 @@ def historical_stats(con, recent_n=20):
     try:
         rows = con.execute(
             "SELECT date, next_pct FROM rec_picks WHERE next_pct IS NOT NULL "
+            # 2026-08-29 起 rec_picks 混入趋势/动量通道（tag 前缀「趋势·」/「动量·」），
+            # 本指标口径是「连板推荐池」胜率实证，需排除其他通道避免稀释
+            "AND (tag IS NULL OR (tag NOT LIKE '趋势%' AND tag NOT LIKE '动量%')) "
             "ORDER BY date, code").fetchall()
     except Exception:
         return out

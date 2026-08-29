@@ -2159,6 +2159,21 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
             relay.append(it)
         elif st == 1 and tier_ok(it):
             it["tag"] = "低位潜伏"
+            # ── 首板 p_break 校准（2026-08-29 回测确诊：540 条 rec_picks）──
+            # 低位潜伏整体收红率仅 28.8%，细分后真凶是 p_break≥78 的首板：
+            #   p_break<70: 14条 胜率78.6% 均值+3.97%（真金）
+            #   70~78:      21条 57.1% +1.51%
+            #   ≥78:        103条 ~37% ≈0（大样本亏损源）
+            # 标注式处理（与 recveto V1 同思路）：不一刀切拦掉，降权 8% + 警示标，
+            # 排序自然靠后，仍保留挖掘首板次日买点的能力。
+            if pb >= 78 and not it.get("risk_flag"):
+                it["risk_flag"] = "⚠"
+                it.setdefault("risks", [])
+                _pb_risk = "首板断板概率 %.0f%% 偏高，历史胜率 ~37%%，仅轻仓试错" % pb
+                if _pb_risk not in it["risks"]:
+                    it["risks"] = ([_pb_risk] + it["risks"])[:3]
+                it["score"] = round(sc * 0.92, 1)
+                sc = it["score"]
             ambush.append(it)
         elif sc >= 40:
             # 首板但无明确板块合力：仍纳入接力候选，避免推荐板块整体为空
@@ -2707,6 +2722,7 @@ def fuse_recommend(data):
     rec = (data or {}).get("recommend") or {}
     allp = rec.get("all") or []
     trend = rec.get("trend") or []
+    momentum = rec.get("momentum") or []
     seats = (data or {}).get("lhbseats") or {}
     theme_d = (data or {}).get("theme") or {}
     signals_d = (data or {}).get("signals") or {}
@@ -2751,6 +2767,13 @@ def fuse_recommend(data):
         g["industry"] = g["industry"] or it.get("industry")
         band = (it.get("trend_meta") or {}).get("band") or ""
         g["score_parts"].append(("趋势主升", it.get("worth_score") or 0, band))
+    # 强动量 · 连板余波通道并入融合（2026-08-29：此前漏算，连板基因延续票进不了最优解）
+    for it in momentum:
+        c = it["code"]; g = grab(c)
+        g["name"] = g["name"] or it.get("name")
+        g["industry"] = g["industry"] or it.get("industry")
+        mband = (it.get("momentum_meta") or {}).get("band") or ""
+        g["score_parts"].append(("强动量", it.get("worth_score") or 0, mband))
     for c in seat_codes:
         grab(c)["score_parts"].append(("游资席位", 55, "龙虎榜活跃"))
     for c in sig_codes:
@@ -2768,7 +2791,7 @@ def fuse_recommend(data):
     # 代码 → 名称兜底映射：游资席位/龙虎榜命中的票常不在推荐池里，
     # 否则前端会渲染出「名称为空」的一行（实测出现过 `****(—) 综合55分`）。
     _name_map = {}
-    for it in list(allp) + list(trend):
+    for it in list(allp) + list(trend) + list(momentum):
         if it.get("code") and it.get("name"):
             _name_map.setdefault(it["code"], it["name"])
     for row in list((seats or {}).get("top") or []):
@@ -2779,10 +2802,13 @@ def fuse_recommend(data):
             _name_map.setdefault(row["code"], row["name"])
 
     # 机构/主力介入（新增引擎证据：龙虎榜净买 + 大宗机构专用 + 板块主力资金 + 两融）
-    for it in list(allp) + list(trend):
+    # 2026-08-29: 扫描范围补上 momentum 通道（此前连板余波票不做机构证据聚合）
+    _inst_done = set()
+    for it in list(allp) + list(trend) + list(momentum):
         c = it.get("code")
-        if not c:
+        if not c or c in _inst_done:
             continue
+        _inst_done.add(c)
         if any(p[0] == "机构介入" for p in agg.get(c, {}).get("score_parts", [])):
             continue
         ev = institution_evidence(c, data, industry=it.get("industry"))
