@@ -2006,7 +2006,7 @@ def auction_discipline(streak):
             "basis": "全样本13个月：高度票次日胜率64%~82%，高开延续性显著；低开<-2%胜率仅17~38%"}
     return {
         "rule": "高开≥2%跟进 / 低开≤-2%放弃 / 平开±2%观望等方向",
-        "basis": "全样本13个月：首板次日高开2-5%胜率70.3%、>5%达85.9%；低开<-2%仅26.5%"}
+        "basis": "本系统367条历史推荐实测：高开≥2%组胜率67.4%/+4.08%（全量仅+0.93%），低开<-2%组-2.55%——决策线把期望收益提升4倍"}
 
 
 def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=None, hist=None, relay_info=None):
