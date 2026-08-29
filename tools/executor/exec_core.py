@@ -123,12 +123,19 @@ def realtime_quote(codes: list, timeout: int = 10) -> dict:
         full = var.split("_")[-1]  # sh600000
         code = full[2:]
         try:
-            # 腾讯字段：1=名称 2=代码 3=现价 4=昨收 5=今开
+            # 腾讯字段：1=名称 2=代码 3=现价 4=昨收 5=今开 44=流通市值(亿) 45=总市值(亿)
+            mc = 0.0
+            if len(fields) > 44:
+                try:
+                    mc = float(fields[44] or 0)
+                except ValueError:
+                    mc = 0.0
             out[code] = {
                 "name": fields[1],
                 "price": float(fields[3] or 0),
                 "prev_close": float(fields[4] or 0),
                 "open": float(fields[5] or 0),
+                "float_mv": mc,  # 流通市值（亿元）
             }
         except (ValueError, IndexError):
             continue
