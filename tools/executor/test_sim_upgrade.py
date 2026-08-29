@@ -72,7 +72,14 @@ import broker_sim
 # 用临时库避免污染真实 sim.db
 tmpdb = os.path.join(EXE, "sim_test.db")
 if os.path.exists(tmpdb):
-    os.remove(tmpdb)
+    try:
+        os.remove(tmpdb)
+    except (PermissionError, OSError) as e:
+        # 2026-08-30：上次运行的 WAL 连接句柄可能未释放，删不掉就换名重建
+        print("(warn) 旧临时库清理失败，换名重跑：%r" % e)
+        tmpdb = os.path.join(EXE, "sim_test2.db")
+        if os.path.exists(tmpdb):
+            os.remove(tmpdb)
 broker_sim.DB_PATH = tmpdb
 b = broker_sim.SimBroker()
 
@@ -121,21 +128,35 @@ if os.path.exists(bak):
     os.remove(bak)
 
 if os.path.exists(tmpdb):
-    os.remove(tmpdb)
+    # 2026-08-30：SQLite 连接未关闭导致 Windows 句柄占用（WinError 32）。
+    # 显式关闭已建实例的连接再删；失败留待下次覆盖（不影响测试结论）。
+    try:
+        b.con.close()
+    except Exception:
+        pass
+    try:
+        os.remove(tmpdb)
+    except PermissionError as e:
+        print("(warn) 临时库清理失败（不影响测试结论）：%r" % e)
 
 # ============ 4. 回归：sell_decision 7 场景 + strategy_filter ============
 print("\n[4] 原有策略回归")
+# 2026-08-30 修复测试数据缺陷：原 ks 日期 2026-08-25~28（c=10.5+i*0.1 → 10.9~11.2），
+# 与追加的「昨日涨停」K线 2026-08-28（c=12.0）日期重复，导致 list 里同日两根、
+# sell_decision 向前扫描取到错误的「昨日」（c=11.3 那根 pct=6.19% 未涨停 → 误判断板）。
+# 改为 2026-08-22~25 四根铺垫 + 2026-08-26 昨日涨停（c=12.0, prev2=11.2 → +7.1%...
+# 仍不够 9.9%，所以直接把昨日收盘抬到 12.4：12.4/11.2-1=10.7% ≥9.9% 判涨停）。
 ks = [{"d": "2026-08-2%d" % i, "o": 10 + i * 0.1, "c": 10.5 + i * 0.1,
-       "h": 10.8 + i * 0.1, "l": 9.9 + i * 0.1} for i in range(5, 9)]
-# 昨日涨停场景
-ks2 = ks + [{"d": "2026-08-28", "o": 11.0, "c": 12.0, "h": 12.0, "l": 10.9}]
-pos = {"code": "600000", "name": "x", "buy_date": "2026-08-28", "avg_price": 11.5,
+       "h": 10.8 + i * 0.1, "l": 9.9 + i * 0.1} for i in range(2, 6)]
+# 昨日涨停场景（昨日=2026-08-26，收盘 12.4，前收 11.2 → +10.71% 涨停）
+ks2 = ks + [{"d": "2026-08-26", "o": 11.3, "c": 12.4, "h": 12.4, "l": 11.2}]
+pos = {"code": "600000", "name": "x", "buy_date": "2026-08-26", "avg_price": 11.9,
        "volume": 300, "streak": 3}
-q = {"open": 12.5, "price": 12.6, "prev_close": 12.0}
-r = strategy.sell_decision(pos, q, ks2, today="2026-08-29")
+q = {"open": 12.5, "price": 12.6, "prev_close": 12.4}
+r = strategy.sell_decision(pos, q, ks2, today="2026-08-27")
 ck("续板HOLD", r["verdict"] == "HOLD", str(r))
-q = {"open": 12.5, "price": 12.0, "prev_close": 12.0}
-r = strategy.sell_decision(pos, q, ks2, today="2026-08-29")
+q = {"open": 12.5, "price": 12.0, "prev_close": 12.4}
+r = strategy.sell_decision(pos, q, ks2, today="2026-08-27")
 ck("高开低走SELL", r["verdict"] == "SELL", str(r))
 sf = strategy.strategy_filter({"open_gap": 6, "streak": 4}, {}, 100)
 ck("A级通过", sf["grade"] == "A")

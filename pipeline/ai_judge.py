@@ -141,8 +141,9 @@ def _openai_chat(base_url, api_key, model, prompt, system, timeout, temperature=
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": prompt}]
 
-    def _do(use_rf, use_extra):
-        payload = {"model": model, "temperature": temperature, "messages": messages}
+    def _do(use_rf, use_extra, temp=None):
+        payload = {"model": model, "temperature": temp if temp is not None else temperature,
+                   "messages": messages}
         if max_tokens:
             payload["max_tokens"] = max_tokens
         if use_rf:
@@ -166,21 +167,30 @@ def _openai_chat(base_url, api_key, model, prompt, system, timeout, temperature=
 
     # 重试矩阵（2026-08-27）：429 退避重试；400/422 可能是不支持 response_format
     # 或 thinking 字段，逐级去掉再试——保证"换脑保底链"在最弱环境下也能出结果。
+    # 2026-08-30：400 错误体打印 + temperature 校正重试（kimi-k2.6 等思考模型
+    # 只接受 temperature=1；config 预设已写对，但 config 覆盖/未来 preset 变更
+    # 可能带入非法 temperature——实测报 "invalid temperature: only 1 is allowed"）。
     last = None
     combos = [(True, True), (False, True), (False, False), (False, False)]
+    temp_fix = None  # 2026-08-30：temperature 降级标志（None=未触发；1=已降级）
     for attempt, (use_rf, use_extra) in enumerate(combos):
         try:
-            return _do(use_rf, use_extra)
+            return _do(use_rf, use_extra, temp=temp_fix)
         except urllib.error.HTTPError as e:
             last = e
             # 诊断增强（2026-08-29）：400/401/403 时打印服务端错误体，
             # CF/OpenAI 兼容端点的 errors 数组能直接指出权限或参数问题。
-            if e.code in (400, 401, 403, 422):
-                try:
-                    body = e.read().decode("utf-8", "ignore")[:600]
+            try:
+                body = e.read().decode("utf-8", "ignore")[:600]
+                if e.code in (400, 401, 403, 422):
                     print("[ai_judge] HTTP %d 错误体: %s" % (e.code, body))
-                except Exception:
-                    pass
+            except Exception:
+                body = ""
+            # temperature 非法（部分模型只允许 1）：自动降级为 temperature=1 重发
+            if e.code == 400 and "temperature" in (body or "").lower() \
+                    and temp_fix != 1 and attempt < len(combos) - 1:
+                temp_fix = 1
+                continue
             if e.code == 429 and attempt < len(combos) - 1:
                 time.sleep(3 * min(attempt + 1, 3))
                 continue
@@ -295,16 +305,56 @@ def chat(name, prompt, system=None, model=None, timeout=40):
 _RETRYABLE_HINTS = ("timeout", "timed out", "urlopen error", "429", "500", "502",
                     "503", "504", "10060", "10054", "connection", "temporarily")
 
+# 2026-08-30 实测（zhipu coding 端点 429 body）："您已达到每周/每月使用上限，
+# 您的限额将在 2026-09-03 重置" —— 配额耗尽重试毫无意义（每次白等 ~9s），
+# 必须识别后立即换下一家。同类：kimi "max RPM: 3"（瞬时，可短退避重试）。
+_QUOTA_HINTS = ("每周", "每月", "使用上限", "重置", "quota", "billing",
+                "balance", "余额", "arrears", "exceeded your")
+
+
+def _err_body(e):
+    """尽量取 HTTPError 的响应体文本（诊断配额/限流差异的关键）。"""
+    try:
+        return (e.read().decode("utf-8", "ignore") or "")
+    except Exception:
+        return ""
+
+
+def _is_quota_exhausted(e):
+    """配额/余额耗尽类 429：重试无意义，直接换模型。"""
+    if not isinstance(e, urllib.error.HTTPError) or e.code != 429:
+        return False
+    body = _err_body(e)
+    return any(k in body for k in _QUOTA_HINTS)
+
+
+def _rpm_backoff(e):
+    """从 429 body 提取建议等待秒数（kimi: 'please try again after 1 seconds'）。"""
+    import re as _re
+    m = _re.search(r"after\s+(\d+(?:\.\d+)?)\s*seconds", _err_body(e))
+    if m:
+        return min(float(m.group(1)) + 1.0, 20.0)
+    return None
+
 
 def _is_retryable(e):
-    """瞬时故障（超时/限流/网关/连接重置）可重试；鉴权/参数错误重试无意义。"""
-    s = repr(e).lower()
+    """瞬时故障（超时/限流/网关/连接重置）可重试；鉴权/参数/配额错误重试无意义。"""
+    if _is_quota_exhausted(e):
+        return False
+    s = repr(e).lower() + _err_body(e).lower()
     return any(k in s for k in _RETRYABLE_HINTS)
 
 
 def chat_retry(name, prov, prompt, system=None, timeout=60, max_tokens=None,
                tries=2, gap=3):
-    """带瞬时错误重试的单接口调用。鉴权/参数类错误不重试直接抛。"""
+    """带瞬时错误重试的单接口调用。
+
+    2026-08-30 升级（真实故障演练结论）：
+      · 配额耗尽 429（body 含「使用上限/quota/余额」）→ 立即抛，换下一家；
+      · RPM 限流 429（body 含 'after N seconds'）→ 按服务端建议秒数退避重试
+        （kimi-k2.6 免费 key 限 RPM=3，固定 3s 退避实测不够）；
+      · 其余瞬时故障按 gap 线性退避；鉴权/参数类不重试直接抛。
+    """
     last = None
     for i in range(tries):
         try:
@@ -315,9 +365,10 @@ def chat_retry(name, prov, prompt, system=None, timeout=60, max_tokens=None,
             if not _is_retryable(e):
                 raise
             if i + 1 < tries:
-                print("[ai_judge] %s 瞬时故障（超时/限流），%ds 后重试（%d/%d）：%s"
-                      % (name, gap, i + 1, tries - 1, repr(e)))
-                time.sleep(gap)
+                wait = _rpm_backoff(e) or gap
+                print("[ai_judge] %s 瞬时故障（超时/限流），%.0fs 后重试（%d/%d）：%s"
+                      % (name, wait, i + 1, tries - 1, repr(e)[:120]))
+                time.sleep(wait)
     raise last
 
 
@@ -398,7 +449,13 @@ def judge(data):
             if nv:
                 verdicts.append(nv)
         except Exception as e:
-            print("[ai_judge] %s 调用失败（含重试），跳过：%s" % (name, repr(e)))
+            # 2026-08-30：配额类 429 打上明确标记（每周/月上限，等重置也没用），
+            # 便于日志直接读出「为什么这家今天没参与共识」。
+            if _is_quota_exhausted(e):
+                print("[ai_judge] %s 配额耗尽（周/月上限），今日跳过：%s"
+                      % (name, _err_body(e)[:120]))
+            else:
+                print("[ai_judge] %s 调用失败（含重试），跳过：%s" % (name, repr(e)))
 
     if not verdicts:
         return None

@@ -192,7 +192,11 @@ def market_gate(data: dict) -> dict:
 def auction_gate(sig: dict, quote: dict) -> dict:
     """竞价决策线裁决：高开≥2%跟进 / 低开≤-2%放弃 / 平开观望。
 
-    st>=3 高度票：高开≥2% 积极跟进（同阈值，但备注不同）。
+    2026-08-30 同步引擎归因结论：st=2 二板接力的弱高开（2-5%）历史胜率仅
+    14.3% / -2.35%（rec_picks 44 条实测，全样本同桶 +2.26% 显著反向），
+    gap≥5% 子桶才正常（66.7% / +5.84%）→ st=2 门槛收紧到 5%，
+    与 engine.auction_discipline 保持一致。
+
     返回 {code, name, verdict: BUY/WATCH/ABORT, open_gap, reason}
     """
     q = quote.get(sig["code"]) or {}
@@ -201,6 +205,16 @@ def auction_gate(sig: dict, quote: dict) -> dict:
     if not prev_close or not cur_open:
         return dict(sig, verdict="ABORT", open_gap=None, reason="无有效行情")
     gap = (cur_open / prev_close - 1) * 100
+    if (sig.get("streak") or 0) == 2:
+        # 二板接力只认强确认（2-5% 弱高开是派发陷阱）
+        if gap >= 5:
+            return dict(sig, verdict="BUY", open_gap=round(gap, 2),
+                        reason="st=2强高开%.2f%%≥5%%（二板只认强确认：gap≥5%%胜率66.7%%/2-5%%仅14.3%%）" % gap)
+        if gap <= -2:
+            return dict(sig, verdict="ABORT", open_gap=round(gap, 2),
+                        reason="st=2低开%.2f%%≤-2%%，弱势确认，回避" % gap)
+        return dict(sig, verdict="WATCH", open_gap=round(gap, 2),
+                    reason="st=2高开仅%.2f%%（<5%%），弱高开接二板历史胜率14%%，观望" % gap)
     if gap >= 2:
         return dict(sig, verdict="BUY", open_gap=round(gap, 2),
                     reason="高开%.2f%%≥2%%，强势确认（13个月回测胜率70%%+）" % gap)
@@ -214,12 +228,15 @@ def auction_gate(sig: dict, quote: dict) -> dict:
 def late_gate(sig: dict, quote: dict) -> dict:
     """尾盘确认门（14:45 版，2026-08-30 回测落地）。
 
-    实证（market.db 309 个交易日全市场涨停票样本，前提：当日高开≥2% 通过竞价纪律）：
+    实证（market.db 309 个交易日全市场涨停票样本，前提：当日通过竞价纪律）：
       14:45 现价在开盘价上方 0~2%（微红横盘不回补）→ 次日 +3.01% / 胜率 62.9%
         （1623 样本，14 个月逐月全正 +2.28%~+4.11%——最强过夜形态）
       现价低于开盘 3% 以上（尾盘深亏）  → 次日 -0.31% / 胜率 44.9%（11/14 个月为负）
       现价高于开盘 5% 以上（尾盘强拉）  → 次日仅 +0.62%（尾盘大拉透支隔夜溢价）
     结论：尾盘通道的正确形态是「确认横盘强」而非「追尾盘拉升」。
+
+    2026-08-30：st=2 的开盘溢价门槛同步收紧到 5%（弱高开接二板是派发陷阱，
+    与 auction_gate 同口径），其余高度维持 ≥2%。
 
     返回 {code, name, verdict: BUY/WATCH/ABORT, open_gap, day_fade, reason}
     day_fade = 现价相对今日开盘的偏移 %（正=红盘，负=走弱）
@@ -233,9 +250,11 @@ def late_gate(sig: dict, quote: dict) -> dict:
     gap = (opn / prev_close - 1) * 100
     fade = (cur / opn - 1) * 100
     base = dict(sig, open_gap=round(gap, 2), day_fade=round(fade, 2))
-    if gap < 2:
+    min_gap = 5 if (sig.get("streak") or 0) == 2 else 2
+    if gap < min_gap:
         return dict(base, verdict="ABORT",
-                    reason="开盘溢价%.2f%%<2%%，尾盘通道只处理竞价纪律通过的票" % gap)
+                    reason="开盘溢价%.2f%%<%d%%（st=%s门槛），尾盘通道只处理竞价纪律通过的票"
+                           % (gap, min_gap, sig.get("streak") or 0))
     if fade <= -3:
         return dict(base, verdict="ABORT",
                     reason="尾盘较开盘%.2f%%深亏，次日负期望（胜率44.9%%），不接飞刀" % fade)

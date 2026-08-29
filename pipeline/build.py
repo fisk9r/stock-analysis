@@ -953,6 +953,18 @@ def run(date_override=None, dedup_close=False):
         log("  推荐胜率失败（不影响主流程）：%r" % e)
         data["recperf"] = None
 
+    # ---- 推荐多维归因（2026-08-30：st=2 持续监控 + 特征列分桶 + 落袋挽回测算）----
+    try:
+        import recattr
+        data["rec_attr"] = recattr.build(con)
+        _ra = data["rec_attr"]
+        if _ra:
+            for ln in recattr.summary_lines(_ra)[:3]:
+                log("  归因：%s" % ln)
+    except Exception as e:
+        log("  推荐归因失败（不影响主流程）：%r" % e)
+        data["rec_attr"] = None
+
     # ---- 风格切换历史回测（纯本地）----
     try:
         data["style_switch"] = stylereg.switch_backtest(u)
