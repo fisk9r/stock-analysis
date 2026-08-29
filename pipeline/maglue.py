@@ -73,8 +73,10 @@ def scan(u, date, topn=14):
         ma_lo, ma_hi = min(mas_now), max(mas_now)
         spread = ma_hi / ma_lo - 1
 
-        # 近20日振幅（蓄势判断）
-        seg = bs[-20:]
+        # 近20日振幅（蓄势判断）；过滤零值行防除零（停牌股 l=0，2026-08-29）
+        seg = [b for b in bs[-20:] if (b.get("l") or 0) > 0 and (b.get("h") or 0) > 0]
+        if len(seg) < 5:
+            continue
         amp = (max(b["h"] for b in seg) / min(b["l"] for b in seg) - 1)
 
         # 启动迹象判定

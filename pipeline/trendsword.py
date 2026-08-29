@@ -41,6 +41,9 @@ def _check(bs, closes, i):
     mas = _mas_at(closes, i)
     if len(mas) < 2:
         return None, 0
+    # 防御：closes 可能比 bs 短（历史上零收盘价行被过滤导致索引错位），越界直接放弃
+    if i - 1 >= len(closes) or closes[i - 1] is None:
+        return None, 0
 
     if pct <= ZHABAN_PCT and c < o:
         broken = [m for m, v in mas.items() if m in (5, 10, 20) and c < v < closes[i - 1]]

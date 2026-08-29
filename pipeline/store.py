@@ -109,9 +109,27 @@ def parse_kline(code, klines):
 
 
 def upsert_bars(con, tuples):
+    # 源头清洗（2026-08-29）：停牌/接口空值日会写出全零行（实测 *ST康佳A、湖南黄金
+    # 等停牌日 o/h/l/c 全 0，另有 close 保留但 o/h/l 全 0 的停牌占位行），
+    # 曾致 maglue 除零、trendsword 索引错位越界、data_guard 报「价格异常」。
+    # 收盘价<=0 或 最高/最低<=0 一律视为无效行拒收。
+    tuples = [t for t in tuples
+              if (t[3] or 0) > 0 and (t[4] or 0) > 0 and (t[5] or 0) > 0]
     con.executemany(
         "INSERT OR REPLACE INTO bars(code,date,open,close,high,low,vol,amount,amp,pct,chg,turn)"
         " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", tuples)
+
+
+def purge_zero_bars(con):
+    """清洗历史库中已存在的无效行（自愈：CI 每次构建启动时调用）。"""
+    try:
+        cur = con.execute(
+            "DELETE FROM bars WHERE close<=0 OR close IS NULL "
+            "OR high<=0 OR low<=0 OR high IS NULL OR low IS NULL")
+        con.commit()
+        return cur.rowcount
+    except Exception:
+        return 0
 
 
 def load_bars(con, codes=None, since=None):

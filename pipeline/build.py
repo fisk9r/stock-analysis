@@ -302,6 +302,14 @@ def run(date_override=None, dedup_close=False):
             log("  数据修复：修正 %d 处量纲异常" % nfix)
     except Exception as e:
         log("  数据修复跳过（不影响主流程）：%r" % e)
+    # 全零 K 线自愈清洗（2026-08-29：停牌股 o/h/l/c 全 0 曾致 maglue 除零/
+    # trendsword 越界/完整性告警；upsert_bars 源头已拒收，这里清历史存量）
+    try:
+        _nz = store.purge_zero_bars(con)
+        if _nz:
+            log("  清洗全零K线 %d 行" % _nz)
+    except Exception as e:
+        log("  全零K线清洗跳过（不影响主流程）：%r" % e)
     log("载入行情库 ...")
     u = engine.Universe(con, days=270)
     log("覆盖 %d 只个股 / %d 个交易日" % (len(u.bars), len(u.dates)))
