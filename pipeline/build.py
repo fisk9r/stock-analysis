@@ -534,12 +534,51 @@ def run(date_override=None, dedup_close=False):
             if _ma20 and _ma60 and _ma20 > _ma60 and float(_bs[-1]["c"]) > _ma20:
                 _ind = next((n for _, n, k in (code2boards.get(_code) or []) if k == "industry"), "—")
                 _name = _stt.get("name") or (u.stocks.get(_code, {}) or {}).get("name") or _code
+                # 延续票也补 trend_meta：_band_pick 按 trend_meta.band 配额挑选，
+                # 缺失会被过滤掉导致「历史延续 0 只」（2026-08-29 实测 bug：19 只
+                # 历史票 13 只符合延续条件却全部展示不出来）。
+                _last5 = [b.get("pct") or 0 for b in _bs[-5:]]
+                _avg5 = sum(_last5) / 5.0
+                _ma5 = sum(_closes[-5:]) / 5.0
+                _ma10 = sum(_closes[-10:]) / 10.0
+                _align = _ma5 > _ma10 > _ma20
+                if _avg5 >= 3.0:
+                    _band = "主升强趋势"
+                elif _avg5 >= 2.0:
+                    _band = "稳健上行"
+                else:
+                    _band = "趋势平缓"
+                _kscore = 0.0
+                try:
+                    from kronos_lite import annotate_bars as _kab2
+                except Exception:
+                    try:
+                        from pipeline.kronos_lite import annotate_bars as _kab2
+                    except Exception:
+                        _kab2 = None
+                if _kab2:
+                    _kbars = [{"d": b.get("d"), "o": b.get("o"), "h": b.get("h"),
+                               "l": b.get("l"), "c": b.get("c"), "v": b.get("v")}
+                              for b in _bs[-30:]]
+                    _kscore = _kab2(_kbars)
                 _p = {"code": _code, "name": _name, "streak": 0, "industry": _ind,
                       "close": round(float(_bs[-1]["c"]), 2),
                       "float_mv": (u.stocks.get(_code, {}) or {}).get("float_mv"),
                       "turn": round(float(_bs[-1].get("turn") or 0), 2),
                       "quality": 0, "p_continue": 0, "demon": 0,
-                      "score": 0, "worth_score": 0,
+                      # 延续票无当日评分引擎打分，按 band 给基准分（band 顺序内
+                      # 再以 kronos_score 微调排序），否则 score=0 永远垫底。
+                      "score": {"主升强趋势": 62.0, "稳健上行": 55.0,
+                                "趋势平缓": 48.0}.get(_band, 45.0) + _kscore * 0.1,
+                      "worth_score": {"主升强趋势": 58.0, "稳健上行": 52.0,
+                                      "趋势平缓": 45.0}.get(_band, 42.0) + _kscore * 0.1,
+                      "trend_meta": {
+                          "ma5": round(_ma5, 2), "ma10": round(_ma10, 2),
+                          "ma20": round(_ma20, 2), "align": bool(_align),
+                          "avg_daily": round(_avg5, 2), "band": _band,
+                          "continued_hist": True,
+                          "kronos_score": round(_kscore, 1),
+                      },
                       "is_new": False, "continued": True,
                       "first_seen": _stt["first_seen"], "times": _stt["times"] + 1}
                 _bd = zones.band_levels(_bs)

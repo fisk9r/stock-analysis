@@ -52,7 +52,23 @@ def parse_tencent_quote_fields(fields: list) -> dict:
         "float_mv": _f(44),          # 流通市值（亿）
         "total_mv": _f(45),          # 总市值（亿）
         "pb": _f(46),                # 市净率
+        # 2026-08-29 第二轮融入（a-stock-data SKILL.md §1.2 实测校准表）：
+        "limit_up": _f(47),          # 涨停价
+        "limit_down": _f(48),        # 跌停价
+        "vol_ratio": _f(49),         # 量比（现量/近5日均量，>1 放量）
+        "pe_static": _f(52),         # 市盈率（静）
     }
+
+
+def is_stale_quote(price: float, prev_close: float, volume_hand: float) -> bool:
+    """僵尸报价检测（a-stock-data 实测：北交所老号段/长期停牌票）。
+
+    成交量==0 且 最新价==昨收 → 报价非当日真实成交，行情层应跳过。
+    """
+    try:
+        return float(volume_hand) == 0 and float(price) == float(prev_close)
+    except (TypeError, ValueError):
+        return False
 
 
 def turnover_flag(turnover: float, streak: int) -> dict:
@@ -76,9 +92,27 @@ def turnover_flag(turnover: float, streak: int) -> dict:
 
 # ---- a-stock-data 数据源结论备查（防止后续重走弯路）----
 SOURCE_NOTES = {
-    "tencent": "主源。qt.gtimg.cn 无 CORS/封 IP 问题；fqkline 前复权日 K 稳定。",
+    "tencent": "主源。qt.gtimg.cn 无 CORS/封 IP 问题；fqkline 前复权日 K 稳定。"
+               "GBK 编码 ~ 分隔 88 字段；43=振幅(勿信旧教程的PB)、46=PB、"
+               "44=流通市值/45=总市值（东财 f116总/f117流 方向相反勿混用）。",
     "mootdx": "TCP 7709 通达信协议，不封 IP，a-stock-data 首选备用；需 mootdx 库（未引入）。",
     "eastmoney": "push2 高频封 IP，仅限流兜底（em_get 单次 + sleep）；本项目 em_api 已内置降级。",
     "sina": "无 CORS / JSONP 限制问题但字段少；仅用于交叉校验（multi_source.py）。",
     "baostock": "免费但延迟一天且需登录 token；不适合盘后实时管线。",
+    # 2026-08-29 第二轮调研补充（潜在新数据源，未接入仅备查）：
+    "ths_hot": "同花顺热点 zx.10jqka.com.cn/event/api/getharden/date/{date}/...："
+               "当日强势股+题材归因 reason（人工标注 tags），15:30 后更新，仅 UA 零鉴权。"
+               "可作题材归因备源，与现有 theme.py STOPLIST 方案互补。",
+    "ths_hsgt": "同花顺北向 data.hexin.cn/market/hsgtApi/method/dayChart/：需 Host+Referer；"
+                "hgt 分钟序列可用、sgt 收紧后失真；权威北向走 HKEX DailyStat js。"
+                "东财北向 2024-08 断供后的替代路径，本项目暂用 etfflow/margin 已覆盖。",
+    "cls_telegraph": "财联社电报 v1/roll/get_roll_list：sign=md5(sha1(排序query)) 本地可算零 key；"
+                     "旧 nodeapi 2026-05 已死。可作新闻层备源。",
+    "cyq": "东财无公开 CYQ 接口（push2/push2his cyq/get 实测 404）；"
+           "筹码分布需 OHLC+换手率本地网格推演，初始播种=首日窗口全流通盘（否则全零起步"
+           "会把存量持仓一笔勾销）。本项目已有筹码获利盘（均值 42.9% 口径），如需 90-70 "
+           "成本区间可按此思路扩展。",
+    "limit_up_pool": "东财打板层 push2ex 四池（涨停/炸板/跌停/昨涨停）：连板数/封板资金/"
+                     "炸板次数/晋级率。本项目 ladder/limit_ups 已用自有 K 线口径计算，"
+                     "如需封板资金/炸板次数等盘口细节可引入（走 em_get 限流）。",
 }

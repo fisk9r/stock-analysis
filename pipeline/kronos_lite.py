@@ -8,6 +8,8 @@
 
   1) 序列自相似 / 波动结构特征（Kronos 的 tokenizer 本质是 K 线形态离散化）：
      - 幅度序列 AMPl = ln(H/L)、实体占比、上下影占比的近 N 日统计
+     - 多周期波动率结构 vol_regime（5日/20日收益标准差比，z-score 预处理思想蒸馏）
+     - 结构自相似度 self_sim（近5日同向 K 线占比，形态离散化重复编码的代理）
   2) 连续 N 日「下一根 K 线与上一根的增益结构」：动量持续性
      （对应 Kronos 预测的「下一根 K 线相对上一根的相对变化」）
   3) 量价配合的持续度：放量上行/缩量回调的健康结构打分
@@ -111,7 +113,35 @@ def kronos_features(bars: list) -> dict:
                 dn_rs.append(r)
     pv = _mean(up_rs) - _mean(dn_rs)
     feats["pv_health"] = round(pv, 3)
+
+    # ---- 5) 多周期波动率结构（Kronos z-score 预处理思想的蒸馏，2026-08-29 二轮）----
+    # Kronos 预处理：逐列 z-score（窗口内 mean/std，clip ±5）。这里蒸馏为：
+    # 短窗口(5日)收益波动 vs 长窗口(20日)收益波动的比值 → 波动稳定性。
+    # 稳定趋势（ratio<1.3）比波动放大（ratio>2）更值得跟。
+    rets5 = rets[-5:] if len(rets) >= 5 else rets
+    sd20 = _std(rets)
+    sd5 = _std(rets5)
+    feats["vol_regime"] = round(sd5 / (sd20 + 1e-9), 3) if sd20 > 0 else 1.0
+
+    # ---- 6) 结构自相似度（Kronos tokenizer「K线形态离散化」思想的代理）----
+    # 近5日 K 线的平均「实体方向一致率」：连续同向 K 线占比越高，形态越自相似
+    # （tokenizer 意义上重复编码同一 token），趋势延续概率越高。
+    if len(rets) >= 5:
+        same = sum(1 for i in range(1, len(rets))
+                   if (rets[i] > 0) == (rets[i - 1] > 0) and rets[i] != 0)
+        feats["self_sim"] = round(same / (len(rets) - 1), 3)
+    else:
+        feats["self_sim"] = 0.0
     return feats
+
+
+def _std(xs):
+    """总体标准差（ddof=0，与 Kronos 预处理一致）。"""
+    xs = [x for x in xs if x is not None]
+    if len(xs) < 2:
+        return 0.0
+    m = sum(xs) / len(xs)
+    return math.sqrt(sum((x - m) ** 2 for x in xs) / len(xs))
 
 
 def kronos_score(feats: dict) -> float:
@@ -135,6 +165,16 @@ def kronos_score(feats: dict) -> float:
     s -= _clamp((feats.get("up_shadow") or 0) - 0.15, 0, 0.25) / 0.25 * 10
     if (feats.get("amp_trend") or 0) > 0.004:        # 近5日波动显著放大
         s -= 5
+    # 2026-08-29 二轮新增：波动稳定性 + 结构自相似度
+    # vol_regime < 1.3（5日波动未显著放大）→ 加分；> 2 → 扣分（行情转入剧烈分歧）
+    vr = feats.get("vol_regime") or 1.0
+    if vr < 1.3:
+        s += 5
+    elif vr > 2.0:
+        s -= 5
+    # self_sim 同向 K 线占比高 → 趋势形态自相似，延续性好（上限 5 分）
+    ss = feats.get("self_sim") or 0.0
+    s += _clamp((ss - 0.4) / 0.4, 0, 1) * 5
     return round(_clamp(s, 0, 100), 1)
 
 
