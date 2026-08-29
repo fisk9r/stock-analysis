@@ -1996,6 +1996,11 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
     relay_secs = {x["name"] for x in (relay_info or {}).get("relay", [])}
     items = []
     for r in limit_ups:
+        # ST/退市整理票不进推荐（2026-08-29：ST如意漏进低位潜伏确诊）。
+        # 涨停画像/微观结构/连板计划等市场统计仍用完整 lus，仅推荐分层排除。
+        _nm = r.get("name") or ""
+        if "ST" in _nm.upper() or "退" in _nm:
+            continue
         rk = rmap.get(r["code"]) or {}
         dm = dmap.get(r["code"]) or {}
         sec = smap.get(r["industry"]) or {}
@@ -2189,6 +2194,10 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
         for it in items[:8]:
             it.setdefault("tag", "主线接力")
             relay.append(it)
+    # 空标签兜底（2026-08-29：实测 rec.all 有 11 只 tag=undefined）——
+    # 首板无板块合力且 sc<40 不落任何桶，给「观察」中性标签，前端不再显示空白。
+    for it in items:
+        it.setdefault("tag", "观察")
     # ── 分桶内重排序（2026-08-28 用户反馈排序错乱）──
     # 分组循环前 items 虽按原分降序，但循环中 WARN 负反馈会把 score×0.92 降权，
     # 桶内顺序不再等于新分降序 → 每个桶输出前必须按最终 score 重排一次。
