@@ -496,10 +496,12 @@ def generate_narrative_backup(data, preferred=None):
         nv = None
         # 内重试：Kimi 等国产模型的 json_mode 偶发抽风（返回非 JSON / 截断），
         # 首次拿到响应但解析为 None 时，再试一次往往成功；真正抛异常（429/超时）才跳下一接口。
+        # 超时 180s（2026-08-29 CI run 33258533163 实测）：glm-4.7-flash 是 Reasoning
+        # 模型，CI 里 90s 读超时——token 权限其实已通（之前 400 已消失），纯粹是慢。
         for _try in range(2):
             try:
                 raw = _chat_once(name, providers[name], prompt, system=system,
-                                timeout=90, max_tokens=700)
+                                 timeout=180, max_tokens=700)
             except Exception as e:
                 print("[ai_judge] 备用叙事 %s 失败，尝试下一接口：%s" % (name, repr(e)))
                 break
