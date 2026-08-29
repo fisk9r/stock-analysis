@@ -1,0 +1,35 @@
+{
+  "_comment": "执行器配置。account/user_id/passwd 由用户填写；broker 选 sim（模拟盘）或 qmt（miniQMT 实盘）。",
+  "account": {
+    "user_id": "owner",
+    "passwd": "I8Tc9nTyooBxwcmA",
+    "_hint": "线上 data/<user_id>.bin 的解密口令，与站点登录一致"
+  },
+  "broker": "sim",
+  "sim": {
+    "initial_cash": 100000,
+    "impact_cost_pct": 0.1
+  },
+  "qmt": {
+    "qmt_path": "",
+    "account_id": "",
+    "session_id": 0,
+    "_hint": "开通 miniQMT 后填写：qmt_path=QMT userdata_mini 目录；account_id=资金账号"
+  },
+  "risk": {
+    "max_position_pct": 0.15,
+    "max_orders_per_day": 6,
+    "min_trade_amount": 1000,
+    "max_trade_amount": 20000,
+    "daily_loss_stop_pct": -3.0,
+    "enabled": true
+  },
+  "schedule": {
+    "auction_time": "09:26",
+    "_hint": "每天 09:26 竞价结束后执行一轮：拉实时开盘价 -> 决策线裁决 -> 过闸 -> 下单"
+  },
+  "notify": {
+    "serverchan_key": "",
+    "_hint": "可选：ServerChan sendkey，下单后推送回报；留空则只写本地日志"
+  }
+}

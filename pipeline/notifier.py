@@ -1782,6 +1782,19 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         alerts = (hrep or {}).get("alerts") or []
         if hrep and hrep.get("enabled") and alerts:
             _sec("📡 持仓预警", [a for a in alerts[:4] if a])
+    # ---- 尾盘决策通道（2026-08-29）：次日开盘「双确认」清单 ----
+    _ls = data.get("late_session") or {}
+    if _ls.get("watch_tomorrow") or _ls.get("exit_warn"):
+        _ls_rows = []
+        for w in (_ls.get("watch_tomorrow") or [])[:6]:
+            _ls_rows.append("**%s**(%s%s) %s｜次日竞价：高开≥2%%跟进/低开弃"
+                            % (w.get("name"), w.get("streak") and "%d板" % w["streak"] or "",
+                               ("/" + w["tag"] if w.get("tag") else ""),
+                               (w.get("auction_rule") or "")[:0]))
+        for w in (_ls.get("exit_warn") or [])[:3]:
+            _ls_rows.append("⚠ %s 竞价疑似派发 → 次日按弱势预案，低开即弃" % w.get("name"))
+        if _ls_rows:
+            _sec("⏱ 尾盘确认 · 次日竞价双确认", _ls_rows)
     # ---- 收尾纪律条：一句话记住今天怎么干（排版清爽化：结论前置、纪律收尾）----
     _disc = _discipline_line(data, rec)
     if _disc:

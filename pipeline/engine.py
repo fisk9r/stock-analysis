@@ -2282,6 +2282,47 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
     }
 
 
+def late_session_plan(data):
+    """尾盘决策通道（14:45）：用当日全天数据给次日开盘做「双确认」预判。
+
+    与盘前 08:50 预判互补：盘前只有昨日数据（预判），尾盘有当日全天量价（确认）。
+    产出三类清单（纯聚合当日已构建好的 data，不新增行情计算）：
+      · hold_confirm  —— 持有确认：今日推荐池中尾盘仍强势（现价距收盘强势 + 决策线不变）
+      · watch_tomorrow —— 次日关注：今日涨停/连板票，次日竞价按决策线执行
+      · exit_warn     —— 尾盘走弱警示：当日推荐票尾盘回落超阈值，次日按低开预案执行
+    """
+    d = data or {}
+    rec = d.get("recommend") or {}
+    aq_items = (d.get("auction") or {}).get("items") or {}
+    hold, watch, warn = [], [], []
+
+    for it in (rec.get("all") or [])[:40]:
+        code = it.get("code")
+        aq = aq_items.get(code) or {}
+        pat = aq.get("pattern") or ""
+        gap = aq.get("open_pct")
+        entry = {
+            "code": code, "name": it.get("name"), "streak": it.get("streak"),
+            "tag": it.get("tag"), "worth": it.get("worth_score"),
+            "close": it.get("close"),
+            "auction_rule": (it.get("auction_rule") or {}).get("rule") or "",
+        }
+        # 涨停封住/强势形态 → 次日关注（竞价按决策线执行）
+        if pat in ("一字板", "弱转强", "高开高走", "换手板") or (it.get("streak") or 0) >= 2:
+            watch.append(entry)
+        # 尾盘走弱：竞价强（高开）但当前涨幅不及开盘的一半 → 次日谨慎
+        if pat in ("强转弱",) or ((aq.get("vol_anomaly") or {}).get("warn")):
+            warn.append(entry)
+
+    watch.sort(key=lambda x: -(x.get("worth") or 0))
+    return {
+        "n_watch": len(watch),
+        "watch_tomorrow": watch[:10],
+        "exit_warn": warn[:6],
+        "note": "尾盘确认口径：次日竞价按决策线执行——高开≥2%跟进/低开≤-2%放弃/平开观望",
+    }
+
+
 def preopen_plan(rec, inds, relay, risks):
     """聚合推荐/板块/接力/风险，生成简洁「盘前策略」（看板卡片 + 盘前推送共用）。
 

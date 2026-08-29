@@ -735,6 +735,7 @@ def run(date_override=None, dedup_close=False):
         "panic": panic,
         "viz": viz,
         "preopen_plan": plan,
+        "late_session": None,  # 数据 dict 组装完后由下方 late_session_plan 填充
         "demons": demons[:40],
         "demon_templates": [{"code": t["code"], "name": t["name"], "start": t["start"],
                              "gain": t["gain"], "max_streak": t["max_streak"],
@@ -1328,6 +1329,16 @@ def run(date_override=None, dedup_close=False):
     except Exception as e:
         data["integrity"] = {"ok": False, "warnings": ["自检异常：%r" % e]}
         log("  数据完整性自检异常（不影响主流程）：%r" % e)
+
+    # ---- 尾盘决策通道（2026-08-29）：用当日全天数据对次日开盘做双确认预判 ----
+    try:
+        data["late_session"] = engine.late_session_plan(data)
+        _ls = data.get("late_session") or {}
+        log("  尾盘决策：次日关注 %d 只 / 走弱警示 %d 只"
+            % (_ls.get("n_watch") or 0, len(_ls.get("exit_warn") or [])))
+    except Exception as e:
+        data["late_session"] = None
+        log("  尾盘决策失败（不影响主流程）：%r" % e)
 
     # ---- 历史连板库落库：先回填前一日推荐的真实结局，再记录当日状态 ----
     try:
