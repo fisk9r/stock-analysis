@@ -127,13 +127,52 @@ def pick_broker(cfg):
 
 # ---------------- Phase 1：平仓 ----------------
 
-def _act_notify(cfg, title, text):
+def _act_notify(cfg, title, text, dedup_key=None):
     """操作前推送（2026-08-29 用户要求：每次操作前都推送并说明理由）。
-    best-effort：推送失败不阻断交易（推送本身已有失败留痕）。"""
+    best-effort：推送失败不阻断交易（推送本身已有失败留痕）。
+    dedup_key：同日同 key 只推一次（HOLD 类推送冷却，避免重复轰炸）。"""
     try:
+        if dedup_key and not _notify_should_send(dedup_key):
+            _log("推送冷却跳过（今日已推）：%s" % dedup_key)
+            return
         _notify(cfg, title, text)
+        if dedup_key:
+            _notify_mark_sent(dedup_key)
     except Exception as e:
         _log("操作前推送失败（不阻断）：%r" % e)
+
+
+_DEDUP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state",
+                           "notify_dedup.json")
+
+
+def _notify_should_send(key):
+    """同日同 key 只发一次（HOLD 冷却）。状态文件损坏视为可发。"""
+    try:
+        with open(_DEDUP_PATH, encoding="utf-8") as f:
+            st = json.load(f)
+        return st.get("date") != time.strftime("%Y-%m-%d") or key not in (st.get("keys") or [])
+    except Exception:
+        return True
+
+
+def _notify_mark_sent(key):
+    try:
+        os.makedirs(os.path.dirname(_DEDUP_PATH), exist_ok=True)
+        today = time.strftime("%Y-%m-%d")
+        try:
+            with open(_DEDUP_PATH, encoding="utf-8") as f:
+                st = json.load(f)
+        except Exception:
+            st = {}
+        if st.get("date") != today:
+            st = {"date": today, "keys": []}
+        if key not in st["keys"]:
+            st["keys"].append(key)
+        with open(_DEDUP_PATH, "w", encoding="utf-8") as f:
+            json.dump(st, f, ensure_ascii=False)
+    except Exception:
+        pass
 
 
 def run_sells(broker, mode, cfg):
@@ -217,7 +256,8 @@ def run_sells(broker, mode, cfg):
                         % (dec["reason"],
                            ("%.2f" % q.get("price")) if (q and q.get("price")) else "—",
                            p["avg_price"],
-                           ("%.2f%%" % pnl_pct) if pnl_pct is not None else "—"))
+                           ("%.2f%%" % pnl_pct) if pnl_pct is not None else "—"),
+                        dedup_key="HOLD:%s:%s" % (time.strftime("%Y-%m-%d"), p["code"]))
             _log("持有 %s：%s" % (p["code"], dec["reason"]))
     return lines, n_sold
 

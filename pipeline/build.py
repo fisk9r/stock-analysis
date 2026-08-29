@@ -1566,10 +1566,25 @@ def run(date_override=None, dedup_close=False):
                              "trades": dlast.get("trades") or [],
                              "closed": dlast.get("closed") or [],
                              "rejects": dlast.get("rejects") or [],
+                             "decisions": dlast.get("decisions") or [],
                              "summary_line": dlast.get("summary_line") or ""},
                     "curve": curve,
                     "months": [months[k] for k in sorted(months.keys())],
                 }
+                # 心跳新鲜度（2026-08-29 可完善项）：执行器失联/断网/没开机时，
+                # 网站能直接看出「数据不新鲜」而不是误以为没交易。
+                # updated_at 是本机时间字符串；距今超过 26 小时（隔一个交易日）即 stale。
+                try:
+                    import datetime as _dt
+                    _ua = simrev.get("updated_at") or ""
+                    _t = _dt.datetime.strptime(_ua, "%Y-%m-%d %H:%M:%S")
+                    _age_h = (_dt.datetime.now() - _t).total_seconds() / 3600.0
+                    data["sim"]["heartbeat"] = {
+                        "age_hours": round(_age_h, 1),
+                        "stale": _age_h > 26,
+                    }
+                except Exception:
+                    pass
                 log("  模拟盘模块：%d 个交易日（最新 %s，累计 %+.2f%%）"
                     % (len(skeys), dlast.get("date"), dlast.get("total_pct") or 0))
     except Exception as e:

@@ -173,6 +173,14 @@ def _openai_chat(base_url, api_key, model, prompt, system, timeout, temperature=
             return _do(use_rf, use_extra)
         except urllib.error.HTTPError as e:
             last = e
+            # 诊断增强（2026-08-29）：400/401/403 时打印服务端错误体，
+            # CF/OpenAI 兼容端点的 errors 数组能直接指出权限或参数问题。
+            if e.code in (400, 401, 403, 422):
+                try:
+                    body = e.read().decode("utf-8", "ignore")[:600]
+                    print("[ai_judge] HTTP %d 错误体: %s" % (e.code, body))
+                except Exception:
+                    pass
             if e.code == 429 and attempt < len(combos) - 1:
                 time.sleep(3 * min(attempt + 1, 3))
                 continue
@@ -358,7 +366,7 @@ def judge(data):
             if nv:
                 verdicts.append(nv)
         except Exception as e:
-            print("[ai_judge] %s 调用失败，跳过：%r" % (name, e))
+            print("[ai_judge] %s 调用失败，跳过：%s" % (name, repr(e)))
 
     if not verdicts:
         return None
@@ -493,7 +501,7 @@ def generate_narrative_backup(data, preferred=None):
                 raw = _chat_once(name, providers[name], prompt, system=system,
                                 timeout=90, max_tokens=700)
             except Exception as e:
-                print("[ai_judge] 备用叙事 %s 失败，尝试下一接口：%r" % (name, e))
+                print("[ai_judge] 备用叙事 %s 失败，尝试下一接口：%s" % (name, repr(e)))
                 break
             nv = _norm_narrative(raw, providers[name].get("label", name))
             if nv:

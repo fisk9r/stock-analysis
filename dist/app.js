@@ -3968,12 +3968,18 @@
       var totalPct = L.total_pct;
       var dayPnl = L.day_realized_pct;
       var initCash = S.initial_cash || 100000;
+      /* 心跳新鲜度（2026-08-29）：执行器失联时能一眼看出数据不新鲜 */
+      var hb = S.heartbeat || null;
+      var hbNote = '';
+      if (hb && hb.stale) {
+        hbNote = '⚠️ 执行器心跳 ' + f(hb.age_hours) + ' 小时前——可能没开机/断网，数据不新鲜';
+      }
       /* KPI 行 */
       h += '<div class="grid g4" style="margin-bottom:14px">' +
         kpi('总资产', '¥' + Math.round(L.total || 0).toLocaleString(), '初始 ' + Math.round(initCash / 10000) + ' 万 · 累计 ' + (totalPct >= 0 ? '+' : '') + f(totalPct) + '%', (totalPct >= 0 ? 'up' : 'down')) +
         kpi('当日盈亏', (dayPnl != null ? (dayPnl >= 0 ? '+' : '') + f(dayPnl) + '%' : '—'), '已实现（费后口径）', (dayPnl > 0 ? 'up' : (dayPnl < 0 ? 'down' : ''))) +
         kpi('可用现金', '¥' + Math.round(L.cash || 0).toLocaleString(), '持仓市值 ¥' + Math.round(L.market_value || 0).toLocaleString(), '') +
-        kpi('持仓中', n2(L.n_holding) + ' 笔', '更新于 ' + E((S.updated_at || '').slice(0, 10)), '') +
+        kpi('持仓中', n2(L.n_holding) + ' 笔', hbNote || ('更新于 ' + E((S.updated_at || '').slice(0, 10))), hb && hb.stale ? 'down' : '') +
         '</div>';
       /* 资金曲线 */
       var cv = S.curve;
@@ -4043,6 +4049,19 @@
             stk(r.code, r.name) + '<div class="muted" style="font-size:12px;margin-top:2px">' + E(r.reason || '') + '</div></div>';
         }).join('');
         h += card('⛔ 被拒留痕', rHtml, '一字板买不进 / 跌停卖不出顺延，全部留痕');
+      }
+      /* 决策留痕：持有/观望/放弃也是操作，全部记录（含理由） */
+      var dcs = L.decisions || [];
+      if (dcs.length) {
+        var dm = { HOLD: ['⏸ 持有', C.gold], WATCH: ['👀 观望', C.gray], SKIP: ['🚫 放弃', C.muted], BUY: ['🟢 买入', C.up], SELL: ['🔴 卖出', C.down] };
+        var dHtml = dcs.map(function (d) {
+          var m = dm[d.action] || [d.action, C.gray];
+          return '<div class="kv" style="padding:5px 0;border-bottom:1px solid var(--line)">' +
+            '<span class="bd" style="border-color:' + m[1] + ';color:' + m[1] + '">' + m[0] + '</span> ' +
+            stk(d.code, d.name) +
+            '<div class="muted" style="font-size:12px;margin-top:2px">理由：' + E((d.reason || '').slice(0, 90)) + '</div></div>';
+        }).join('');
+        h += card('📋 今日决策留痕', dHtml, '不一定每天交易：持有/观望/放弃全部记录并推送理由');
       }
       return h;
     }
