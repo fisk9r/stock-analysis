@@ -34,7 +34,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from exec_core import fetch_user_data, extract_signals, realtime_quote, auction_gate, SITE
+from exec_core import fetch_user_data, extract_signals, realtime_quote, auction_gate, market_gate, SITE
 from risk_gate import RiskGate
 import broker_sim
 import strategy
@@ -127,6 +127,15 @@ def pick_broker(cfg):
 
 # ---------------- Phase 1：平仓 ----------------
 
+def _act_notify(cfg, title, text):
+    """操作前推送（2026-08-29 用户要求：每次操作前都推送并说明理由）。
+    best-effort：推送失败不阻断交易（推送本身已有失败留痕）。"""
+    try:
+        _notify(cfg, title, text)
+    except Exception as e:
+        _log("操作前推送失败（不阻断）：%r" % e)
+
+
 def run_sells(broker, mode, cfg):
     """对全部持仓跑卖出策略。返回 (lines, n_sold)。"""
     lines, n_sold = [], 0
@@ -159,13 +168,23 @@ def run_sells(broker, mode, cfg):
         except Exception as e:
             _log("策略异常 %s：%r" % (p["code"], e))
             dec = {"verdict": "HOLD", "price": 0, "reason": "策略异常，顺延"}
+        pnl_pct = ((q.get("price") / p["avg_price"] - 1) * 100) if (q and q.get("price")) else None
         if dec["verdict"] == "SELL" and dec.get("price"):
+            # 操作前推送：说明为什么卖（用户要求：每次操作前推送+理由）
+            _act_notify(cfg,
+                        "🔔 操作前确认：卖出 %s(%s)" % (p.get("name"), p["code"]),
+                        "**卖出理由**：%s\n\n- 现价 %.2f｜成本 %.2f｜浮盈 %s\n- 纪律依据：策略引擎回测规则，先推送后执行"
+                        % (dec["reason"], dec["price"], p["avg_price"],
+                           ("%.2f%%" % pnl_pct) if pnl_pct is not None else "—"))
             # 可卖性检查（操作前留痕）：跌停封死卖不出 → 顺延并记录
             cs = strategy.can_sell(q or {}, p["code"])
             if not cs["ok"]:
                 _log("卖出被拒 %s：%s" % (p["code"], cs["reason"]))
                 if hasattr(broker, "record_reject"):
                     broker.record_reject(p["code"], "SELL", cs["reason"], p.get("name") or "")
+                if hasattr(broker, "record_decision"):
+                    broker.record_decision(p["code"], "HOLD", "拟卖被拒顺延：%s" % cs["reason"],
+                                           p.get("name") or "", dec.get("price") or 0, pnl_pct)
                 lines.append("- ⛔ **顺延** %s(%s)｜%s"
                              % (p.get("name"), p["code"], cs["reason"]))
                 gate_note = dec["reason"]
@@ -184,18 +203,40 @@ def run_sells(broker, mode, cfg):
                                          "委托失败：%s" % r.get("reason"), p.get("name") or "")
                 lines.append("- %s(%s) 卖出失败：%s" % (p.get("name"), p["code"], r.get("reason")))
         else:
+            # HOLD 也是决策（用户要求：持有同样记录+推送理由）
+            if hasattr(broker, "record_decision"):
+                broker.record_decision(p["code"], "HOLD", dec["reason"],
+                                       p.get("name") or "", dec.get("price") or 0, pnl_pct)
             lines.append("- HOLD %s(%s)：%.2f%%｜%s"
                          % (p.get("name"), p["code"],
-                            ((q.get("price") / p["avg_price"] - 1) * 100) if q else 0,
+                            pnl_pct if pnl_pct is not None else 0,
                             dec["reason"]))
+            _act_notify(cfg,
+                        "⏸ 持有 %s(%s)" % (p.get("name"), p["code"]),
+                        "**持有理由**：%s\n\n- 现价 %s｜成本 %.2f｜浮盈 %s\n- 策略：不一定每天交易，持股等待更高期望"
+                        % (dec["reason"],
+                           ("%.2f" % q.get("price")) if (q and q.get("price")) else "—",
+                           p["avg_price"],
+                           ("%.2f%%" % pnl_pct) if pnl_pct is not None else "—"))
             _log("持有 %s：%s" % (p["code"], dec["reason"]))
     return lines, n_sold
 
 
 # ---------------- Phase 2：开仓 ----------------
 
-def run_buys(broker, mode, cfg, sigs):
+def run_buys(broker, mode, cfg, sigs, mkt=None):
     lines, n_buy = [], 0
+    mkt = mkt or {"mode": "NORMAL", "reason": ""}
+    # 大盘环境闸门（2026-08-29）：不是每天都该交易——环境偏弱直接不开新仓，
+    # 持仓与否由 Phase1 卖出策略独立裁决；FREEZE 也留痕+推送，空仓是主动决策。
+    if mkt["mode"] == "FREEZE":
+        _log("大盘环境 FREEZE：%s" % mkt["reason"])
+        if hasattr(broker, "record_decision"):
+            broker.record_decision("__market__", "FREEZE", mkt["reason"], "大盘环境闸门")
+        _act_notify(cfg, "🧊 今日不开新仓（大盘环境闸门）",
+                    "**空仓理由**：%s\n\n- 持仓不受影响，仍按卖出策略独立裁决\n"
+                    "- 纪律：环境偏弱时开新仓期望为负，持股/空仓等待是更优操作" % mkt["reason"])
+        return ["- 🧊 **FREEZE** %s" % mkt["reason"]], 0
     if not sigs:
         return ["- 今日无新信号"], 0
     codes = [s["code"] for s in sigs]
@@ -210,13 +251,22 @@ def run_buys(broker, mode, cfg, sigs):
     gate = RiskGate((cfg.get("risk") or {}))
     bal = broker.balance() if hasattr(broker, "balance") else {}
     total = bal.get("total")
-    _log("broker=%s | 总资产 %.0f | 熔断=%s"
-         % (mode, total or 0, "YES" if gate.tripped else "no"))
+    _log("broker=%s | 总资产 %.0f | 熔断=%s | 环境=%s"
+         % (mode, total or 0, "YES" if gate.tripped else "no", mkt["mode"]))
+    # CAUTION：新仓减半（保留参与度，同时控制环境不确定时的敞口）
+    caution_cut = 0.5 if mkt["mode"] == "CAUTION" else 1.0
+
+    def _track(code, name, action, reason, price=0.0):
+        """观望/放弃/拒绝也全部留痕（用户要求：无论怎么操作都要记录）。"""
+        if hasattr(broker, "record_decision"):
+            broker.record_decision(code, action, reason, name or "", price)
 
     for s in sigs:
         verdict = auction_gate(s, quote)
         if verdict["verdict"] != "BUY":
             gate.record(verdict, verdict["verdict"], 0, verdict["reason"])
+            _track(verdict["code"], verdict.get("name"), "WATCH",
+                   "竞价决策线：%s" % verdict["reason"])
             lines.append("- %s(%s) %s：%.2f%%｜%s"
                          % (verdict["name"], verdict["code"], verdict["verdict"],
                             verdict["open_gap"] or 0, verdict["reason"]))
@@ -227,6 +277,8 @@ def run_buys(broker, mode, cfg, sigs):
         sf = strategy.strategy_filter(verdict, q, mc)
         if sf["grade"] == "X":
             gate.record(verdict, "SKIP", 0, sf["reason"])
+            _track(verdict["code"], verdict.get("name"), "SKIP",
+                   "分级过滤放弃：%s" % sf["reason"])
             lines.append("- %s(%s) 放弃：%.2f%%｜%s"
                          % (verdict["name"], verdict["code"],
                             verdict["open_gap"] or 0, sf["reason"]))
@@ -237,12 +289,14 @@ def run_buys(broker, mode, cfg, sigs):
             gate.record(verdict, "SKIP", 0, cb["reason"])
             if hasattr(broker, "record_reject"):
                 broker.record_reject(verdict["code"], "BUY", cb["reason"], verdict.get("name") or "")
+            _track(verdict["code"], verdict.get("name"), "SKIP",
+                   "买不进：%s" % cb["reason"])
             lines.append("- ⛔ **买不进** %s(%s)：%.2f%%｜%s"
                          % (verdict["name"], verdict["code"],
                             verdict["open_gap"] or 0, cb["reason"]))
             _log("买入被拒 %s：%s" % (verdict["code"], cb["reason"]))
             continue
-        amount = int((gate.cfg["max_trade_amount"]) * sf["weight"])
+        amount = int((gate.cfg["max_trade_amount"]) * sf["weight"] * caution_cut)
         if total:
             amount = int(min(amount, total * gate.cfg["max_position_pct"]))
         chk = gate.check(verdict, total)
@@ -251,6 +305,8 @@ def run_buys(broker, mode, cfg, sigs):
             if hasattr(broker, "record_reject"):
                 broker.record_reject(verdict["code"], "BUY", "风控：%s" % chk["reason"],
                                      verdict.get("name") or "")
+            _track(verdict["code"], verdict.get("name"), "SKIP",
+                   "风控拒绝：%s" % chk["reason"])
             lines.append("- %s(%s) 过闸拒绝：%s" % (verdict["name"], verdict["code"], chk["reason"]))
             continue
         # 实时价成交（用户纪律2）：预判后价格已升高也只能以当前实时价买入，
@@ -258,7 +314,13 @@ def run_buys(broker, mode, cfg, sigs):
         price = q.get("price") or verdict.get("close") or 0
         if not price or price <= 0:
             gate.record(verdict, "REJECT", 0, "无有效实时价")
+            _track(verdict["code"], verdict.get("name"), "SKIP", "无有效实时价，放弃")
             continue
+        # 操作前推送：说明为什么买（用户要求：每次操作前推送+理由）
+        _act_notify(cfg,
+                    "🔔 操作前确认：买入 %s(%s) [%s级]" % (verdict["name"], verdict["code"], sf["grade"]),
+                    "**买入理由**：%s\n\n- 高开 %.2f%%｜实时价 %.2f｜金额 %d 元\n- 大盘环境：%s\n- 纪律依据：竞价决策线（高开≥2%% 胜率 67.4%%/期望 +4.08%%）+ 最优变体分级，先推送后执行"
+                    % (sf["reason"], verdict["open_gap"] or 0, price, amount, mkt["reason"]))
         r = broker.buy_limit(verdict["code"], price, amount, sig=dict(
             verdict, reason="%s｜实时价%.2f成交" % (sf["reason"], price)))
         ok = "✓" if r.get("ok") else "✗ %s" % r.get("reason")
@@ -273,6 +335,8 @@ def run_buys(broker, mode, cfg, sigs):
             if hasattr(broker, "record_reject"):
                 broker.record_reject(verdict["code"], "BUY",
                                      "委托失败：%s" % r.get("reason"), verdict.get("name") or "")
+            _track(verdict["code"], verdict.get("name"), "SKIP",
+                   "委托失败：%s" % r.get("reason"))
             _log("买入失败 %s：%s" % (verdict["code"], r.get("reason")))
     return lines, n_buy
 
@@ -290,22 +354,27 @@ def run_once(cfg):
     _log("=" * 30 + " Phase1 平仓 " + "=" * 30)
     sell_lines, n_sold = run_sells(broker, mode, cfg)
 
-    # Phase 2：开仓（需要线上信号）
+    # Phase 2：开仓（需要线上信号；先裁大盘环境，再裁个股）
     _log("=" * 30 + " Phase2 开仓 " + "=" * 30)
     buy_lines, n_buy = [], 0
+    mkt = {"mode": "NORMAL", "reason": "线上数据未取到，环境闸门放行（个股决策线仍生效）"}
     _log("拉取线上数据 %s ..." % SITE)
     try:
         data = fetch_user_data(acc["user_id"], acc["passwd"])
         sigs = extract_signals(data)
+        mkt = market_gate(data)
+        _log("大盘环境闸门：%s｜%s" % (mkt["mode"], mkt["reason"]))
         _log("信号 %d 条（core+relay+fused 去重）" % len(sigs))
-        buy_lines, n_buy = run_buys(broker, mode, cfg, sigs)
+        buy_lines, n_buy = run_buys(broker, mode, cfg, sigs, mkt)
     except Exception as e:
         _log("✗ 数据拉取/解密失败：%r" % e)
         buy_lines = ["- 数据拉取失败：%r" % e]
 
     # 汇总
     _log("=" * 60)
-    all_lines = ["## 平仓（%d 笔）" % n_sold] + sell_lines + ["", "## 开仓（%d 笔）" % n_buy] + buy_lines
+    all_lines = (["## 大盘环境：%s" % mkt["mode"], "- %s" % mkt["reason"], "",
+                  "## 平仓（%d 笔）" % n_sold] + sell_lines +
+                 ["", "## 开仓（%d 笔）" % n_buy] + buy_lines)
     for ln in all_lines:
         _log(ln)
     if mode == "sim":
@@ -428,15 +497,56 @@ def run_review(cfg=None, push=True):
         lines.append("## 被拒留痕（%d 条）" % len(ds["rejects"]))
         for rj in ds["rejects"]:
             lines.append("- ⛔ %s %s(%s)：%s" % (rj["action"], rj["name"], rj["code"], rj["reason"]))
-    # 持仓中
+    # 决策留痕（用户要求：买卖/持有/观望全部记录）
+    decisions = ds.get("decisions") or []
+    if decisions:
+        lines.append("")
+        lines.append("## 今日决策留痕（%d 条，含持有/观望）" % len(decisions))
+        for dc in decisions:
+            act = dc["action"]
+            icon = {"HOLD": "⏸ 持有", "WATCH": "👀 观望", "SKIP": "🚫 放弃",
+                    "BUY": "🟢 买入", "SELL": "🔴 卖出"}.get(act, act)
+            lines.append("- %s %s(%s)：%s"
+                         % (icon, dc["name"] or "—", dc["code"],
+                            (dc["reason"] or "")[:80]))
+    # 持仓中 + 次日持仓计划（2026-08-29 用户需求：说清为什么继续持有）
     holding = b.positions(open_only=True)
+    holding_plans = []
     if holding:
         lines.append("")
-        lines.append("## 持仓中（%d 笔）" % len(holding))
+        lines.append("## 持仓中（%d 笔）+ 明日计划" % len(holding))
+        codes = [p["code"] for p in holding]
+        try:
+            hq = realtime_quote(codes)
+        except Exception:
+            hq = {}
         for p in holding:
-            lines.append("- %s(%s) 成本%.2f %d股 %s日买入 st=%d"
-                         % (p["name"], p["code"], p["avg_price"], p["volume"],
-                            p["buy_date"], p["streak"]))
+            q = hq.get(p["code"]) or {}
+            try:
+                kl = strategy._tencent_kline(p["code"], n=12)
+            except Exception:
+                kl = []
+            try:
+                dec = strategy.sell_decision(p, q, kl)
+            except Exception:
+                dec = {"verdict": "HOLD", "reason": "计划生成异常"}
+            if dec["verdict"] == "HOLD":
+                plan = "✅ 继续持有：%s" % dec["reason"]
+            else:
+                plan = "⚠️ 明日倾向卖出：%s" % dec["reason"]
+            pnl_pct = ((q.get("price") / p["avg_price"] - 1) * 100) \
+                if (q and q.get("price") and p.get("avg_price")) else None
+            lines.append("- %s(%s) 成本%.2f 现价%s 浮盈%s｜%s"
+                         % (p["name"], p["code"], p["avg_price"],
+                            ("%.2f" % q["price"]) if q.get("price") else "—",
+                            ("%.2f%%" % pnl_pct) if pnl_pct is not None else "—",
+                            plan))
+            holding_plans.append({
+                "code": p["code"], "name": p["name"],
+                "avg_price": p["avg_price"],
+                "price": q.get("price"), "pnl_pct": round(pnl_pct, 2) if pnl_pct is not None else None,
+                "verdict": dec["verdict"], "plan": plan,
+            })
     verdict = "今日盈利 ✅" if ds["day_realized_pct"] > 0 else (
         "今日亏损 ❌（后续按归因改进策略）" if ds["day_realized_pct"] < 0 else "今日持平")
     text = "\n".join(lines)
@@ -460,6 +570,8 @@ def run_review(cfg=None, push=True):
             "total_pct": round(total_pct, 2),
             "day_realized_pct": ds["day_realized_pct"],
             "trades": ds["trades"], "closed": ds["closed"], "rejects": ds["rejects"],
+            "decisions": ds.get("decisions") or [],
+            "holding_plans": holding_plans,
             "n_holding": len(holding),
             "summary_line": (b.summary() if hasattr(b, "summary") else ""),
         }

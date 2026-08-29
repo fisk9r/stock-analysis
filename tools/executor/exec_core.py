@@ -148,6 +148,45 @@ def realtime_quote(codes: list, timeout: int = 10) -> dict:
     return out
 
 
+def market_gate(data: dict) -> dict:
+    """大盘环境闸门（2026-08-29 用户需求：不是每天都该交易，空仓也是操作）。
+
+    数据源全部来自线上 build.py 已算好的指标，无本地依赖：
+      · sector_forecast.__market__  大盘当日预判（dir 震荡/偏强/偏弱, env -10..+10, score）
+      · market.sentiment            情绪温度计（score 0-100）
+    规则（保守优先，宁错过不做）：
+      · env <= -5 或 dir 偏弱        → FREEZE（不开新仓；持仓按卖出策略独立裁决）
+      · env <= -2 或 情绪分 < 40     → CAUTION（新仓减半）
+      · 其余                        → NORMAL
+    返回 {mode, dirn, score, env, reason}。缺数据时返回 NORMAL（不因数据缺失卡死交易）。
+    """
+    sfc = (data.get("sector_forecast") or {}).get("__market__") or {}
+    sent = (data.get("market") or {}).get("sentiment") or {}
+    dirn = sfc.get("dir") or ""
+    env = sfc.get("env")
+    score = sent.get("score")
+    try:
+        env = float(env) if env is not None else None
+    except (TypeError, ValueError):
+        env = None
+    try:
+        score = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        score = None
+
+    if (env is not None and env <= -5) or "弱" in dirn:
+        return {"mode": "FREEZE", "dirn": dirn, "score": score, "env": env,
+                "reason": "大盘预判「%s」（env=%s）：弱势环境开新仓为负期望，空仓观望"
+                          % (dirn or "?", env)}
+    if (env is not None and env <= -2) or (score is not None and score < 40):
+        return {"mode": "CAUTION", "dirn": dirn, "score": score, "env": env,
+                "reason": "大盘预判「%s」（env=%s，情绪%.0f）：环境偏谨慎，新仓减半"
+                          % (dirn or "?", env, score if score is not None else 0)}
+    return {"mode": "NORMAL", "dirn": dirn, "score": score, "env": env,
+            "reason": "大盘预判「%s」（env=%s）：环境允许正常开仓"
+                      % (dirn or "?", env)}
+
+
 def auction_gate(sig: dict, quote: dict) -> dict:
     """竞价决策线裁决：高开≥2%跟进 / 低开≤-2%放弃 / 平开观望。
 

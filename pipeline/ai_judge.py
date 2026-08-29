@@ -77,13 +77,24 @@ PROVIDER_PRESETS = {
                   "model": "claude-sonnet-4-6", "label": "Anthropic Claude"},
     "gemini":    {"kind": "gemini",   "base_url": "https://generativelanguage.googleapis.com/v1beta",
                   "model": "gemini-2.5-pro", "label": "Google Gemini"},
-    # Cloudflare Workers AI（2026-08-29 加入）：OpenAI 兼容端点，零额外成本
+    # Cloudflare Workers AI（2026-08-29 二次选型）：OpenAI 兼容端点，零额外成本
     # （复用部署站点的 CLOUDFLARE_API_TOKEN）。base_url 里 {CF_ACCOUNT_ID} 由
     # get_active_providers 动态解析（CI 的 CLOUDFLARE_ACCOUNT_ID / config 覆盖均可）。
-    # glm-4.5-air：CF 上质量最好的中文模型之一；失败自动落到 llama-3.3-70b。
+    # 选型（2026-08-29 官方文档核对）：
+    #   · glm-4.5-air 已从 CF 模型目录下线（docs 404）→ 弃用；
+    #   · kimi-k2.6 / glm-5.3(-flash) / deepseek-v4 需 Workers Paid 付费计划，免费额度不可用；
+    #   · 免费额度（10k Neurons/天）内最强中文模型 = glm-4.7-flash（GLM 家族中文/金融
+    #     文本质量最好，131K 上下文，Reasoning+FC，$0.06/M input，日用量几百 Neurons）；
+    #   · 热备链：qwen3-30b（中文次优最便宜）→ gpt-oss-120b（英文系最强推理）→ llama-3.3-70b。
     "cloudflare": {"kind": "openai",
                    "base_url": "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1",
-                   "model": "@cf/zai-org/glm-4.5-air-fp8", "label": "Cloudflare GLM-4.5-Air"},
+                   "model": "@cf/zai-org/glm-4.7-flash", "label": "Cloudflare GLM-4.7-Flash"},
+    "cloudflare_qwen": {"kind": "openai",
+                        "base_url": "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1",
+                        "model": "@cf/qwen/qwen3-30b-a3b-fp8", "label": "Cloudflare Qwen3-30B-A3B"},
+    "cloudflare_gptoss": {"kind": "openai",
+                          "base_url": "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1",
+                          "model": "@cf/openai/gpt-oss-120b", "label": "Cloudflare GPT-OSS-120B"},
     "cloudflare_llama": {"kind": "openai",
                          "base_url": "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1",
                          "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast", "label": "Cloudflare Llama-3.3-70B"},
@@ -455,11 +466,11 @@ def generate_narrative_backup(data, preferred=None):
     cfg = load_model_config()
     if preferred is None:
         nb = cfg.get("narrative_backup")
-        # 默认保底链（2026-08-25 用户拍板；2026-08-29 加 Cloudflare 兜底）：
-        # Hy3 不可用时 GLM → kimi → Cloudflare GLM-4.5-Air → Cloudflare Llama
-        # （CF 走 api.cloudflare.com，与国产模型故障域隔离，作为最终稳定性兜底）
+        # 主力链（2026-08-29 用户拍板：AI 换成 Cloudflare，二次选型按官方模型目录核对）：
+        # Cloudflare GLM-4.7-Flash 主力（免费额度内中文/金融质量最好）→ Cloudflare
+        # Qwen3-30B → Cloudflare GPT-OSS-120B → zhipu → kimi（国产 key 末端兜底）。
         pref_list = nb if isinstance(nb, list) and nb else \
-            ["zhipu", "kimi", "cloudflare", "cloudflare_llama"]
+            ["cloudflare", "cloudflare_qwen", "cloudflare_gptoss", "zhipu", "kimi"]
     elif isinstance(preferred, str):
         pref_list = [preferred]
     else:
