@@ -4012,6 +4012,13 @@
       var baseY = ch - 24 - ((initCash - mn) / rng) * (ch - 40);
       var col = (totals[totals.length - 1] >= initCash) ? C.up : C.down;
       var lastPt = pts[pts.length - 1] || '';
+      /* 最大回撤（2026-08-31 补充）：曲线峰值到谷底的最大跌幅 */
+      var peak = totals[0] || initCash, mdd = 0;
+      for (var mi = 0; mi < totals.length; mi++) {
+        if (totals[mi] > peak) peak = totals[mi];
+        var dd = peak > 0 ? (peak - totals[mi]) / peak * 100 : 0;
+        if (dd > mdd) mdd = dd;
+      }
       var curveHtml = '<svg width="100%" viewBox="0 0 ' + w + ' ' + ch + '" preserveAspectRatio="none" style="display:block">' +
         '<line x1="30" y1="' + baseY.toFixed(1) + '" x2="' + (w - 10) + '" y2="' + baseY.toFixed(1) + '" stroke="' + C.gray + '" stroke-dasharray="4 4" stroke-width="1"/>' +
         '<text x="' + (w - 8) + '" y="' + (baseY - 5).toFixed(1) + '" text-anchor="end" font-size="10" fill="' + C.gray + '">初始' + Math.round(initCash / 10000) + '万</text>' +
@@ -4019,7 +4026,7 @@
         '<circle cx="' + lastPt.split(',')[0] + '" cy="' + lastPt.split(',')[1] + '" r="3.5" fill="' + col + '"/>' +
         '</svg>' +
         '<div style="display:flex;justify-content:space-between;margin-top:4px" class="muted">' +
-        '<span>' + E(cv[0].d) + '</span><span>' + E(cv[cv.length - 1].d) + ' · 共 ' + cv.length + ' 个交易日</span></div>';
+        '<span>' + E(cv[0].d) + '</span><span>最大回撤 <b class="' + (mdd >= 10 ? 'down' : '') + '">' + f(mdd) + '%</b> · ' + E(cv[cv.length - 1].d) + ' · 共 ' + cv.length + ' 个交易日</span></div>';
       h += card('📈 资金曲线', curveHtml, '每日收盘后复盘快照（费后口径）');
       /* 月度总结 */
       var months = S.months || [];
