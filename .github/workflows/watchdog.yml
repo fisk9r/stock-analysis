@@ -53,6 +53,10 @@ jobs:
     timeout-minutes: 10
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # 2026-08-31 修复（8-10 两连挂根因）：脚本 cd /tmp/wd（非 git 仓库）后
+      # gh 靠 git remote 推断 repo → "failed to run git: not a git repository"。
+      # 显式指定 GH_REPO 后 gh release download / gh workflow run 均可正常工作。
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: 判定并兜底触发
         run: |
