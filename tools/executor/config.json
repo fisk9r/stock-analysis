@@ -1,40 +1,40 @@
 {
-  "_comment": "执行器配置。account/user_id/passwd 由用户填写；broker 选 sim（模拟盘）或 qmt（miniQMT 实盘）。",
-  "account": {
-    "user_id": "owner",
-    "passwd": "I8Tc9nTyooBxwcmA",
-    "_hint": "线上 data/<user_id>.bin 的解密口令，与站点登录一致"
-  },
-  "broker": "sim",
-  "sim": {
-    "initial_cash": 100000,
-    "impact_cost_pct": 0.1
-  },
-  "qmt": {
-    "qmt_path": "",
-    "account_id": "",
-    "session_id": 0,
-    "_hint": "开通 miniQMT 后填写：qmt_path=QMT userdata_mini 目录；account_id=资金账号"
-  },
-  "risk": {
-    "max_position_pct": 0.15,
-    "max_orders_per_day": 6,
-    "min_trade_amount": 1000,
-    "max_trade_amount": 20000,
-    "daily_loss_stop_pct": -3.0,
-    "enabled": true
-  },
-  "schedule": {
-    "auction_time": "09:26",
-    "_hint": "每天 09:26 竞价结束后执行一轮：拉实时开盘价 -> 决策线裁决 -> 过闸 -> 下单"
-  },
-  "notify": {
-    "serverchan_key": "",
-    "pushplus_tokens": [],
-    "_hint": "模拟盘推送：pushplus_tokens 填 token 列表（推荐）；留空则自动复用项目根 config/notify.json 的 wechat_pushplus 多接收人配置。serverchan_key 为可选备用通道。"
-  },
-  "review": {
-    "time": "15:35",
-    "_hint": "收盘后复盘时间（--loop 模式下自动执行）：汇总当日操作+盈亏总结，写 sim_review.json 供网站「模拟盘」模块使用，并推送 PushPlus"
-  }
+ "_comment": "执行器配置。account/user_id/passwd 由用户填写；broker 选 sim（模拟盘）或 qmt（miniQMT 实盘）。",
+ "account": {
+  "user_id": "",
+  "passwd": "",
+  "_hint": "CI 托管：口令走 Secret（EXEC_ACCOUNT_JSON 或 ALLOWED_USERS_JSON owner pass）。本地开发：把真实凭据填到 config.local.json（已 gitignore）。"
+ },
+ "broker": "sim",
+ "sim": {
+  "initial_cash": 100000,
+  "impact_cost_pct": 0.1
+ },
+ "qmt": {
+  "qmt_path": "",
+  "account_id": "",
+  "session_id": 0,
+  "_hint": "开通 miniQMT 后填写：qmt_path=QMT userdata_mini 目录；account_id=资金账号"
+ },
+ "risk": {
+  "max_position_pct": 0.15,
+  "max_orders_per_day": 6,
+  "min_trade_amount": 1000,
+  "max_trade_amount": 20000,
+  "daily_loss_stop_pct": -3.0,
+  "enabled": true
+ },
+ "schedule": {
+  "auction_time": "09:26",
+  "_hint": "每天 09:26 竞价结束后执行一轮：拉实时开盘价 -> 决策线裁决 -> 过闸 -> 下单"
+ },
+ "notify": {
+  "serverchan_key": "",
+  "pushplus_tokens": [],
+  "_hint": "模拟盘推送：pushplus_tokens 填 token 列表（推荐）；留空则自动复用项目根 config/notify.json 的 wechat_pushplus 多接收人配置。serverchan_key 为可选备用通道。"
+ },
+ "review": {
+  "time": "15:35",
+  "_hint": "收盘后复盘时间（--loop 模式下自动执行）：汇总当日操作+盈亏总结，写 sim_review.json 供网站「模拟盘」模块使用，并推送 PushPlus"
+ }
 }

@@ -106,6 +106,8 @@ jobs:
           python runner.py $ARGS
 
       # ---------- 4. sim_review.json 推到仓库 state/ + 触发网站重建 ----------
+      # 注意：heredoc 结束符必须在行首（缩进的 PYEOF 会被 bash 当成普通文本，
+      # 吃不到结束符直接报错，2026-08-30 第三跑实测）。
       - name: 回传网站模块数据
         if: always()
         run: |
@@ -121,7 +123,7 @@ jobs:
           gh_api.push_files("sim-review: 模拟盘每日复盘数据（CI executor 自动回传）",
                             ["state/sim_review.json"])
           print("OK sim_review.json pushed")
-          PYEOF
+PYEOF
           # 复盘任务才触发网站重建（now/tail 不动线上站点）
           if [ "${{ steps.task.outputs.name }}" = "review" ]; then
             python tools/gh_api.py dispatch build

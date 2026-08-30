@@ -61,7 +61,42 @@ atexit.register(_flush_at_exit)
 
 def load_cfg():
     with open(CFG_PATH, encoding="utf-8") as f:
-        return json.load(f)
+        cfg = json.load(f)
+    # ---- account 凭据注入（2026-08-30 安全加固：public 仓库 config.json 不得存口令）----
+    # 优先级：EXEC_ACCOUNT_JSON Secret > ALLOWED_USERS_JSON Secret(owner 的 pass) >
+    #         config.local.json（本地开发，gitignore）> config.json 本体
+    acc = cfg.get("account") or {}
+    if not acc.get("user_id") or not acc.get("passwd"):
+        env_acc = os.environ.get("EXEC_ACCOUNT_JSON", "").strip()
+        if env_acc:
+            try:
+                js = json.loads(env_acc)
+                acc["user_id"] = js.get("user_id") or acc.get("user_id")
+                acc["passwd"] = js.get("passwd") or js.get("pass") or acc.get("passwd")
+            except Exception as e:
+                _log("EXEC_ACCOUNT_JSON 解析失败：%r" % e)
+        if not acc.get("passwd"):
+            env_au = os.environ.get("ALLOWED_USERS_JSON", "").strip()
+            if env_au:
+                try:
+                    for u in (json.loads(env_au).get("users") or []):
+                        if u.get("id") == "owner" and u.get("pass"):
+                            acc["user_id"] = acc.get("user_id") or "owner"
+                            acc["passwd"] = u["pass"]
+                            break
+                except Exception as e:
+                    _log("ALLOWED_USERS_JSON 解析失败：%r" % e)
+        if not acc.get("passwd"):
+            local_cfg = os.path.join(os.path.dirname(CFG_PATH), "config.local.json")
+            if os.path.exists(local_cfg):
+                try:
+                    lacc = (json.load(open(local_cfg, encoding="utf-8")).get("account") or {})
+                    acc["user_id"] = acc.get("user_id") or lacc.get("user_id")
+                    acc["passwd"] = acc.get("passwd") or lacc.get("passwd")
+                except Exception as e:
+                    _log("config.local.json 解析失败：%r" % e)
+        cfg["account"] = acc
+    return cfg
 
 
 def _log(msg):

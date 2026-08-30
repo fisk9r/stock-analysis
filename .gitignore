@@ -61,3 +61,4 @@ Thumbs.db
 
 # ---- AI keys（本地文件形态，绝不入库）----
 config/cf_token.txt
+config.local.json
