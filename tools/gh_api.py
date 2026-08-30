@@ -32,17 +32,30 @@ def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
 socket.getaddrinfo = _ipv4_getaddrinfo
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOKEN_FILE = os.path.join(ROOT, "..", ".ghtoken")
+# 2026-08-30 CI：checkout 根是 /home/runner/work/<repo>/<repo>，仓库外层不可写。
+# 令牌文件查找顺序：仓库内 tools/.ghtoken（CI 可手动注入）→ 仓库外 ../.ghtoken（本地现状）
+TOKEN_FILE_CANDIDATES = [
+    os.path.join(ROOT, "tools", ".ghtoken"),
+    os.path.join(ROOT, "..", ".ghtoken"),
+]
+TOKEN_FILE = TOKEN_FILE_CANDIDATES[0]  # 兼容旧引用（仅报错信息用）
 REPO = "stock-analysis"
 OWNER = "fisk9r"
 API = "https://api.github.com"
 
 
 def _token():
-    p = TOKEN_FILE
-    if not os.path.exists(p):
-        raise SystemExit("找不到令牌文件：%s（请先放回 .ghtoken）" % p)
-    return open(p, encoding="utf-8").read().strip()
+    # 2026-08-30 CI 托管：GitHub Actions 里没有 .ghtoken 文件，
+    # 优先用环境变量（GITHUB_TOKEN 由 Actions 自动注入，需 permissions: contents: write）
+    for envk in ("GH_TOKEN", "GITHUB_TOKEN"):
+        v = os.environ.get(envk, "").strip()
+        if v:
+            return v
+    for p in TOKEN_FILE_CANDIDATES:
+        if os.path.exists(p):
+            return open(p, encoding="utf-8").read().strip()
+    raise SystemExit("找不到令牌：%s 或环境变量 GH_TOKEN/GITHUB_TOKEN"
+                     % " / ".join(TOKEN_FILE_CANDIDATES))
 
 
 def _ssl_ctx(verify=True):
