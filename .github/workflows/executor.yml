@@ -39,6 +39,9 @@ on:
 
 permissions:
   contents: write
+  # 2026-08-30：GITHUB_TOKEN 默认无 actions:write，触发 stock.yml dispatch 会报
+  # 「Resource not accessible by integration」(HTTP 403)——CI 第三跑实测确认。
+  actions: write
 
 concurrency:
   group: executor
