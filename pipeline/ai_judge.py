@@ -575,11 +575,26 @@ def _norm_narrative(v, label):
         t = "".join(ch for ch in str(s) if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
         return len(t) >= 4
     bullets = [b for b in bullets if _substantial(b)]
+    # 占位词黑名单（2026-08-31）：模型照抄 prompt 里的 schema 示例值时，
+    # _substantial 拦不住（"一句话标题"有5个有效汉字），必须显式剔除。
+    _PLACEHOLDERS = ("一句话标题", "次日展望一句话", "要点1", "要点2", "要点3")
+    if any(p in headline for p in _PLACEHOLDERS):
+        headline = ""
+    bullets = [b for b in bullets if not any(p in b for p in _PLACEHOLDERS)]
     if headline and not _substantial(headline):
         headline = ""
     if outlook and not _substantial(outlook):
         outlook = ""
+    # 防空壳上线（2026-08-31 线上事故修复）：拦截后的 headline/bullets 双空仍返回非 None
+    # 的空壳 dict，调用方 `if nv:` 判不出 → 模板占位值「一句话标题/次日展望一句话」
+    # 原样写进 data["narrative"] 且标记 ai_generated=true 上线。此处必须整条判废。
     if not (headline or bullets):
+        print("[ai_judge] %s 叙事输出为空壳（headline/bullets 双空），判废" % label)
+        return None
+    # headline 必须有：模板占位「一句话标题」就是 headline 缺失导致的丑态，
+    # 只有 bullets 没 headline 的输出不值得覆盖模板，整体判废走下一家。
+    if not headline:
+        print("[ai_judge] %s 叙事缺 headline，判废" % label)
         return None
     return {
         "headline": headline,
