@@ -48,6 +48,12 @@ CREATE TABLE IF NOT EXISTS sim_rejects(
   action TEXT, reason TEXT,
   PRIMARY KEY(date, code, action)
 );
+CREATE TABLE IF NOT EXISTS sim_decisions(
+  ts TEXT, date TEXT, code TEXT, name TEXT,
+  action TEXT, price REAL DEFAULT 0, pnl_pct REAL DEFAULT NULL,
+  reason TEXT,
+  PRIMARY KEY(date, code, action)
+);
 CREATE TABLE IF NOT EXISTS sim_positions(
   buy_date TEXT, code TEXT, name TEXT,
   open_gap REAL, buy_price REAL, volume INTEGER,
@@ -216,6 +222,36 @@ class SimBroker:
         except Exception:
             pass
 
+    def record_decision(self, code: str, action: str, reason: str, name: str = "",
+                        price: float = 0.0, pnl_pct: float = None):
+        """决策留痕（2026-08-29 用户要求：买卖/持有/观望全部记录）。
+
+        action: SELL/BUY（成交前记 SELL_PLAN/BUY_PLAN 亦可）| HOLD | WATCH | SKIP
+        与 sim_trades（仅成交）互补，构成完整决策链审计：决策 → 拒绝 → 成交。
+        """
+        d = time.strftime("%Y-%m-%d")
+        try:
+            self.con.execute(
+                "INSERT OR REPLACE INTO sim_decisions VALUES(?,?,?,?,?,?,?,?)",
+                (time.strftime("%Y-%m-%d %H:%M:%S"), d, code, name or "",
+                 action, round(price or 0, 3), pnl_pct, reason or ""))
+            self.con.commit()
+        except Exception:
+            pass
+
+    def decisions(self, date: str = None) -> list:
+        """当日（或全部）决策留痕，供复盘推送与网站展示。"""
+        if date:
+            rows = self.con.execute(
+                "SELECT ts,date,code,name,action,price,pnl_pct,reason FROM sim_decisions "
+                "WHERE date=? ORDER BY ts", (date,)).fetchall()
+        else:
+            rows = self.con.execute(
+                "SELECT ts,date,code,name,action,price,pnl_pct,reason FROM sim_decisions "
+                "ORDER BY ts").fetchall()
+        return [{"ts": r[0], "date": r[1], "code": r[2], "name": r[3], "action": r[4],
+                 "price": r[5], "pnl_pct": r[6], "reason": r[7]} for r in rows]
+
     def rejects(self, date: str = None) -> list:
         """当日（或全部）被拒记录，供复盘推送与网站展示。"""
         if date:
@@ -244,7 +280,8 @@ class SimBroker:
         bal = self.balance()
         return {"date": d, "trades": trades, "closed": closed_today,
                 "day_realized_pct": round(day_realized, 2),
-                "rejects": self.rejects(d), "balance": bal}
+                "rejects": self.rejects(d), "decisions": self.decisions(d),
+                "balance": bal}
 
     def summary(self) -> str:
         """模拟盘战绩摘要（供推送/日志）。"""
