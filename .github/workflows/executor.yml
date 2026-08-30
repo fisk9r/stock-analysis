@@ -50,6 +50,9 @@ concurrency:
 env:
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   NOTIFY_JSON: ${{ secrets.NOTIFY_JSON }}
+  # runner 全部用 time.strftime 记日期（sim_review date/交易日判定），
+  # CI 容器默认 UTC——北京时间 0-8 点手动 dispatch 会把日期写成前一天，必须固定时区
+  TZ: Asia/Shanghai
 
 jobs:
   run:
