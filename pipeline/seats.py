@@ -112,7 +112,35 @@ def win_rates(con, min_samples=8):
     return out
 
 
-def summary_lines(r, stats=None):
+def win_rates_dept(con, min_samples=8):
+    """按营业部（dept_code）粒度统计 T+1 胜率（2026-08-30 新增）。
+
+    背景：同一标签下的不同营业部表现差异巨大——拉萨标签内部
+    10678762 胜率 46.0%/-1.52%，而 10428246 仅 16.7%/-6.53%（12 次净买）。
+    标签级统计掩盖了这种分化；dept 粒度能给「哪一家营业部上榜要躲」精确到号。
+
+    返回 {"label/dept_code": t1_stats}（键是 "标签/营业部号" 字符串，json 可序列化；
+    2026-08-31 修复：此前用 tuple (label, dc) 做键，build.py json.dump(data) 直接 TypeError 崩）。
+    仅保留 n>=min_samples 的。
+    """
+    import store
+    import signal_backtest
+    rows = store.seats_history(con, days=200)
+    if not rows:
+        return {}
+    by_dept = defaultdict(list)
+    for date, dc, label, code, _nm, net_yi in rows:
+        if label and dc and (net_yi or 0) > 0:
+            by_dept["%s/%s" % (label, dc)].append((date, code))
+    out = {}
+    for key, events in by_dept.items():
+        st = signal_backtest.t1_stats(con, events)
+        if st and st["n"] >= min_samples:
+            out[key] = st
+    return out
+
+
+def summary_lines(r, stats=None, dept_stats=None):
     if not r:
         return []
     stats = stats or r.get("stats") or {}
@@ -133,4 +161,21 @@ def summary_lines(r, stats=None):
         out.append("⚠ 回避席位：%s"
                    % "、".join("%s（胜率%.0f%%/%d次，跟随负期望）" % (lb, st["win_rate"], st["n"])
                                for lb, st in bad[:3]))
+    # 2026-08-30 dept 粒度回避（比标签级更精确）：同一标签里特别烂的那家营业部
+    # 键格式 "label/dept_code"（2026-08-31 起 tuple 键会崩 json.dump，勿改回）
+    if dept_stats:
+        bad_dept = sorted(
+            ((k, st) for k, st in dept_stats.items()
+             if st.get("win_rate", 100) < 30 and st.get("n", 0) >= 10),
+            key=lambda kv: kv[1]["win_rate"])
+        if bad_dept:
+            def _split_key(k):
+                if isinstance(k, (tuple, list)) and len(k) == 2:
+                    return k[0], k[1]
+                parts = k.split("/", 1) if isinstance(k, str) else ["?", "?"]
+                return (parts[0], parts[1]) if len(parts) == 2 else (k, "?")
+            out.append("⚠ 回避营业部（dept 粒度）：%s"
+                       % "、".join("%s[%s]（胜率%.0f%%/%d次）"
+                                   % (_split_key(k)[0], _split_key(k)[1], st["win_rate"], st["n"])
+                                   for k, st in bad_dept[:3]))
     return out

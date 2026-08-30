@@ -70,7 +70,12 @@ def sell_decision(pos: dict, quote: dict, klines: list, today: str = None) -> di
     today = today or time.strftime("%Y-%m-%d")
 
     # 找昨日K线（今日之前最后一根）
+    # 2026-08-31 修复：prev2/yest_limit 必须先初始化——旧代码若 yest 恰好是
+    # klines[0]（新股/长停牌复牌只有一根历史K线），循环内不执行 if i>0 分支，
+    # prev2/yest_limit 从未赋值 → 规则1 引用时 UnboundLocalError 崩掉整轮平仓
     yest = None
+    yest_limit = False
+    prev2 = None
     for i in range(len(klines) - 1, -1, -1):
         if klines[i]["d"] < today:
             yest = klines[i]
@@ -78,25 +83,28 @@ def sell_decision(pos: dict, quote: dict, klines: list, today: str = None) -> di
             if i > 0:
                 prev2 = klines[i - 1]["c"]
                 yest_limit = is_limit_up(yest, prev2, code)
-                break
-    else:
-        yest = None
-        yest_limit = False
+            break
 
     buy_date = pos.get("buy_date") or ""
     days_held = 0
-    if yest:
-        # 持仓交易日数 = K线里 buy_date 之后（不含）到 yest 的根数
-        dates = [k["d"] for k in klines]
-        if buy_date in dates:
-            i = dates.index(buy_date)
-            # yest 是今日之前最后一根 → days = yest索引 - buy_date索引
-            # yest 索引 = len(klines)-1（若今日不在K线）或日期小于today的最后一根
-            yest_idx = dates.index(yest["d"])
-            days_held = max(0, yest_idx - i)
-        else:
-            # 买入日不在K线（未来日期/停牌），按「今日已是新交易日」保守计 1 天起
-            days_held = 1
+    # 持仓交易日数口径（2026-08-31 定稿）：今日相对买入日的交易日序差（含今日）。
+    #   买入日=T0，此后每过一个交易日 +1；早盘 09:26 裁决发生在今日 → 今日计入。
+    #   买入 T0 → 第1个交易日 T1 days=1 … 第3个交易日 days=3 → 触发无条件清仓。
+    #   旧口径「到昨日为止的已过交易日数」恒差一天，规则0实际第4日才触发。
+    # 2026-08-31 修复：交易日序列必须过滤「今日及以后」的K线——复盘 15:30 后
+    # 腾讯 fqkline 已含今日K线，用全量列表索引会错位。
+    past_dates = [k["d"] for k in klines if k["d"] < today]
+    if buy_date in past_dates:
+        days_held = max(0, len(past_dates) - past_dates.index(buy_date))
+    elif past_dates:
+        # 买入日早于K线窗口（K线只取了12根）→ 用窗口起点粗算，不小于1
+        days_held = max(1, len(past_dates))
+    elif klines and klines[-1]["d"] >= buy_date:
+        # K线窗口里只有今日或买入日之后的（新股/复牌）
+        days_held = 1
+    else:
+        # 买入日不在K线（停牌/数据缺失），保守计 1 天起
+        days_held = 1
 
     # 规则0：持仓 >=3 个交易日 → 无条件清仓
     if days_held >= 3:
@@ -105,10 +113,13 @@ def sell_decision(pos: dict, quote: dict, klines: list, today: str = None) -> di
 
     # 规则1：昨日断板（买入后未续板）→ 今日开盘卖
     #   回测：断板后 T+2 开盘卖平均 -1.18%，越拖越差
+    # 2026-08-31 修复：卖出价用现价 cur（用户纪律2：按实时价成交）——
+    # 旧代码 max(cur, opn) 在低走时会按更高的开盘价记录成交，虚增模拟收益
     if yest and not yest_limit:
-        return {"verdict": "SELL", "price": max(cur, opn) if cur else opn,
-                "reason": "昨日断板（收%.2f%%未封板），按纪律开盘卖出（回测拖到T+2平均-1.18%%）"
-                          % ((yest["c"] / (prev2 if yest else 1) - 1) * 100)}
+        yest_pct_txt = ("%.2f%%" % ((yest["c"] / prev2 - 1) * 100)) if prev2 else "未确认"
+        return {"verdict": "SELL", "price": cur,
+                "reason": "昨日断板（收%s未封板），按纪律开盘卖出（回测拖到T+2平均-1.18%%）"
+                          % yest_pct_txt}
 
     # 规则2：昨日续板 → 吃高度溢价，但现价弱于开盘则锁定
     if yest_limit:

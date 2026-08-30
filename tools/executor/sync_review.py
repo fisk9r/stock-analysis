@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 REVIEW = os.path.join(HERE, "sim_review.json")
 MARK = os.path.join(HERE, ".last_sync_review")
-DEST = "config/sim_review.json"
+DEST = "state/sim_review.json"   # 2026-08-31 修复：build.py 读的是 state/（此前误写 config/，推了也白推）
 
 
 def main():

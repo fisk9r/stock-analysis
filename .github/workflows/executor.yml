@@ -106,7 +106,19 @@ jobs:
           esac
           if [ "$FORCE" = "true" ]; then ARGS="$ARGS --force"; fi
           echo "运行参数：python runner.py $ARGS"
-          python runner.py $ARGS
+          python runner.py $ARGS 2>&1 | tee run_log.txt
+          # GITHUB_STEP_SUMMARY：CI 运行页直接可读摘要（手机查仓不用翻日志）
+          {
+            echo "## 模拟盘执行摘要（$(date '+%Y-%m-%d %H:%M' -d '+8 hours') 北京时间）"
+            echo "- 任务：$TASK$( [ "$FORCE" = "true" ] && echo '（force 跳过交易日判定）')"
+            echo ""
+            echo '<details><summary>完整执行日志</summary>'
+            echo ""
+            echo '```'
+            tail -n 120 run_log.txt
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY" || true
 
       # ---------- 4. sim_review.json 推到仓库 state/ + 触发网站重建 ----------
       # 注意：不要在 run: | 块里用 heredoc——结束符顶格会截断 YAML 块标量

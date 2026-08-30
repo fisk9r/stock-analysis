@@ -1971,6 +1971,97 @@ def watch_forecast_lines(data, n=8):
     return out
 
 
+def _market_outlook(data):
+    """盘前「今日研判」：基于短期形势给出预期判断（用户 2026-08-31 需求：
+    开盘前一日/当日要的是研判推送，而不是把周五的复盘再推一遍）。
+
+    纯聚合已有引擎结论（不新增行情计算）：
+      · sector_forecast.__market__  大盘环境定调（dir/env/score）
+      · market.sentiment / cycle    情绪温度 + 情绪周期位置
+      · market.profit               昨日赚钱效应（昨涨停今日表现，短期接力参考）
+      · regime.level                连板情绪阶段（过热=兑现压力/退潮=防守）
+      · global_market.signal        外围定调
+      · preopen_plan.position       仓位建议
+
+    返回 (预期判断 str, 摘要 dict)；数据缺失时各部分诚实降级。
+    """
+    d = data or {}
+    mkt = d.get("sector_forecast", {}).get("__market__") or {}
+    sent = d.get("market", {}).get("sentiment", {}) or {}
+    cyc = d.get("market", {}).get("cycle", {}) or {}
+    micro = d.get("micro") or {}
+    profit = micro.get("profit") or {}
+    regime = d.get("regime") or {}
+    g = d.get("global_market") or {}
+    pp = d.get("preopen_plan") or {}
+
+    dirn = mkt.get("dir") or ""
+    env = mkt.get("env")
+    s_score = sent.get("score")
+    phase = cyc.get("phase") or ""
+    rl = regime.get("level") or ""
+    gs = (g.get("signal") or "") if g.get("available") else ""
+
+    # ---- 逐维度收集证据 ----
+    evid = []
+    if dirn:
+        evid.append("大盘预判「%s」" % dirn)
+    if env is not None:
+        try:
+            evid.append("环境系数 %+.0f" % float(env))
+        except (TypeError, ValueError):
+            pass
+    if s_score is not None:
+        try:
+            evid.append("情绪 %.0f/100" % float(s_score))
+        except (TypeError, ValueError):
+            pass
+    if phase:
+        evid.append("周期「%s」" % phase)
+    if rl:
+        evid.append("连板「%s」" % rl)
+    if gs:
+        evid.append("外围%s" % gs)
+    avg = profit.get("avg_pct")
+    if avg is not None:
+        try:
+            evid.append("昨涨停今均 %+.1f%%" % float(avg))
+        except (TypeError, ValueError):
+            pass
+
+    # ---- 拼预期判断（方向 + 仓位 + 节奏）----
+    bits = []
+    # 方向判断
+    if dirn == "偏弱" or (env is not None and _f(env) <= -5):
+        bits.append("**偏防守**：今日以控风险为主，不追高、不做弱修复")
+    elif dirn == "偏强" or (env is not None and _f(env) >= 5):
+        bits.append("**偏进攻**：主线与接力方向可正常参与，但竞价弱一律不接")
+    else:
+        bits.append("**震荡预期**：结构性机会为主，聚焦资金集中的 1~2 个方向")
+    # 仓位
+    if pp.get("position"):
+        bits.append("建议仓位 %s" % pp["position"])
+    # 节奏（赚钱效应 / 情绪阶段）
+    if isinstance(avg, (int, float)) and avg < -2:
+        bits.append("昨日接力亏钱（昨涨停今均%+.1f%%），今日接力降档" % avg)
+    elif isinstance(avg, (int, float)) and avg > 2:
+        bits.append("昨日接力赚钱效应好（昨涨停今均%+.1f%%），可适度积极" % avg)
+    if "过热" in rl or "高潮" in rl:
+        bits.append("连板情绪过热，警惕高位兑现")
+    elif "退潮" in rl or "冰点" in rl:
+        bits.append("连板情绪退潮，优先低位新题材")
+    head = "、".join(evid[:6])
+    judge = "%s\n> 依据：%s" % ("；".join(bits), head or "引擎数据暂缺，保守处理")
+    return judge, {"dirn": dirn, "env": env, "sentiment": s_score, "phase": phase}
+
+
+def _f(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def format_stock_summary(data, url="", mode="close", con=None):
     """ServerChan/PushPlus(markdown) 排版：盘面数据 / 复盘要点 / 推荐 / 风险，分区清晰、留白克制。
     mode='close' 收盘后；mode='preauction' 竞价前。"""
@@ -1986,11 +2077,22 @@ def format_stock_summary(data, url="", mode="close", con=None):
 
     if mode == "preauction":
         L = []
-        L.append("## 竞价前观察 · %s" % date)
+        L.append("## 今日研判 · %s（盘前预期，非昨日复盘）" % date)
         L.append("")
         L.append("**外围定调**：%s" % _global_signal(g))
         if regime.get("level"):
             L.append("**连板热度**：%s" % regime.get("note", ""))
+        # ⓪ 今日研判（用户 2026-08-31：盘前要的是短期形势预期判断，
+        #     不是把上一交易日复盘再发一遍——复盘在看板/收盘推送里都有）
+        try:
+            _judge, _ = _market_outlook(data)
+        except Exception:
+            _judge = ""
+        if _judge:
+            L.append("")
+            L.append("**⓪ 今日研判（短期形势 → 预期）**")
+            for _ln in _judge.split("\n"):
+                L.append(_ln)
         L.append("")
         # ① 今日候选（按买入价值降序，_top_recs 已统一排序）
         pool = _top_recs(rec.get("core"), rec.get("relay"), rec.get("all"), MAX_RECS)
@@ -2035,11 +2137,11 @@ def format_stock_summary(data, url="", mode="close", con=None):
             L.append("**④ 📌 关注票操作（板块当日预判 → 动作）**")
             L.append("> 预判口径：板块昨日涨停高度 + 接力方向 + 主力资金 + 情绪/外围，仅作当日节奏参考。")
             L.extend(_wf_lines)
-        # ⑤ 盘前策略（聚合仓位/主线/接力/关注池/风险）
+        # ⑤ 盘前策略（聚合仓位/主线/接力/关注池/风险——研判在⓪已给，这里只留执行清单）
         pp = data.get("preopen_plan") or {}
         if pp.get("position"):
             L.append("")
-            L.append("**⑤ 盘前策略**")
+            L.append("**⑤ 执行清单**")
             L.append("- 建议仓位：**%s**" % pp["position"])
             if pp.get("main_line"):
                 L.append("- 主线预判：%s" % "、".join(pp["main_line"]))
@@ -2119,11 +2221,18 @@ def format_sc(data, url="", mode="close", con=None):
 
     if mode == "preauction":
         L = []
-        L.append("## 竞价前 · %s" % date)
+        L.append("## 今日研判 · %s" % date)
         g = data.get("global_market") or {}
         L.append("外围：%s" % _global_signal(g))
         if regime.get("note"):
             L.append("连板：%s" % regime.get("note", ""))
+        # ⓪ 今日研判（SC 精简：研判置顶，替代旧复盘复读）
+        try:
+            _judge, _ = _market_outlook(data)
+        except Exception:
+            _judge = ""
+        if _judge:
+            L.append("⓪研判：" + _judge.split("\n")[0])
         # ① 今日候选（SC 紧凑：每票一行 = 序号+名+分+动作尾巴）
         pool = _top_recs(rec.get("core"), rec.get("relay"), rec.get("all"), MAX_RECS)
         gated = [x for x in pool if _dual_ok(x)]
@@ -2163,10 +2272,10 @@ def format_sc(data, url="", mode="close", con=None):
         if _wf_lines:
             L.append("③b📌关注票·板块当日预判：")
             L.extend(_wf_lines)
-        # ④ 盘前策略
+        # ④ 执行清单（研判在⓪已给）
         pp = data.get("preopen_plan") or {}
         if pp.get("position"):
-            L.append("④策略：仓位 %s ｜ 主线 %s ｜ 接力 %s"
+            L.append("④执行：仓位 %s ｜ 主线 %s ｜ 接力 %s"
                      % (pp["position"], "、".join(pp.get("main_line", []) or []),
                         "、".join(pp.get("relay_dir", []) or [])))
         # ⑤ ⚡ 短线/超短线盘前操作（追板回落/破位/停滞 当日离场或换强）
@@ -2484,28 +2593,53 @@ def format_panic_summary(data, url="", con=None):
 
 
 def format_weekend_summary(data, url="", news_items=None):
-    """周末发酵 / 周一前瞻（条件推送专用）：仅在有周末要闻时由 push_weekend 调用。"""
+    """周末发酵 / 周一前瞻（条件推送专用）：仅在有周末要闻时由 push_weekend 调用。
+
+    2026-08-31 重构（用户要求：不要把周五的复盘再推一次）——
+    主体改为「周一前瞻研判」（基于短期形势的预期判断 + 周末要闻催化），
+    周五盘面数据不再复读（看板/周五收盘推送里都有）。"""
     news_items = news_items or []
     m = data.get("meta", {})
     date = m.get("date", "")
-    narr = data.get("narrative", {}) or {}
     L = []
-    L.append("## 周末发酵 · 周一前瞻（%s）" % date)
+    L.append("## 周一前瞻 · 周末要闻催化（周五数据 %s）" % date)
     L.append("")
-    L.append("### 周末要闻（发酵信息）")
-    for it in news_items[:12]:
-        t = it.get("title") or it.get("content") or it.get("summary") or ""
-        if t:
-            L.append("- %s" % t)
-    L.append("")
-    if narr.get("outlook"):
-        L.append("### 周一策略关注")
-        L.append(narr["outlook"])
+    # 周一研判：外围发酵 → 周一预期（盘前研判引擎复用）
+    try:
+        judge, meta = _market_outlook(data)
+    except Exception:
+        judge, meta = "", {}
+    if judge:
+        L.append("### 周一预期研判")
+        for ln in judge.split("\n"):
+            L.append(ln)
         L.append("")
+    if news_items:
+        L.append("### 周末要闻（对周一的催化方向，非复盘）")
+        for it in news_items[:10]:
+            t = it.get("title") or it.get("content") or it.get("summary") or ""
+            if t:
+                L.append("- %s" % t)
+        L.append("")
+        L.append("> 要闻只列催化线索：利好主线→竞价高开则跟，利空→低开不接飞刀，")
+        L.append("> 具体操作仍以周一 08:50 盘前研判与 09:25 竞价确认为准。")
     if url:
+        L.append("")
         L.append("---")
         L.append("完整数据看板：%s" % url)
-    return {"title": "周末发酵 · 周一前瞻 %s" % date, "text": "\n".join(L)}
+    # SC 精简版（ServerChan 8K 上限；研判 1 行 + 要闻前 5 条）
+    sc = []
+    sc.append("## 周一前瞻 %s" % date)
+    if judge:
+        sc.append("研判：" + judge.split("\n")[0])
+    for it in news_items[:5]:
+        t = it.get("title") or it.get("content") or it.get("summary") or ""
+        if t:
+            sc.append("- %s" % t[:60])
+    if url:
+        sc.append("看板：%s" % url)
+    return {"title": "周一前瞻 · 周末要闻 %s" % date, "text": "\n".join(L),
+            "sc_text": "\n".join(sc)}
 
 
 if __name__ == "__main__":

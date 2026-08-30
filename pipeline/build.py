@@ -1052,7 +1052,12 @@ def run(date_override=None, dedup_close=False):
             store.upsert_seats(con, date, data["seats"]["hits"])
             stats = seats.win_rates(con) if con else {}
             data["seats"]["stats"] = stats
-            log("  游资席位：命中 %d 条知名席位动作" % data["seats"]["n_hits"])
+            # 2026-08-30 dept 粒度胜率：同标签内分化大（拉萨 10678762=46% vs 10428246=16.7%），
+            # dept_stats 供 summary_lines 输出「回避营业部」精确到号。
+            dept_stats = seats.win_rates_dept(con) if con else {}
+            data["seats"]["dept_stats"] = dept_stats
+            log("  游资席位：命中 %d 条知名席位动作（标签级 %d / dept 级 %d 过样本门槛）"
+                % (data["seats"]["n_hits"], len(stats), len(dept_stats)))
     except Exception as e:
         log("  游资席位失败（无网/解析异常，跳过）：%r" % e)
         data["seats"] = None

@@ -29,6 +29,7 @@
 """
 import json
 import os
+import re
 import sys
 import time
 import atexit
@@ -129,15 +130,15 @@ def _flush_pending(cfg):
         t, x = _PENDING.pop(0)
         _notify_now(cfg, t, x)
         return
+    n = len(_PENDING)
     lines = []
     for i, (t, x) in enumerate(_PENDING):
         lines.append("### %s" % t)
         lines.append(x)
-        if i < len(_PENDING) - 1:
+        if i < n - 1:
             lines.append("")
     _PENDING.clear()
-    _notify_now(cfg, "📦 合并推送（%d 条）" % len(lines[:0]) if False else
-                "📦 合并推送", "\n".join(lines))
+    _notify_now(cfg, "📦 合并推送（%d 条）" % n, "\n".join(lines))
 
 
 def _notify_now(cfg, title, text):
@@ -245,6 +246,10 @@ _EXEC_STATE_MEMBERS = [
     "risk_state.json",
     "state/notify_dedup.json", "state/loss_streak.json",
     "sim_review.json",
+    # 2026-08-31 升级：明日竞价关注清单（当日 WATCH/SKIP 的 st≥3 高度票，
+    # 高度溢价单调 st=1→8 胜率 55.6%→82.4%——当天没买到的票明天竞价给好开价
+    # 仍是机会，跨 run 持久化后次日 09:25 开仓通道前即时提醒）
+    "state/auction_watch.json",
 ]
 
 
@@ -283,7 +288,17 @@ def exec_state_restore(force=False):
             blob = r.read()
         import tarfile
         tf = tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz")
-        tf.extractall(ex)   # 成员路径都是相对 executor 目录的白名单文件
+        # 安全：只解包白名单成员，拒绝绝对路径/.. 穿越（恶意或损坏的压缩包）
+        _allow = set(_EXEC_STATE_MEMBERS)
+        safe_members = []
+        for m in tf.getmembers():
+            name = m.name.replace("\\", "/").lstrip("./")
+            if name not in _allow or m.issym() or m.islnk():
+                _log("exec_state: 跳过非法成员 %r" % m.name)
+                continue
+            m.name = name
+            safe_members.append(m)
+        tf.extractall(ex, members=safe_members)
         tf.close()
         _log("exec_state: 状态已恢复（sim.db %s）"
              % os.path.getsize(os.path.join(ex, "sim.db")))
@@ -468,7 +483,6 @@ def run_sells(broker, mode, cfg):
                                            p.get("name") or "", dec.get("price") or 0, pnl_pct)
                 lines.append("- ⛔ **顺延** %s(%s)｜%s"
                              % (p.get("name"), p["code"], cs["reason"]))
-                gate_note = dec["reason"]
                 continue
             r = broker.sell_limit(p["code"], dec["price"], sig={
                 "name": p.get("name"), "reason": dec["reason"], "source": "strategy"})
@@ -485,6 +499,9 @@ def run_sells(broker, mode, cfg):
                 lines.append("- %s(%s) 卖出失败：%s" % (p.get("name"), p["code"], r.get("reason")))
         else:
             # HOLD 也是决策（用户要求：持有同样记录+推送理由）
+            # 2026-08-31 推送降噪：HOLD 只留痕+入当日决策汇总，不再逐笔即时推送——
+            # 持有是常态而非动作，逐条推是「推送杂乱」的主要来源；当日 14:45 尾盘
+            # 回报与 15:30 复盘都会带完整持仓明细。真正倾向卖出（SELL）的才即时推。
             if hasattr(broker, "record_decision"):
                 broker.record_decision(p["code"], "HOLD", dec["reason"],
                                        p.get("name") or "", dec.get("price") or 0, pnl_pct)
@@ -492,14 +509,6 @@ def run_sells(broker, mode, cfg):
                          % (p.get("name"), p["code"],
                             pnl_pct if pnl_pct is not None else 0,
                             dec["reason"]))
-            _act_notify(cfg,
-                        "⏸ 持有 %s(%s)" % (p.get("name"), p["code"]),
-                        "**持有理由**：%s\n\n- 现价 %s｜成本 %.2f｜浮盈 %s\n- 策略：不一定每天交易，持股等待更高期望"
-                        % (dec["reason"],
-                           ("%.2f" % q.get("price")) if (q and q.get("price")) else "—",
-                           p["avg_price"],
-                           ("%.2f%%" % pnl_pct) if pnl_pct is not None else "—"),
-                        dedup_key="HOLD:%s:%s" % (time.strftime("%Y-%m-%d"), p["code"]))
             _log("持有 %s：%s" % (p["code"], dec["reason"]))
     return lines, n_sold
 
@@ -701,11 +710,8 @@ def run_tailgate(broker, mode, cfg):
                                        "尾盘确认：%s" % dec["reason"],
                                        p.get("name") or "", dec.get("price") or 0)
             lines.append("- ✅ **尾盘确认持有** %s(%s)：%s" % (p.get("name"), p["code"], dec["reason"]))
-            _act_notify(cfg,
-                        "✅ 尾盘确认持有 %s(%s)" % (p.get("name"), p["code"]),
-                        "**确认理由**：%s\n\n- 现价 %.2f｜成本 %.2f\n- 过夜持有，明日早盘按策略裁决"
-                        % (dec["reason"], dec.get("price") or 0, p["avg_price"]),
-                        dedup_key="TAILHOLD:%s:%s" % (today, p["code"]))
+            # 2026-08-31 推送降噪：尾盘确认持有不再逐笔推送（与早盘 HOLD 同口径），
+            # 只留痕，统一进当日 15:30 复盘；SELL 止损仍即时推
             _log("尾盘确认持有 %s：%s" % (p["code"], dec["reason"]))
     return lines, n_act
 
@@ -722,9 +728,65 @@ def run_once(cfg, force=False):
     if not ok:
         _log("非交易日，跳过开平仓：%s" % why)
         _notify(cfg, "⏸ 模拟盘跳过（非交易日）", "- %s\n- 下一交易日 09:25 自动恢复" % why, defer=True)
+        _flush_pending(cfg)
         return
-    exec_state_restore()
+    try:
+        _run_once_inner(cfg, force=force)
+    finally:
+        # 2026-08-30 修复：run_once 抛异常时也必须回存状态，
+        # 否则本轮成交/风控记录丢失，下轮以旧状态运行
+        exec_state_save()
+
+
+def _daily_loss_check(broker, cfg, gate=None, label=""):
+    """当日亏损熔断检查（2026-08-31 修复：risk_gate.check_daily_loss 从未被调用，
+    -3% 熔断线形同虚设）。用总资产相对初始资金回撤口径近似当日组合亏损；
+    触发即写入 risk_state.json 熔断，之后所有 BUY 被 check() 拦截（SELL 不受限，
+    持仓仍按卖出策略独立裁决——熔断保护的是开仓，不是把持仓锁死在亏损里）。"""
+    try:
+        bal = broker.balance()
+        init = broker_sim._initial_cash()
+        if not init or not bal.get("total"):
+            return None
+        pnl_pct = (bal["total"] / init - 1) * 100
+        if gate is None:
+            gate = RiskGate((cfg.get("risk") or {}))
+        was = gate.tripped
+        gate.check_daily_loss(pnl_pct)
+        if gate.tripped and not was:
+            _act_notify(cfg, "🛑 熔断触发：%s（组合回撤 %.2f%%）" % (label, pnl_pct),
+                        "**当日组合回撤 %.2f%% 已触发熔断线 %.2f%%**\n\n"
+                        "- 今日剩余时段不再开新仓（BUY 全部拦截）\n"
+                        "- 持仓卖出裁决不受影响，止损照常执行\n"
+                        "- 恢复方式：人工删除 risk_state.json 的 circuit_break"
+                        % (pnl_pct, (cfg.get("risk") or {}).get("daily_loss_stop_pct", -3.0)))
+        return pnl_pct
+    except Exception as e:
+        _log("熔断检查失败（不阻断）：%r" % e)
+        return None
+
+
+def _run_once_inner(cfg, force=False):
     broker, mode = pick_broker(cfg)
+
+    # 明日竞价关注清单提醒（2026-08-31 升级）：昨日复盘标记的高度票今日再审视。
+    # 只提醒不自动买——最终仍由竞价决策线 + 分级 + 风控裁决。
+    try:
+        aw = _auction_watch_load()
+        if aw:
+            lines_aw = ["**昨日复盘标记的高度票，今日竞价重点观察：**", ""]
+            for it in aw:
+                lines_aw.append("- %s(%s) st=%d｜%s"
+                                % (it.get("name"), it.get("code"),
+                                   it.get("streak") or 0, it.get("reason") or ""))
+            lines_aw.append("")
+            lines_aw.append("- 竞价纪律：高开≥2%跟进 / st=2 需≥5% / 低开≤-2%放弃 / 平开观望")
+            _act_notify(cfg, "🎯 今日竞价关注清单（%d 只）" % len(aw),
+                        "\n".join(lines_aw), dedup_key="auction_watch")
+            _auction_watch_consume()
+            _log("竞价关注清单已推送并消费：%d 只" % len(aw))
+    except Exception as e:
+        _log("竞价关注清单提醒失败（不阻断）：%r" % e)
 
     # Phase 1：平仓（不依赖线上数据，行情+K线就够）
     _log("=" * 30 + " Phase1 平仓 " + "=" * 30)
@@ -746,6 +808,10 @@ def run_once(cfg, force=False):
         _log("✗ 数据拉取/解密失败：%r" % e)
         buy_lines = ["- 数据拉取失败：%r" % e]
 
+    # 当日亏损熔断（开仓后复查：若本轮买入后组合回撤越线，立即熔断，
+    # 尾盘通道与后续轮次的开仓全部拦截）
+    _daily_loss_check(broker, cfg, label="早盘通道")
+
     # 汇总
     _log("=" * 60)
     all_lines = (["## 大盘环境：%s" % mkt["mode"], "- %s" % mkt["reason"], "",
@@ -759,7 +825,6 @@ def run_once(cfg, force=False):
         except Exception as e:
             _log("战绩汇总失败：%r" % e)
     _notify(cfg, "执行器回报（卖%d 买%d）" % (n_sold, n_buy), "\n".join(all_lines), defer=True)
-    exec_state_save()
 
 
 def _tail_buys(broker, cfg, sigs, mkt):
@@ -863,7 +928,13 @@ def run_tail(cfg, force=False):
     if not ok:
         _log("非交易日，尾盘通道跳过：%s" % why)
         return
-    exec_state_restore()
+    try:
+        _run_tail_inner(cfg, force=force)
+    finally:
+        exec_state_save()
+
+
+def _run_tail_inner(cfg, force=False):
     broker, mode = pick_broker(cfg)
     _log("=" * 30 + " 14:45 尾盘确认通道 " + "=" * 30)
 
@@ -881,6 +952,9 @@ def run_tail(cfg, force=False):
     except Exception as e:
         _log("✗ 尾盘入场数据拉取失败：%r" % e)
         buy_lines = ["- 数据拉取失败：%r" % e]
+
+    # 当日亏损熔断（尾盘复查，2026-08-31 补链）
+    _daily_loss_check(broker, cfg, label="尾盘通道")
 
     out = (["## 尾盘确认（14:45）环境：%s" % mkt.get("mode"),
             "- %s" % mkt.get("reason", ""), "",
@@ -967,6 +1041,53 @@ def run_report(month: str = None):
 
 _LOSS_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state",
                                 "loss_streak.json")
+
+# 明日竞价关注清单（2026-08-31 升级）：当日留痕里 st≥3 的高度票，
+# 复盘时写入、次日 09:25 开仓通道前读取并即时推送提醒。
+# 依据：高度溢价单调（st=1→8 胜率 55.6%→82.4%），当日因低开/分级/风控
+# 没上车的强趋势票，次日竞价给好开价就是二次入场机会。
+_AUCTION_WATCH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "state", "auction_watch.json")
+
+
+def _auction_watch_save(date, items):
+    """写入明日竞价关注清单（覆盖式，每个交易日一份）。"""
+    try:
+        os.makedirs(os.path.dirname(_AUCTION_WATCH_PATH), exist_ok=True)
+        with open(_AUCTION_WATCH_PATH, "w", encoding="utf-8") as f:
+            json.dump({"date": date, "items": items}, f, ensure_ascii=False)
+    except Exception as e:
+        _log("竞价关注清单写入失败：%r" % e)
+
+
+def _auction_watch_load():
+    """读取竞价关注清单。
+
+    语义：清单由「昨日复盘」写入（date=复盘当日），供「今日早盘」消费——
+    所以校验 date != 今日（而非 == 今日），且消费成功后由调用方删除文件，
+    防止陈旧清单跨多日重复推送。非交易日序列（周五复盘→周一早盘）天然兼容。
+    """
+    try:
+        with open(_AUCTION_WATCH_PATH, encoding="utf-8") as f:
+            st = json.load(f)
+        if st.get("date") and st.get("date") != time.strftime("%Y-%m-%d"):
+            return st.get("items") or []
+    except Exception:
+        pass
+    return []
+
+
+def _auction_watch_consume():
+    """清单消费完毕后删除（best-effort；删除失败由 dedup_key 同日幂等兜底）。"""
+    try:
+        os.remove(_AUCTION_WATCH_PATH)
+    except OSError:
+        try:
+            os.replace(_AUCTION_WATCH_PATH, _AUCTION_WATCH_PATH + ".stale")
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def _loss_streak_update(day_pct):
@@ -1067,6 +1188,11 @@ def run_review(cfg=None, push=True, force=False):
     1. 汇总当日成交/平仓盈亏/被拒记录/总资产
     2. 写 tools/executor/sim_review.json（build.py 读它生成网站「模拟盘」模块）
     3. PushPlus 推送「模拟盘操作+当日复盘」
+
+    2026-08-31 板式重构（用户要求：推送比较杂乱）：
+      · 持仓明日计划只写留痕、不再逐笔操作前推送（此前每笔持仓会额外发一条
+        「⏸ 持有」推送，复盘时又整段重发一遍 → 同一信息轰炸 3 次）
+      · 复盘正文改分区结构：总览 → 今日操作 → 明日计划 → 归因，一屏读完
     """
     cfg = cfg or load_cfg()
     if mode_check_no_sim(cfg):
@@ -1082,83 +1208,118 @@ def run_review(cfg=None, push=True, force=False):
     init = broker_sim._initial_cash()
     total_pct = (bal["total"] / init - 1) * 100 if init else 0
 
-    # ---- 组装推送文本 ----
-    lines = ["**总资产 %.0f 元（初始 %.0f，累计 %+.2f%%）**" % (bal["total"], init, total_pct),
-             "- 当日已实现盈亏：%+.2f%%" % ds["day_realized_pct"],
-             "- 可用现金 %.0f / 持仓市值 %.0f" % (bal["cash"], bal["market_value"]), ""]
-    if ds["trades"]:
-        lines.append("## 当日操作（%d 笔）" % len(ds["trades"]))
-        for t in ds["trades"]:
-            act = "买入" if t["action"] == "BUY" else "卖出"
-            lines.append("- **%s %s**(%s) %.2f × %d股 = %.0f元｜%s"
-                         % (act, t["name"], t["code"], t["price"], t["volume"],
-                            t["amount"], (t["reason"] or "")[:60]))
-    else:
-        lines.append("## 当日无操作")
-    if ds["closed"]:
-        lines.append("")
-        lines.append("## 当日平仓")
-        for c in ds["closed"]:
-            lines.append("- %s(%s) %+.2f%%｜%s" % (c["name"], c["code"],
-                                                   c["pnl_pct"], c["sell_reason"]))
-    if ds["rejects"]:
-        lines.append("")
-        lines.append("## 被拒留痕（%d 条）" % len(ds["rejects"]))
-        for rj in ds["rejects"]:
-            lines.append("- ⛔ %s %s(%s)：%s" % (rj["action"], rj["name"], rj["code"], rj["reason"]))
-    # 决策留痕（用户要求：买卖/持有/观望全部记录）
-    decisions = ds.get("decisions") or []
-    if decisions:
-        lines.append("")
-        lines.append("## 今日决策留痕（%d 条，含持有/观望）" % len(decisions))
-        for dc in decisions:
-            act = dc["action"]
-            icon = {"HOLD": "⏸ 持有", "WATCH": "👀 观望", "SKIP": "🚫 放弃",
-                    "BUY": "🟢 买入", "SELL": "🔴 卖出"}.get(act, act)
-            lines.append("- %s %s(%s)：%s"
-                         % (icon, dc["name"] or "—", dc["code"],
-                            (dc["reason"] or "")[:80]))
-    # 持仓中 + 次日持仓计划（2026-08-29 用户需求：说清为什么继续持有）
+    # ---- 明日持仓计划：只算留痕，不逐笔推送（fix：重复轰炸）----
     holding = b.positions(open_only=True)
     holding_plans = []
+    hq = {}
     if holding:
-        lines.append("")
-        lines.append("## 持仓中（%d 笔）+ 明日计划" % len(holding))
-        codes = [p["code"] for p in holding]
         try:
-            hq = realtime_quote(codes)
+            hq = realtime_quote([p["code"] for p in holding])
         except Exception:
             hq = {}
-        for p in holding:
-            q = hq.get(p["code"]) or {}
-            try:
-                kl = strategy._tencent_kline(p["code"], n=12)
-            except Exception:
-                kl = []
-            try:
-                dec = strategy.sell_decision(p, q, kl)
-            except Exception:
-                dec = {"verdict": "HOLD", "reason": "计划生成异常"}
-            if dec["verdict"] == "HOLD":
-                plan = "✅ 继续持有：%s" % dec["reason"]
-            else:
-                plan = "⚠️ 明日倾向卖出：%s" % dec["reason"]
-            pnl_pct = ((q.get("price") / p["avg_price"] - 1) * 100) \
-                if (q and q.get("price") and p.get("avg_price")) else None
-            lines.append("- %s(%s) 成本%.2f 现价%s 浮盈%s｜%s"
-                         % (p["name"], p["code"], p["avg_price"],
-                            ("%.2f" % q["price"]) if q.get("price") else "—",
-                            ("%.2f%%" % pnl_pct) if pnl_pct is not None else "—",
-                            plan))
-            holding_plans.append({
-                "code": p["code"], "name": p["name"],
-                "avg_price": p["avg_price"],
-                "price": q.get("price"), "pnl_pct": round(pnl_pct, 2) if pnl_pct is not None else None,
-                "verdict": dec["verdict"], "plan": plan,
-            })
+    for p in holding:
+        q = hq.get(p["code"]) or {}
+        try:
+            kl = strategy._tencent_kline(p["code"], n=12)
+        except Exception:
+            kl = []
+        try:
+            dec = strategy.sell_decision(p, q, kl)
+        except Exception:
+            dec = {"verdict": "HOLD", "reason": "计划生成异常"}
+        pnl_pct = ((q.get("price") / p["avg_price"] - 1) * 100) \
+            if (q and q.get("price") and p.get("avg_price")) else None
+        plan = ("✅ 继续持有：%s" % dec["reason"]) if dec["verdict"] == "HOLD" \
+            else ("⚠️ 明日倾向卖出：%s" % dec["reason"])
+        holding_plans.append({
+            "code": p["code"], "name": p["name"],
+            "avg_price": p["avg_price"],
+            "price": q.get("price"), "pnl_pct": round(pnl_pct, 2) if pnl_pct is not None else None,
+            "verdict": dec["verdict"], "plan": plan,
+        })
+
+    # ---- 组装推送文本（分区板式）----
     verdict = "今日盈利 ✅" if ds["day_realized_pct"] > 0 else (
-        "今日亏损 ❌（后续按归因改进策略）" if ds["day_realized_pct"] < 0 else "今日持平")
-    # ---- 亏损/盈利都总结（2026-08-30 用户要求：盈利总结、亏损更要总结+出下一步方案）----
+        "今日亏损 ❌" if ds["day_realized_pct"] < 0 else "今日持平")
+    lines = ["**总资产 %.0f 元（初始 %.0f，累计 %+.2f%%）｜当日 %+.2f%% %s**"
+             % (bal["total"], init, total_pct, ds["day_realized_pct"], verdict),
+             "- 可用现金 %.0f ｜ 持仓市值 %.0f ｜ 持仓 %d 笔"
+             % (bal["cash"], bal["market_value"], len(holding))]
+
+    # 区块1：今日成交（合并为一行区标，逐笔只留核心字段）
+    if ds["trades"]:
+        lines.append("")
+        lines.append("**今日操作（%d 笔）**" % len(ds["trades"]))
+        for t in ds["trades"]:
+            icon = "🟢买入" if t["action"] == "BUY" else "🔴卖出"
+            lines.append("- %s **%s**(%s) %.2f×%d股 %.0f元｜%s"
+                         % (icon, t["name"], t["code"], t["price"], t["volume"],
+                            t["amount"], (t["reason"] or "")[:50]))
+    else:
+        lines.append("")
+        lines.append("**今日无成交**（纪律：没有信号就不动，也是操作）")
+
+    # 区块2：当日平仓盈亏
+    if ds["closed"]:
+        lines.append("")
+        lines.append("**当日平仓（%d 笔）**" % len(ds["closed"]))
+        for c in sorted(ds["closed"], key=lambda x: -(x.get("pnl_pct") or 0)):
+            lines.append("- %s(%s) %+.2f%%｜%s" % (c["name"], c["code"],
+                                                   c["pnl_pct"], c["sell_reason"]))
+
+    # 区块3：明日计划（持仓 + 操作倾向，收盘一次性给出，替代盘中逐笔轰炸）
+    if holding_plans:
+        lines.append("")
+        lines.append("**明日计划（持仓 %d 笔）**" % len(holding_plans))
+        for hp in holding_plans:
+            lines.append("- %s(%s) 成本%.2f 浮盈%s｜%s"
+                         % (hp["name"], hp["code"], hp["avg_price"],
+                            ("%.2f%%" % hp["pnl_pct"]) if hp["pnl_pct"] is not None else "—",
+                            hp["plan"]))
+
+    # 区块3.5：明日竞价关注清单（2026-08-31 升级）
+    # 当日因低开/平开/分级/风控没上车的 st≥3 高度票——高度溢价单调
+    # （st=1→8 胜率 55.6%→82.4%），次日竞价给好开价就是二次入场机会。
+    # 同时写入 auction_watch.json 跨 run 持久化，次日 09:25 开仓通道前即时提醒。
+    watch_items = []
+    for dc in (ds.get("decisions") or []):
+        if dc.get("action") not in ("WATCH", "SKIP"):
+            continue
+        m = re.search(r"st(\d+)", dc.get("reason") or "")
+        st_n = int(m.group(1)) if m else 0
+        if st_n >= 3:
+            watch_items.append({"code": dc["code"], "name": dc.get("name") or "",
+                                "streak": st_n, "reason": (dc.get("reason") or "")[:60]})
+    if watch_items:
+        # 按高度降序、同高度按代码去重，最多 5 条
+        seen_c, uniq = set(), []
+        for it in sorted(watch_items, key=lambda x: -x["streak"]):
+            if it["code"] in seen_c:
+                continue
+            seen_c.add(it["code"])
+            uniq.append(it)
+        uniq = uniq[:5]
+        lines.append("")
+        lines.append("**🎯 明日竞价关注（今日未上车的高度票 %d 只）**" % len(uniq))
+        for it in uniq:
+            lines.append("- %s(%s) st=%d｜%s"
+                         % (it["name"], it["code"], it["streak"], it["reason"]))
+        lines.append("- 竞价纪律：高开≥2%跟进 / st=2 需≥5% / 低开≤-2%放弃 / 平开观望")
+        _auction_watch_save(ds["date"], uniq)
+        _log("明日竞价关注清单已写入：%d 只" % len(uniq))
+
+    # 区块4：被拒/放弃留痕（压缩为一行汇总 + 最多 3 条明细）
+    n_skip = sum(1 for dc in (ds.get("decisions") or [])
+                 if dc.get("action") in ("WATCH", "SKIP", "FREEZE"))
+    if ds["rejects"] or n_skip:
+        lines.append("")
+        lines.append("**纪律留痕**：被拒 %d 条、观望/放弃 %d 条（明细见网站模拟盘页）"
+                     % (len(ds["rejects"]), n_skip))
+        for rj in ds["rejects"][:3]:
+            lines.append("- ⛔ %s %s(%s)：%s" % (rj["action"], rj["name"], rj["code"],
+                                                 rj["reason"][:60]))
+
+    # 区块5：归因 + 明日方案（盈利固化/亏损归因 + 连亏纪律）
     try:
         extra = _loss_review_section(b, ds, cfg)
         if extra:
@@ -1166,6 +1327,7 @@ def run_review(cfg=None, push=True, force=False):
             lines.append(extra)
     except Exception as e:
         _log("归因总结生成失败（不影响复盘）：%r" % e)
+
     text = "\n".join(lines)
     _log(text)
     if push:

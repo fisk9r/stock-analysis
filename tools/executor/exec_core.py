@@ -10,6 +10,7 @@
 import hashlib
 import hmac
 import json
+import time
 import urllib.request
 import ssl
 
@@ -94,11 +95,13 @@ def extract_signals(data: dict) -> list:
     return out
 
 
-def realtime_quote(codes: list, timeout: int = 10) -> dict:
+def realtime_quote(codes: list, timeout: int = 10, retries: int = 2) -> dict:
     """腾讯实时行情批量接口（CORS 友好，无需鉴权）。
 
     返回 {code: {"open": 开盘价, "price": 现价, "prev_close": 昨收}}。
     竞价结束后（9:25+）open 即当日开盘价。
+    2026-08-31 升级：CI 弱网偶发 URLError/超时曾致整轮「行情失败，平仓顺延」
+    （持仓该卖的没卖成）——加 3 次指数退避重试（0/2/4s），失败才向上抛。
     """
     if not codes:
         return {}
@@ -113,8 +116,19 @@ def realtime_quote(codes: list, timeout: int = 10) -> dict:
         qcodes.append(prefix + c)
     url = "https://qt.gtimg.cn/q=" + ",".join(qcodes)
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as r:
-        txt = r.read().decode("gbk", errors="ignore")
+    txt = None
+    last_err = None
+    for attempt in range(1 + max(0, retries)):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as r:
+                txt = r.read().decode("gbk", errors="ignore")
+            break
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(2 * (attempt + 1))  # 2s / 4s
+    if txt is None:
+        raise last_err  # 全部重试失败，保持原有异常语义
     out = {}
     for line in txt.split(";"):
         line = line.strip()
