@@ -106,25 +106,21 @@ jobs:
           python runner.py $ARGS
 
       # ---------- 4. sim_review.json 推到仓库 state/ + 触发网站重建 ----------
-      # 注意：heredoc 结束符必须在行首（缩进的 PYEOF 会被 bash 当成普通文本，
-      # 吃不到结束符直接报错，2026-08-30 第三跑实测）。
+      # 注意：不要在 run: | 块里用 heredoc——结束符顶格会截断 YAML 块标量
+      # （YAML 把 PYEOF 当新映射键 → 解析失败 → workflow 注册不上 → dispatch 422）；
+      # 缩进又不被 bash 认作结束符。改用 python -c 单行传参（GH Actions 环境）。
       - name: 回传网站模块数据
         if: always()
+        env:
+          TASK: ${{ steps.task.outputs.name }}
         run: |
           if [ ! -f tools/executor/sim_review.json ]; then
             echo "（无 sim_review.json，跳过回传）"; exit 0
           fi
           mkdir -p state
           cp tools/executor/sim_review.json state/sim_review.json
-          python - <<'PYEOF'
-          import sys
-          sys.path.insert(0, "tools")
-          import gh_api
-          gh_api.push_files("sim-review: 模拟盘每日复盘数据（CI executor 自动回传）",
-                            ["state/sim_review.json"])
-          print("OK sim_review.json pushed")
-PYEOF
+          python -c "import sys; sys.path.insert(0, 'tools'); import gh_api; gh_api.push_files('sim-review: executor CI auto-push', ['state/sim_review.json']); print('OK sim_review.json pushed')"
           # 复盘任务才触发网站重建（now/tail 不动线上站点）
-          if [ "${{ steps.task.outputs.name }}" = "review" ]; then
+          if [ "$TASK" = "review" ]; then
             python tools/gh_api.py dispatch build
           fi
