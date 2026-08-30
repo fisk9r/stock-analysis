@@ -1567,6 +1567,37 @@
         '判断主线是升温接力 / 降温兑现 / 一日游');
     }
 
+    /* 板块轮动实操（2026-08-31：消费 D.sector_trade —— 数据早就有，前端此前未渲染）
+       引擎口径：取 sector_rotation 主线 TopN + 领涨票，升温优先跟进/降温只兑现不接力 */
+    var STRD = D.sector_trade || [];
+    if (STRD.length) {
+      var trdBadge = function (s) {
+        var tc = s.trend === '升温' ? C.up : s.trend === '降温' ? C.down : C.gray;
+        var tags = '<span class="bd" style="border-color:' + tc + ';color:' + tc + ';font-size:11px;padding:0 5px">' +
+          (s.trend === '升温' ? '🔥 ' : s.trend === '降温' ? '🧊 ' : '') + E(s.trend) + '</span>';
+        if (s.is_new) tags += ' <span class="bd ok" style="font-size:11px;padding:0 4px">新题材</span>';
+        if (s.persistent) tags += ' <span class="bd mid" style="font-size:11px;padding:0 4px">持续主线</span>';
+        return tags;
+      };
+      var tradeBody = '<div class="grid g3">' + STRD.map(function (s) {
+        var act = s.trend === '升温'
+          ? '<span style="color:' + C.up + '">✅ 升温主线 → 次日可跟进领涨票（竞价照决策线）</span>'
+          : s.trend === '降温'
+          ? '<span style="color:' + C.down + '">⚠️ 降温主线 → 只兑现不接力，谨慎追高</span>'
+          : '<span class="muted">→ 观望</span>';
+        var leads = (s.leads || []).slice(0, 3).map(function (x) {
+          var chg = x.chg != null ? ' <b style="color:' + (x.chg >= 0 ? C.up : C.down) + '">' + (x.chg >= 0 ? '+' : '') + f(x.chg, 1) + '%</b>' : '';
+          return '<span class="chip">' + stk(x.code, x.name) + chg + '</span>';
+        }).join('');
+        return '<div class="sec"><div class="hd"><b>' + E(s.sector) + '</b>' + trdBadge(s) +
+          '<span style="margin-left:auto;font-size:15px;font-weight:750;color:' + C.up + '">' + (s.today_zt || 0) + '<span style="font-size:11px;font-weight:400"> 涨停</span></span></div>' +
+          (leads ? '<div class="chips" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:5px">领涨 ' + leads + '</div>' : '') +
+          '<div class="note" style="margin-top:5px;font-size:11px">' + act + '</div></div>';
+      }).join('') + '</div>';
+      h += card('🎯 板块轮动实操（Top' + STRD.length + '）', tradeBody,
+        '轮动结论的实操版：🔥升温=涨停家数持续增加可跟进（领涨票=次日风向标，竞价照决策线执行）；🧊降温=资金退潮只兑现不接力；持续主线=近5日≥3天有涨停承接，容错更高');
+    }
+
     /* 板块接力 · 主副线切换（断板→接力检测）+ 主副线分类 */
     var RL = D.sector_relay;
     if (RL && RL.available) {
@@ -2193,6 +2224,33 @@
         '融合连板接力 / 趋势主升 / 游资席位 / 主线题材 / 连续信号 / 买卖区间 六大信号，多引擎共振者综合分更高、可信度更强，避免单模型碎片推荐');
     })();
 
+    /* 尾盘观察·明日关注（2026-08-31：消费 D.late_session —— 尾盘决策通道此前只进推送，网站未渲染）
+       watch_tomorrow=次日竞价按决策线执行的关注票；exit_warn=尾盘走弱警示 */
+    (function () {
+      var LS = D.late_session;
+      if (!LS) return;
+      var wt = LS.watch_tomorrow || [], ew = LS.exit_warn || [];
+      if (!wt.length && !ew.length) return;
+      function row(x, warn) {
+        var wc = (x.worth || 0) >= 60 ? C.up : (x.worth || 0) >= 45 ? C.gold : C.gray;
+        return '<div class="kv" style="margin:6px 0">' +
+          (warn ? '⚠️ ' : '') + '<b>' + stk(x.code, x.name) + '</b> ' + lbBadge(x.streak) +
+          (x.tag ? ' <span class="bd ' + (x.tag === '核心龙头' ? 'lb4' : 'ok') + '" style="font-size:10px;padding:0 4px">' + E(x.tag) + '</span>' : '') +
+          ' <span style="margin-left:auto;font-size:11px"><span class="muted">收盘</span> <b>' + f(x.close) + '</b>' +
+          (x.worth != null ? ' · <span class="muted">价值</span> <b style="color:' + wc + '">' + f(x.worth, 0) + '</b>' : '') + '</span>' +
+          (x.auction_rule ? '<div class="muted" style="font-size:11px;margin-top:2px">竞价纪律：' + E(x.auction_rule) + '</div>' : '') +
+          '</div>';
+      }
+      var lsBody = (wt.length ? '<div style="margin-bottom:10px"><b style="font-size:12px;color:' + C.up + '">📌 明日竞价关注（' + wt.length + '，共 ' + (LS.n_watch || wt.length) + ' 只在池）</b>' +
+        wt.map(function (x) { return row(x, false); }).join('') + '</div>' : '') +
+        (ew.length ? '<div><b style="font-size:12px;color:' + C.down + '">🚨 尾盘走弱警示（' + ew.length + '）</b>' +
+        ew.map(function (x) { return row(x, true); }).join('') +
+        '<div class="note" style="margin-top:4px">尾盘回落/强转弱 = 资金日内兑现，次日按低开预案执行：低开≤-2%一律放弃</div></div>' : '') +
+        '<div class="note" style="margin-top:6px">' + E(LS.note || '尾盘确认口径：次日竞价按决策线执行——高开≥2%跟进/低开≤-2%放弃/平开观望') + '</div>';
+      h += card('🌙 尾盘观察 · 明日关注（14:45 尾盘决策通道）', lsBody,
+        '与盘前 08:50 预判互补：盘前只有昨日数据，尾盘已有当日全天量价确认。核心龙头/主线接力票封住=次日竞价强势确认信号；尾盘走弱票=次日谨慎');
+    })();
+
     /* 板块趋势推荐：把趋势向上的个股按行业聚类，找出趋势抱团最强的板块，并标注主线/龙头 */
     (function () {
       var ST = R.sector_trend || [];
@@ -2222,6 +2280,64 @@
       }).join('') + '</div>';
       h += card('🔥 板块趋势推荐（' + ST.length + '）', body,
         '把趋势向上的个股按行业聚类，找出「多只票悄悄走主升、却没几只涨停」的趋势抱团板块；🔥双主线=同时被涨停主线确认的强主线，👑=该主线板块的龙头');
+    })();
+
+    /* 推荐归因（2026-08-31：消费 D.rec_attr —— rec_picks 回测归因此前只存不展示）
+       回答「系统推荐到底行不行」：总体胜率 + 二板执行修复 + 特征分桶 + 亏损票盘中路径 */
+    (function () {
+      var RA = D.rec_attr;
+      if (!RA || !RA.overall) return;
+      var ov = RA.overall;
+      var stat = function (v, suffix, good, bad) {
+        var col = v >= good ? C.up : v <= bad ? C.down : C.gold;
+        return '<b style="color:' + col + '">' + f(v, 1) + (suffix || '') + '</b>';
+      };
+      var head = '<div class="grid g4" style="margin-bottom:12px">' +
+        kpi('推荐样本', RA.n_total || ov.n + '', '近 ' + RA.n_total + ' 笔已出结果') +
+        kpi('次日胜率', f(ov.win_rate, 1) + '%', ov.win_rate >= 55 ? '跑赢抛硬币' : '样本期偏弱', ov.win_rate >= 55 ? 'up' : '') +
+        kpi('次日均涨', sign(ov.avg_pct, 1) + '%', '盘中冲高均值 +' + f(ov.avg_runup, 1) + '%', ov.avg_pct >= 0 ? 'up' : 'down') +
+        kpi('次日均回撤', f(ov.avg_dd, 1) + '%', '持有需承受的平均回撤', ov.avg_dd > -3 ? 'up' : 'down') +
+        '</div>';
+
+      /* st=2 二板票按开盘溢价分桶（曾胜率异常 38.6% 的归因主线） */
+      var st2Rows = '';
+      var bmap = { '<-2': '低开<-2%', '-2~2': '平开±2%', '2-5': '高开2-5%', '>5': '高开>5%' };
+      Object.keys(RA.st2_buckets || {}).forEach(function (k) {
+        var b = RA.st2_buckets[k];
+        st2Rows += '<tr><td class="name">' + (bmap[k] || k) + '</td><td class="r num faint">' + b.n +
+          '</td><td class="r num"><b style="color:' + (b.win_rate >= 55 ? C.up : b.win_rate < 40 ? C.down : C.gold) + '">' + f(b.win_rate, 0) + '%</b></td>' +
+          '<td class="r num">' + sign(b.avg_pct, 1) + '%</td><td class="r num">+' + f(b.avg_runup, 1) + '%</td><td class="r num">' + f(b.avg_dd, 1) + '%</td></tr>';
+      });
+      var st2Html = st2Rows ? '<div style="margin:10px 0"><b style="font-size:12px">🥈 二板票按次日开盘溢价分桶</b>' +
+        (RA.st2_exec ? ' <span class="bd ok" style="font-size:10px;padding:0 4px">决策线放行(高开>5%)：' + f(RA.st2_exec.win_rate, 0) + '% / ' + sign(RA.st2_exec.avg_pct, 1) + '%</span>' : '') +
+        table([{ t: '开盘溢价' }, { t: '样本', a: 'r' }, { t: '胜率', a: 'r' }, { t: '次日均涨', a: 'r' }, { t: '冲高', a: 'r' }, { t: '回撤', a: 'r' }], st2Rows) + '</div>' : '';
+
+      /* 特征分桶：哪个特征档位真正贡献胜率 */
+      var fmap = { quality: '封板质量', turn: '换手率', sector_strength: '板块强度', auction_pattern: '竞价形态' };
+      var featHtml = '';
+      Object.keys(RA.features || {}).forEach(function (fk) {
+        var ft = RA.features[fk];
+        var bk = ft.buckets || {};
+        var keys = Object.keys(bk);
+        if (!keys.length) return;
+        featHtml += '<div><b style="font-size:11px;color:var(--muted)">' + (fmap[fk] || fk) + '</b>（覆盖 ' + ft.covered + ' 笔）' +
+          '<div class="chips" style="margin:4px 0 10px;display:flex;flex-wrap:wrap;gap:5px">' + keys.map(function (gk) {
+            var g = bk[gk];
+            var wc = g.win_rate >= 60 ? C.up : g.win_rate < 40 ? C.down : C.gold;
+            return '<span class="chip">' + E(gk) + ' · <b style="color:' + wc + '">' + f(g.win_rate, 0) + '%</b>' +
+              ' <span class="muted">(' + g.n + '笔 ' + sign(g.avg_pct, 1) + '%)</span></span>';
+          }).join('') + '</div></div>';
+      });
+      var featWrap = featHtml ? '<div style="margin-top:10px"><b style="font-size:12px">🧪 特征胜率分桶（按档位）</b>' + featHtml + '</div>' : '';
+
+      /* 亏损票盘中路径：冲高自救窗口 */
+      var lp = RA.loser_path || null;
+      var lpHtml = lp && lp.n_losers ? '<div class="note" style="margin-top:10px">📉 亏损票盘中路径（' + lp.n_losers + ' 笔）：' +
+        f(lp.pct_had_runup2, 0) + '% 曾冲高≥2%（平均冲高 +' + f(lp.avg_runup, 1) + '%），平均回撤 ' + f(lp.avg_dd, 1) + '% —— ' +
+        '冲高到 +2% 附近减仓可挽回约 <b style="color:' + C.gold + '">' + f(lp.rescue_per_trade, 1) + '%/笔</b>，别把浮盈拿到变亏损</div>' : '';
+
+      h += card('🔬 推荐归因 · 系统实战胜率体检', head + st2Html + featWrap + lpHtml,
+        '基于 rec_picks 历史推荐回测：胜率=次日收盘为正比例；二板票 2-5% 弱高开胜率垫底 → 竞价决策线（高开≥2%才买）由此实证而来；特征分桶告诉你哪个档位该加重/回避');
     })();
 
     /* 全量评分表 */
