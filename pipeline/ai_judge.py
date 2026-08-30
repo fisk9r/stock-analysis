@@ -311,6 +311,11 @@ _RETRYABLE_HINTS = ("timeout", "timed out", "urlopen error", "429", "500", "502"
 _QUOTA_HINTS = ("每周", "每月", "使用上限", "重置", "quota", "billing",
                 "balance", "余额", "arrears", "exceeded your")
 
+# 2026-08-30 第二轮（用户充值后）：402 Payment Required = 余额不足已充值，
+# 用户明确要求「直接重试」——归类为可重试瞬时故障（充值到账通常秒级生效；
+# 若充值未生效会重试 tries 次后换下一家，不会卡死）。
+_PAYMENT_HINTS = ("402", "payment required", "insufficient")
+
 
 def _err_body(e):
     """尽量取 HTTPError 的响应体文本（诊断配额/限流差异的关键）。"""
@@ -321,7 +326,9 @@ def _err_body(e):
 
 
 def _is_quota_exhausted(e):
-    """配额/余额耗尽类 429：重试无意义，直接换模型。"""
+    """配额/余额耗尽类 429：重试无意义，直接换模型。
+
+    402（Payment Required）不算这里——2026-08-30 用户充值拍板：402 直接重试。"""
     if not isinstance(e, urllib.error.HTTPError) or e.code != 429:
         return False
     body = _err_body(e)
@@ -338,10 +345,15 @@ def _rpm_backoff(e):
 
 
 def _is_retryable(e):
-    """瞬时故障（超时/限流/网关/连接重置）可重试；鉴权/参数/配额错误重试无意义。"""
+    """瞬时故障（超时/限流/网关/连接重置/402 已充值）可重试；鉴权/参数/配额错误不重试。"""
+    # 2026-08-30 用户拍板：402 已充值 → 直接重试（最高优先级判断）
+    if isinstance(e, urllib.error.HTTPError) and e.code == 402:
+        return True
     if _is_quota_exhausted(e):
         return False
     s = repr(e).lower() + _err_body(e).lower()
+    if any(k in s for k in _PAYMENT_HINTS) and "402" in s:
+        return True
     return any(k in s for k in _RETRYABLE_HINTS)
 
 
@@ -350,6 +362,7 @@ def chat_retry(name, prov, prompt, system=None, timeout=60, max_tokens=None,
     """带瞬时错误重试的单接口调用。
 
     2026-08-30 升级（真实故障演练结论）：
+      · 402 Payment Required → 用户已充值，直接重试（用户拍板：充值到账通常秒级）；
       · 配额耗尽 429（body 含「使用上限/quota/余额」）→ 立即抛，换下一家；
       · RPM 限流 429（body 含 'after N seconds'）→ 按服务端建议秒数退避重试
         （kimi-k2.6 免费 key 限 RPM=3，固定 3s 退避实测不够）；
@@ -592,11 +605,14 @@ def generate_narrative_backup(data, preferred=None):
         # 思考慢，180s（CI run 33258533163 曾 90s 超时）；国产模型 100s 足够。
         # 重试策略：瞬时故障（超时/429/5xx/连接重置）重试一次；鉴权/参数错误直接换下一家。
         to = 180 if name.startswith("cloudflare") else 100
+        # max_tokens（2026-08-30 实测）：kimi-k2.6 是 thinking 模型，思考 ~290 tokens
+        # 先行消耗配额，700 会把正文截断（finish_reason=length，content 为空）→ 提到 1600。
+        _mt = 1600 if "kimi" in name else 700
         # 内重试：解析为 None（json_mode 偶发抽风）再试一次；瞬时异常也重试一次。
         for _try in range(2):
             try:
                 raw = chat_retry(name, providers[name], prompt, system=system,
-                                 timeout=to, max_tokens=700, tries=2, gap=5)
+                                 timeout=to, max_tokens=_mt, tries=2, gap=5)
             except Exception as e:
                 print("[ai_judge] 备用叙事 %s 失败（含重试），尝试下一接口：%s"
                       % (name, repr(e)))

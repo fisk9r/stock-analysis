@@ -1724,6 +1724,19 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     import recperf as _rpm
     _engine_sec("**📈 推荐池胜率回溯**", _rpm, "recperf", cap=3)
 
+    # ---- 推荐多维归因（2026-08-30：st=2 监控/特征分桶/落袋挽回，随 rec_picks 积累自动更新）----
+    if data.get("rec_attr"):
+        try:
+            import recattr as _rattr
+            _al = _rattr.summary_lines(data["rec_attr"])
+            if _al:
+                L.append("")
+                L.append("**🔬 推荐归因**")
+                for ln in _al[:4]:
+                    L.append("- %s" % ln)
+        except Exception:
+            pass
+
     if _on("style") and data.get("style_switch"):
         try:
             sb = data["style_switch"]
