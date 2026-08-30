@@ -65,6 +65,10 @@ PROVIDER_PRESETS = {
     "zhipu":     {"kind": "openai",   "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
                   "model": "glm-4.6", "label": "智谱 GLM-4.6",
                   "thinking": {"type": "disabled"}},
+    # 智谱免费档第二备（2026-08-30 用户要求 z.ai 免费模型兜底）：glm-5.3-flash 走
+    # Coding 端点吃体验套餐（免费），与 glm-4.6 同一周配额池互为备份。
+    "zhipu_flash": {"kind": "openai", "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+                    "model": "glm-5.3-flash", "label": "智谱 GLM-5.3-Flash(免费)"},
     "doubao":    {"kind": "openai",   "base_url": "https://ark.cn-beijing.volces.com/api/v3",
                   "model": "doubao-seed-1-6-250615", "label": "字节豆包 Doubao"},
     "hunyuan":   {"kind": "openai",   "base_url": "https://api.hunyuan.cloud.tencent.com/v1",
@@ -237,6 +241,23 @@ def _gemini_chat(base_url, api_key, model, prompt, system, timeout):
     return d["candidates"][0]["content"]["parts"][0]["text"]
 
 
+def _cf_local_token(cfg):
+    """本地 CF token 第三来源：config/cf_token.txt（一行纯 token）。
+
+    2026-08-30 用户要求 AI 主力走 Cloudflare 且「不要因为一个模型失效拖垮 app」：
+    CI 有 Secret 自动生效；本地此前因无 token 整条 CF 链被跳过（只剩 kimi/zhipu）。
+    现在支持把 CF API Token 存到 config/cf_token.txt（已被 .gitignore 覆盖），
+    本地手动 build / 复盘也能吃到 CF 免费额度。"""
+    p = os.path.join(ROOT, "config", "cf_token.txt")
+    if os.path.exists(p):
+        try:
+            t = open(p, encoding="utf-8").read().strip()
+            return t or None
+        except Exception:
+            return None
+    return None
+
+
 def get_active_providers():
     """返回 (name -> 有效配置) 字典，配置来源为 models.json 或环境变量 AI_<NAME>_KEY。"""
     cfg = load_model_config()
@@ -249,12 +270,18 @@ def get_active_providers():
         key = _env_resolve(pc.get("api_key"))
         if not key:
             if name.startswith("cloudflare"):
-                # CF 专用：key = CLOUDFLARE_API_TOKEN（部署已配置，零额外成本）
+                # CF 专用：key = CLOUDFLARE_API_TOKEN（部署已配置，零额外成本）；
+                # 本地回落 config/cf_token.txt（2026-08-30 新增，见 _cf_local_token）
                 key = (os.environ.get("CLOUDFLARE_API_TOKEN")
-                       or _env_resolve(pc.get("account_id") and None) or "")
+                       or _cf_local_token(cfg) or "")
             else:
                 key = os.environ.get("AI_%s_KEY" % name.upper()) \
                     or os.environ.get("%s_API_KEY" % name.upper())
+                # zhipu_flash 与 zhipu 同账号同 key（2026-08-30）：缺省自动继承，
+                # 免去 config 重复填 key（模型不同但账号配额池相同）。
+                if not key and name == "zhipu_flash":
+                    key = _env_resolve((cfg.get("zhipu") or {}).get("api_key")) \
+                        or os.environ.get("AI_ZHIPU_KEY") or ""
         if not key:
             continue
         merged = dict(preset)
@@ -576,11 +603,13 @@ def generate_narrative_backup(data, preferred=None):
     cfg = load_model_config()
     if preferred is None:
         nb = cfg.get("narrative_backup")
-        # 主力链（2026-08-29 用户拍板：AI 换成 Cloudflare，二次选型按官方模型目录核对）：
-        # Cloudflare GLM-4.7-Flash 主力（免费额度内中文/金融质量最好）→ Cloudflare
-        # Qwen3-30B → Cloudflare GPT-OSS-120B → zhipu → kimi（国产 key 末端兜底）。
+        # 主力链（2026-08-30 用户拍板：优先 Cloudflare 且备用 ≥3 个，全部失败才用
+        # kimi/z.ai 免费模型）：CF GLM-4.7-Flash（免费额度内中文/金融最好）→
+        # CF Qwen3-30B → CF GPT-OSS-120B → CF Llama-3.3-70B（4 个 CF 互备）→
+        # zhipu(z.ai Coding 端点免费) → zhipu_flash(glm-5.3-flash 免费) → kimi 免费key。
         pref_list = nb if isinstance(nb, list) and nb else \
-            ["cloudflare", "cloudflare_qwen", "cloudflare_gptoss", "zhipu", "kimi"]
+            ["cloudflare", "cloudflare_qwen", "cloudflare_gptoss", "cloudflare_llama",
+             "zhipu", "zhipu_flash", "kimi"]
     elif isinstance(preferred, str):
         pref_list = [preferred]
     else:
@@ -592,9 +621,9 @@ def generate_narrative_backup(data, preferred=None):
     for n in list(pref_list) + list(PROVIDER_PRESETS.keys()):
         if n in providers and n not in order:
             order.append(n)
-    # 终极保底（2026-08-30 用户拍板）：无论 narrative_backup 怎么配置，
-    # z.ai(智谱) 与 kimi 这两个已配 key 的国产接口必须排在链尾兜底。
-    for tail in ("zhipu", "kimi"):
+    # 终极保底（2026-08-30 用户拍板升级）：无论 narrative_backup 怎么配置，
+    # z.ai(智谱 x2) 与 kimi 这三个已配 key 的国产免费接口必须排在链尾兜底。
+    for tail in ("zhipu", "zhipu_flash", "kimi"):
         if tail in providers and tail not in order:
             order.append(tail)
     prompt = _build_narrative_prompt(data)

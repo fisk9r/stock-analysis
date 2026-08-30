@@ -31,6 +31,7 @@ import json
 import os
 import sys
 import time
+import atexit
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -45,6 +46,18 @@ CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json
 REVIEW_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sim_review.json")
 
 
+def _flush_at_exit():
+    """进程退出兜底：把未 flush 的合并队列发出去（config 已不可得时读一次）。"""
+    try:
+        if _PENDING:
+            _flush_pending(load_cfg())
+    except Exception:
+        pass
+
+
+atexit.register(_flush_at_exit)
+
+
 def load_cfg():
     with open(CFG_PATH, encoding="utf-8") as f:
         return json.load(f)
@@ -54,9 +67,45 @@ def _log(msg):
     print("[%s] %s" % (time.strftime("%H:%M:%S"), msg))
 
 
-def _notify(cfg, title, text):
+def _notify(cfg, title, text, defer=False):
     """双通道推送：PushPlus（模拟盘主通道，owner+接收人2）+ ServerChan（可选）。
-    任一通道失败不影响执行。"""
+    任一通道失败不影响执行。
+
+    2026-08-30 合并推送（用户要求：与其他推送时间重合时合并）：
+      defer=True 的消息（汇总/尾盘回报等非操作前推送）先入队，
+      进程退出时或下一条 immediate 推送前统一 flush——多条合并成一条，
+      避免同一分钟轰炸多条。操作前推送（defer=False）永远立即发，保证「先推送后执行」。"""
+    if defer:
+        _PENDING.append((title, text))
+        return
+    _flush_pending(cfg)
+    _notify_now(cfg, title, text)
+
+
+_PENDING = []  # [(title, text)] 待合并推送队列
+
+
+def _flush_pending(cfg):
+    """把队列里的待发推送合并成一条发出。空队列无事。"""
+    if not _PENDING:
+        return
+    if len(_PENDING) == 1:
+        t, x = _PENDING.pop(0)
+        _notify_now(cfg, t, x)
+        return
+    lines = []
+    for i, (t, x) in enumerate(_PENDING):
+        lines.append("### %s" % t)
+        lines.append(x)
+        if i < len(_PENDING) - 1:
+            lines.append("")
+    _PENDING.clear()
+    _notify_now(cfg, "📦 合并推送（%d 条）" % len(lines[:0]) if False else
+                "📦 合并推送", "\n".join(lines))
+
+
+def _notify_now(cfg, title, text):
+    """实际执行推送（原 _notify 主体）。"""
     results = []
     ncfg = cfg.get("notify") or {}
     # --- PushPlus ---
@@ -400,23 +449,23 @@ def run_tailgate(broker, mode, cfg):
         poss = broker.positions(open_only=True)
     except Exception as e:
         _log("尾盘通道：持仓读取失败：%r" % e)
-        return ["- 持仓读取失败"]
+        return ["- 持仓读取失败"], 0
     if not poss:
-        return ["- 无持仓，尾盘通道无事可做"]
+        return ["- 无持仓，尾盘通道无事可做"], 0
     today = time.strftime("%Y-%m-%d")
     # 只看当日买入的持仓（尾盘确认的语义边界）
     todays = [p for p in poss if (p.get("buy_date") or "") == today]
     if not todays:
         _log("尾盘通道：今日无新买入持仓（%d 笔老持仓交给明日早盘策略）" % len(poss))
-        return ["- 今日无新买入持仓，老持仓由明日早盘策略裁决"]
+        return ["- 今日无新买入持仓，老持仓由明日早盘策略裁决"], 0
     codes = [p["code"] for p in todays]
     try:
         quote = realtime_quote(codes)
     except Exception as e:
         _log("尾盘通道：行情失败：%r" % e)
-        return ["- 行情失败，尾盘确认顺延"]
+        return ["- 行情失败，尾盘确认顺延"], 0
     if not quote:
-        return ["- 行情为空（可能非交易时段）"]
+        return ["- 行情为空（可能非交易时段）"], 0
 
     n_act = 0
     for p in todays:
@@ -511,7 +560,7 @@ def run_once(cfg):
             _log(broker_sim.SimBroker().summary())
         except Exception as e:
             _log("战绩汇总失败：%r" % e)
-    _notify(cfg, "执行器回报（卖%d 买%d）" % (n_sold, n_buy), "\n".join(all_lines))
+    _notify(cfg, "执行器回报（卖%d 买%d）" % (n_sold, n_buy), "\n".join(all_lines), defer=True)
 
 
 def _tail_buys(broker, cfg, sigs, mkt):
@@ -635,7 +684,7 @@ def run_tail(cfg):
            ["", "## 尾盘入场（%d 笔）" % n_buy] + (buy_lines or ["- 无"]))
     for ln in out:
         _log(ln)
-    _notify(cfg, "尾盘确认回报（买%d）" % n_buy, "\n".join(out))
+    _notify(cfg, "尾盘确认回报（买%d）" % n_buy, "\n".join(out), defer=True)
 
 
 def run_summary():
@@ -709,6 +758,103 @@ def run_report(month: str = None):
                          "FROM sim_trades ORDER BY ts"):
         print("  %s %s %s %s %.2f × %d = %.0f 元  %s" % (
             r[0], r[3], r[2], r[1], r[4], r[5], r[6], (r[7] or "")[:40]))
+
+
+_LOSS_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state",
+                                "loss_streak.json")
+
+
+def _loss_streak_update(day_pct):
+    """连亏状态持久化：返回 (streak, yesterday_pct)。盈利清零。"""
+    st = {}
+    try:
+        with open(_LOSS_STATE_PATH, encoding="utf-8") as f:
+            st = json.load(f)
+    except Exception:
+        st = {}
+    yest_pct = st.get("last_pct")
+    if day_pct < 0:
+        streak = (st.get("streak") or 0) + 1
+    else:
+        streak = 0
+    out = {"streak": streak, "last_pct": day_pct,
+           "updated": time.strftime("%Y-%m-%d")}
+    try:
+        os.makedirs(os.path.dirname(_LOSS_STATE_PATH), exist_ok=True)
+        with open(_LOSS_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False)
+    except Exception:
+        pass
+    return streak, yest_pct
+
+
+def _loss_review_section(b, ds, cfg):
+    """盈利/亏损都出总结；亏损日附加归因 + 明日操作方案（用户 2026-08-30 拍板）。
+
+    归因维度（全部来自当日留痕，不猜）：
+      1. 平仓原因分布（断板卖/止损/清仓期到/落袋）
+      2. 被拒与放弃笔数（纪律执行质量）
+      3. 连亏状态（跨日持久化）：连亏 2 日 → 降半仓，连亏 3 日 → 暂停开新仓 1 日
+      4. 买入纪律自检：当日买入笔的决策线依据回看
+    明日方案输出为可直接执行的纪律条目。
+    """
+    day_pct = ds.get("day_realized_pct") or 0
+    streak, yest_pct = _loss_streak_update(day_pct)
+    L = []
+
+    if day_pct >= 0:
+        # 盈利日：简要固化「做对了什么」，保持策略一致性
+        wins = [c for c in (ds.get("closed") or []) if (c.get("pnl_pct") or 0) > 0]
+        if wins:
+            best = max(wins, key=lambda c: c["pnl_pct"])
+            L.append("## ✅ 盈利固化")
+            L.append("- 最佳平仓：%s(%s) %+.2f%%｜%s"
+                     % (best.get("name"), best.get("code"), best["pnl_pct"],
+                        (best.get("sell_reason") or "")[:50]))
+            reasons = [c.get("sell_reason") or "" for c in wins]
+            if any("断板" in r for r in reasons):
+                L.append("- 断板开盘卖纪律有效（回测拖到 T+2 平均 -1.18%），明日继续执行")
+        L.append("- 当前连胜状态：今日%s，保持既有分级与决策线，不因盈利放松门槛"
+                 % ("盈利 %+.2f%%" % day_pct))
+        return "\n".join(L)
+
+    # ---- 亏损日深度归因 ----
+    L.append("## 📉 亏损归因 + 明日方案")
+    closed = ds.get("closed") or []
+    lossers = [c for c in closed if (c.get("pnl_pct") or 0) < 0]
+    if lossers:
+        worst = min(lossers, key=lambda c: c["pnl_pct"])
+        L.append("- 最差平仓：%s(%s) %+.2f%%｜原因：%s"
+                 % (worst.get("name"), worst.get("code"), worst["pnl_pct"],
+                    (worst.get("sell_reason") or "")[:60]))
+        # 平仓原因聚类
+        buckets = {}
+        for c in lossers:
+            r = c.get("sell_reason") or "其他"
+            for key in ("断板", "止损", "清仓", "高开低走", "落袋", "尾盘"):
+                if key in r:
+                    buckets[key] = buckets.get(key, 0) + 1
+                    break
+            else:
+                buckets["其他"] = buckets.get("其他", 0) + 1
+        L.append("- 亏损笔原因分布：%s"
+                 % "、".join("%s×%d" % (k, v) for k, v in
+                             sorted(buckets.items(), key=lambda kv: -kv[1])))
+    rej = ds.get("rejects") or []
+    if rej:
+        L.append("- 被拒留痕 %d 条（可成交性/风控拦截生效，属正常保护）" % len(rej))
+    # 连亏纪律阶梯
+    if streak >= 3:
+        L.append("- ⛔ **连亏 %d 日 → 明日暂停开新仓**（只做持仓卖出裁决，空仓等待环境修复）" % streak)
+    elif streak == 2:
+        L.append("- ⚠️ **连亏 %d 日 → 明日新仓金额减半**（caution 模式），只做 A/B 级" % streak)
+    else:
+        L.append("- 连亏 %d 日（首亏）：维持正常仓位，但明日只做竞价决策线通过的票" % streak)
+    # 落袋纪律提醒（recattr 实证：亏损票 51% 曾冲高≥2%）
+    L.append("- 落袋纪律：回测显示亏损票 51.2% 曾冲高≥2%——持仓浮盈达 +2% 先减半仓锁定")
+    # 决策线提醒
+    L.append("- 竞价纪律（明日严格执行）：高开≥2%跟进（st=2 需 ≥5%）/ 低开≤-2%放弃 / 平开观望")
+    return "\n".join(L)
 
 
 def run_review(cfg=None, push=True):
@@ -802,6 +948,14 @@ def run_review(cfg=None, push=True):
             })
     verdict = "今日盈利 ✅" if ds["day_realized_pct"] > 0 else (
         "今日亏损 ❌（后续按归因改进策略）" if ds["day_realized_pct"] < 0 else "今日持平")
+    # ---- 亏损/盈利都总结（2026-08-30 用户要求：盈利总结、亏损更要总结+出下一步方案）----
+    try:
+        extra = _loss_review_section(b, ds, cfg)
+        if extra:
+            lines.append("")
+            lines.append(extra)
+    except Exception as e:
+        _log("归因总结生成失败（不影响复盘）：%r" % e)
     text = "\n".join(lines)
     _log(text)
     if push:
