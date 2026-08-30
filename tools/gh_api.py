@@ -90,13 +90,6 @@ def api(method, path, data=None, binary=None, base=API, timeout=120):
         try:
             r = urllib.request.urlopen(req, timeout=timeout, context=_ctx)
             return r.status, r.read().decode("utf-8", "replace")
-        except urllib.error.URLError as e:
-            # MITM 代理导致证书校验失败（CERTIFICATE_VERIFY_FAILED）→ 降级重试一次
-            if (_ctx is None and "CERTIFICATE_VERIFY_FAILED" in str(e)
-                    and "SSL" in str(type(e))):
-                _ctx = ssl._create_unverified_context()
-                last_err = e
-                continue
         except urllib.error.HTTPError as e:
             code = e.code
             # 5xx 为服务端瞬时故障（如 GitHub 503 No server available），应重试而非立即失败
@@ -105,7 +98,20 @@ def api(method, path, data=None, binary=None, base=API, timeout=120):
                 time.sleep(2 * (_attempt + 1))
                 continue
             return code, e.read().decode("utf-8", "replace")
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
+        except urllib.error.URLError as e:
+            # MITM 代理导致证书校验失败（CERTIFICATE_VERIFY_FAILED）→ 降级重试一次
+            if (_ctx is None and "CERTIFICATE_VERIFY_FAILED" in str(e)
+                    and "SSL" in str(type(e))):
+                _ctx = ssl._create_unverified_context()
+                last_err = e
+                continue
+            last_err = e
+            if _attempt < 2:
+                time.sleep(2 * (_attempt + 1))
+                continue
+        except (TimeoutError, OSError, Exception) as e:
+            # 2026-08-30：兜住一切异常但保留原始错误再抛——此前某些非 OSError
+            # （如 http.client 内部异常）静默穿透到「3 次重试均未成功」，丢失根因。
             last_err = e
             if _attempt < 2:
                 time.sleep(2 * (_attempt + 1))
