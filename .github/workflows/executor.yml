@@ -1,0 +1,125 @@
+# 模拟盘执行器云端托管（2026-08-30 用户拍板：电脑不常开机且开机无网，
+# 模拟盘必须全程跑在 GitHub Actions，网页端可见、本机零依赖）
+#
+# 三个任务（北京时间）：
+#   09:25 开仓通道（竞价决策线裁决 + 风控 + 模拟下单）
+#   14:43 尾盘确认通道（持仓管理 + 微红横盘入场）
+#   15:32 复盘总结（盈亏归因 + 明日方案 + PushPlus 推送 + 回传网站模块）
+#
+# 状态持久化（runner 内置 exec_state_restore/save，走 Release data-snapshot 资产）：
+#   sim.db / risk_state.json / notify_dedup.json / loss_streak.json / sim_review.json
+#   打包为 executor_state.tar.gz 附件，运行前恢复、运行后回传（纯标准库实现）。
+#   sim_review.json 额外推到仓库 state/（build.py 读它生成网站「模拟盘」模块），
+#   并在复盘后 dispatch stock.yml build，让网页当晚就更新。
+# 推送凭据：复用 stock.yml 的 NOTIFY_JSON Secret（PushPlus 多接收人）。
+# 交易日判定：runner.is_trading_now 上证指数行情时间戳兜底（节假日整轮跳过）。
+# 本机 .bat 计划任务保留作备用（开机时同样跑，RiskGate 幂等 + sim.db 单源防重）。
+name: 模拟盘执行器（云端托管）
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: '执行任务：now(开仓) / tail(尾盘) / review(复盘)'
+        required: true
+        default: 'review'
+        type: choice
+        options: [now, tail, review]
+      force:
+        description: '跳过交易日判定（手动测试用）'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+  schedule:
+    - cron: "25 1 * * 1-5"   # UTC 01:25 = 北京 09:25
+    - cron: "43 6 * * 1-5"   # UTC 06:43 = 北京 14:43
+    - cron: "32 7 * * 1-5"   # UTC 07:32 = 北京 15:32
+
+permissions:
+  contents: write
+
+concurrency:
+  group: executor
+  cancel-in-progress: false   # 不取消排队——两次触发重叠时顺序执行保护 sim.db
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  NOTIFY_JSON: ${{ secrets.NOTIFY_JSON }}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # ---------- 1. 任务判定：dispatch 输入优先，schedule 按小时映射 ----------
+      - name: 判定任务
+        id: task
+        run: |
+          if [ -n "${{ github.event.inputs.task }}" ]; then
+            echo "name=${{ github.event.inputs.task }}" >> $GITHUB_OUTPUT
+          else
+            H=$(date -u +%H)
+            case "$H" in
+              01) echo "name=now"    >> $GITHUB_OUTPUT ;;
+              06) echo "name=tail"   >> $GITHUB_OUTPUT ;;
+              07) echo "name=review" >> $GITHUB_OUTPUT ;;
+              *)  echo "name=review" >> $GITHUB_OUTPUT ;;
+            esac
+          fi
+          echo "force=${{ github.event.inputs.force || 'false' }}" >> $GITHUB_OUTPUT
+
+      # ---------- 2. 推送凭据落盘（NOTIFY_JSON Secret → config/notify.json） ----------
+      - name: 注入推送凭据
+        if: env.NOTIFY_JSON != ''
+        run: |
+          mkdir -p config
+          printf '%s' "$NOTIFY_JSON" > config/notify.json
+          echo "✅ notify.json 已注入（PushPlus 多接收人）"
+
+      # ---------- 3. 执行（状态恢复/回存由 runner 内置 exec_state 完成） ----------
+      # 注意：--force 由 main() 解析并透传，无需 heredoc（此前 heredoc 内缩进
+      # 会被 Python 解析为 IndentationError，2026-08-30 已全部移除）。
+      - name: 运行执行器（${{ steps.task.outputs.name }}）
+        working-directory: tools/executor
+        run: |
+          TASK="${{ steps.task.outputs.name }}"
+          FORCE="${{ steps.task.outputs.force }}"
+          case "$TASK" in
+            now)    ARGS="--now" ;;
+            tail)   ARGS="--tail" ;;
+            review) ARGS="--review" ;;
+            *)      ARGS="--review" ;;
+          esac
+          if [ "$FORCE" = "true" ]; then ARGS="$ARGS --force"; fi
+          echo "运行参数：python runner.py $ARGS"
+          python runner.py $ARGS
+
+      # ---------- 4. sim_review.json 推到仓库 state/ + 触发网站重建 ----------
+      - name: 回传网站模块数据
+        if: always()
+        run: |
+          if [ ! -f tools/executor/sim_review.json ]; then
+            echo "（无 sim_review.json，跳过回传）"; exit 0
+          fi
+          mkdir -p state
+          cp tools/executor/sim_review.json state/sim_review.json
+          python - <<'PYEOF'
+          import sys
+          sys.path.insert(0, "tools")
+          import gh_api
+          gh_api.push_files("sim-review: 模拟盘每日复盘数据（CI executor 自动回传）",
+                            ["state/sim_review.json"])
+          print("OK sim_review.json pushed")
+          PYEOF
+          # 复盘任务才触发网站重建（now/tail 不动线上站点）
+          if [ "${{ steps.task.outputs.name }}" = "review" ]; then
+            python tools/gh_api.py dispatch build
+          fi

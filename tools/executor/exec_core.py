@@ -104,6 +104,11 @@ def realtime_quote(codes: list, timeout: int = 10) -> dict:
         return {}
     qcodes = []
     for c in codes:
+        if c[:2] in ("sh", "sz", "bj"):
+            # 2026-08-30 CI 托管：指数码（如 sh000001 上证指数）直接带前缀传入，
+            # 透传不二次映射（否则会拼成 szsh000001 查无此码）
+            qcodes.append(c)
+            continue
         prefix = "sh" if c[0] in ("6", "9") else ("bj" if c[0] in ("4", "8") else "sz")
         qcodes.append(prefix + c)
     url = "https://qt.gtimg.cn/q=" + ",".join(qcodes)
@@ -144,6 +149,9 @@ def realtime_quote(codes: list, timeout: int = 10) -> dict:
                 "pb": _fl(46),            # 市净率
                 "pe_ttm": _fl(39),        # 市盈率 TTM
                 "amount_wan": _fl(37),    # 成交额（万元）
+                # 2026-08-30 CI 托管：行情时间戳 YYYYMMDDHHMMSS（field 30），
+                # 用于交易日判定（节假日行情停在上个交易日 → 执行器整轮跳过）
+                "stamp": (fields[30] if len(fields) > 30 else ""),
             }
         except (ValueError, IndexError):
             continue

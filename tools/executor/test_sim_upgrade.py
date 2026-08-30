@@ -108,13 +108,16 @@ ck("balance 总资产>0", bal["total"] > 0)
 print("\n[3] runner 复盘与推送文本")
 import runner
 
+# 2026-08-30：测试曾把模拟交易数据真实推到线上 state/sim_review.json（污染网站模块），
+# 测试一律置 EXE_NO_PUSH=1 跳过真实推送。
+os.environ["EXE_NO_PUSH"] = "1"
 cfg = {"broker": "sim", "notify": {"serverchan_key": "", "pushplus_tokens": []}}
 # 备份真实 review 文件
 rev = os.path.join(EXE, "sim_review.json")
 bak = rev + ".bak"
 if os.path.exists(rev):
     shutil.copy2(rev, bak)
-ds = runner.run_review(cfg, push=False)
+ds = runner.run_review(cfg, push=False, force=True)  # force=True：跳过交易日守卫（周末跑测试会被拦截）
 ck("复盘函数返回", ds is not None and "balance" in ds)
 hist = json.load(open(rev, encoding="utf-8"))
 today = ds["date"]

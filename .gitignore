@@ -51,9 +51,13 @@ tools/executor/sim_test.db*
 tools/executor/sim_review.json
 tools/executor/risk_state.json
 tools/executor/*.trash
+tools/executor/state/
 
 # ---- 系统 ----
 __pycache__/
 *.pyc
 .DS_Store
 Thumbs.db
+
+# ---- AI keys（本地文件形态，绝不入库）----
+config/cf_token.txt

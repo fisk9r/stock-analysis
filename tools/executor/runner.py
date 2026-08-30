@@ -32,6 +32,7 @@ import os
 import sys
 import time
 import atexit
+import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -113,6 +114,21 @@ def _notify_now(cfg, title, text):
     if isinstance(pp_tokens, str):
         pp_tokens = [pp_tokens]
     if not pp_tokens:
+        # 2026-08-30 CI 托管：GitHub Actions 无 config/notify.json，凭据走
+        # Secrets 注入的 NOTIFY_JSON 环境变量（与 pipeline/notifier.py 同结构）。
+        env_ncfg = os.environ.get("NOTIFY_JSON", "").strip()
+        if env_ncfg:
+            try:
+                _env = json.loads(env_ncfg)
+                _pp = (_env.get("wechat_pushplus") or {}).get("token") or []
+                for x in (_pp if isinstance(_pp, list) else [_pp]):
+                    if isinstance(x, dict) and x.get("token"):
+                        pp_tokens.append(x["token"])
+                    elif isinstance(x, str) and x.strip():
+                        pp_tokens.append(x.strip())
+            except Exception as e:
+                _log("NOTIFY_JSON 解析失败：%r" % e)
+    if not pp_tokens:
         # 回落：复用 pipeline/config/notify.json 里的 wechat_pushplus 配置（多接收人）
         try:
             root_ncfg = os.path.join(ROOT, "config", "notify.json")
@@ -174,6 +190,146 @@ def pick_broker(cfg):
         else:
             return broker_qmt.QmtBroker(), "qmt"
     return broker_sim.SimBroker(), mode
+
+
+# ---------------- 交易日判定（2026-08-30 CI 托管） ----------------
+
+# 2026-08-30 CI 全程托管（用户电脑不常开机且开机无网）：
+# 执行器改跑在 GitHub Actions，以下状态文件必须跨 run 续存——
+#   sim.db            持仓/流水（核心资产）
+#   state/risk_state.json     风控幂等与熔断
+#   state/notify_dedup.json   推送冷却
+#   state/loss_streak.json    连亏纪律
+#   sim_review.json           复盘历史（网站模块数据源）
+# 打包为 Release data-snapshot 的 executor_state.tar.gz 附件；
+# 本地开发模式（有本地 sim.db）自动跳过恢复/回存，互不干扰。
+# 注意 risk_state.json 在 executor 根目录（risk_gate.STATE_PATH），不在 state/ 子目录。
+EXEC_STATE_FILE = "executor_state.tar.gz"
+_EXEC_STATE_MEMBERS = [
+    "sim.db", "sim.db-wal", "sim.db-shm",
+    "risk_state.json",
+    "state/notify_dedup.json", "state/loss_streak.json",
+    "sim_review.json",
+]
+
+
+def _in_ci():
+    """是否运行在 GitHub Actions（或任何需要云持久化的环境）。"""
+    return bool(os.environ.get("CI") or os.environ.get("GH_TOKEN"))
+
+
+def _exec_state_paths():
+    ex = os.path.dirname(os.path.abspath(__file__))
+    return [os.path.join(ex, m) for m in _EXEC_STATE_MEMBERS if
+            os.path.exists(os.path.join(ex, m))]
+
+
+def exec_state_restore(force=False):
+    """从 Release 恢复执行器状态（CI 专用；本地已有 sim.db 则跳过）。"""
+    if not _in_ci() and not force:
+        return False
+    ex = os.path.dirname(os.path.abspath(__file__))
+    if os.path.exists(os.path.join(ex, "sim.db")) and not force:
+        _log("exec_state: 本地已有 sim.db，跳过恢复")
+        return False
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import gh_api
+        import io
+        st, body = gh_api.api("GET", "/repos/fisk9r/stock-analysis/releases/tags/data-snapshot")
+        rel = json.loads(body) if isinstance(body, str) else body
+        asset = next((a for a in rel.get("assets", []) if a["name"] == EXEC_STATE_FILE), None)
+        if not asset:
+            _log("exec_state: 无历史状态包（首次运行正常），从空账本开始")
+            return False
+        req = urllib.request.Request(asset["browser_download_url"],
+                                     headers={"User-Agent": "executor"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            blob = r.read()
+        import tarfile
+        tf = tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz")
+        tf.extractall(ex)   # 成员路径都是相对 executor 目录的白名单文件
+        tf.close()
+        _log("exec_state: 状态已恢复（sim.db %s）"
+             % os.path.getsize(os.path.join(ex, "sim.db")))
+        return True
+    except BaseException as e:
+        # BaseException：gh_api 网络失败会抛 SystemExit（不继承 Exception），
+        # 必须兜住——恢复失败只能以空账本继续，绝不能让 CI job 直接死掉
+        _log("exec_state 恢复失败（以空账本继续，不阻断）：%s %r" % (type(e).__name__, e))
+        return False
+
+
+def exec_state_save():
+    """把执行器状态打包回传 Release（CI 专用；best-effort 不阻断）。"""
+    if not _in_ci():
+        return False
+    ex = os.path.dirname(os.path.abspath(__file__))
+    paths = _exec_state_paths()
+    if not any(p.endswith("sim.db") for p in paths):
+        return False
+    try:
+        import tarfile, tempfile
+        tmp = os.path.join(tempfile.gettempdir(), EXEC_STATE_FILE)
+        with tarfile.open(tmp, "w:gz") as tf:
+            for p in paths:
+                tf.add(p, arcname=os.path.relpath(p, ex))
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import gh_api, urllib.request, json as _json, ssl
+        st, body = gh_api.api("GET", "/repos/fisk9r/stock-analysis/releases/tags/data-snapshot")
+        rel = _json.loads(body) if isinstance(body, str) else body
+        up_url = rel["upload_url"].split("{")[0]
+        # 同名 asset 先删再传（GH 不允许直接覆盖）
+        for a in rel.get("assets", []):
+            if a["name"] == EXEC_STATE_FILE:
+                gh_api.api("DELETE", "/repos/fisk9r/stock-analysis/releases/assets/%d" % a["id"])
+        data = open(tmp, "rb").read()
+        tok = gh_api._token()
+        req = urllib.request.Request(
+            "%s?name=%s" % (up_url, EXEC_STATE_FILE), data=data, method="POST",
+            headers={"Authorization": "Bearer " + tok,
+                     "Content-Type": "application/gzip",
+                     "Content-Length": str(len(data))})
+        ctx = ssl._create_unverified_context() if hasattr(ssl, "_create_unverified_context") else None
+        with urllib.request.urlopen(req, timeout=180, context=ctx) if ctx else \
+                urllib.request.urlopen(req, timeout=180) as r:
+            r.read()
+        _log("exec_state: 状态已回存 Release（%d 个文件，%d KB）"
+             % (len(paths), len(data) // 1024))
+        return True
+    except BaseException as e:
+        # BaseException 同 restore：gh_api 失败抛 SystemExit，必须兜住
+        # （回存失败下轮仍有本轮前状态，但不影响交易结果与推送）
+        _log("exec_state 回存失败（不影响交易结果，下轮仍有本轮前状态）：%s %r"
+             % (type(e).__name__, e))
+        return False
+
+
+def is_trading_now(force=False):
+    """今日是否 A 股交易日（用上证指数行情时间戳判定，节假日/停市=否）。
+
+    CI 托管后执行器跑在 GitHub Actions（周末 cron 已排除，但法定节假日排除不了）：
+    节假日腾讯行情时间戳停在上个交易日 → 日期不匹配 → 整轮跳过，绝不拿旧数据下单。
+    force=True（workflow_dispatch 手动测试）跳过判定。
+    """
+    if force:
+        return True, "force"
+    try:
+        # 指数行情：realtime_quote 按首码映射 sh/sz/bj 前缀，指数码 000001 会被
+        # 误映射成 sz000001（不存在）。上证指数的行情码是 sh000001——直接传
+        # 带前缀的码，realtime_quote 对已带前缀的码不做二次映射（见 exec_core）。
+        q = realtime_quote(["sh000001"])
+        if not q:
+            return True, "指数行情为空，放行（宁可多看一眼）"
+        stamp = (q.get("000001") or q.get("sh000001") or {}).get("stamp") or ""
+        today = time.strftime("%Y%m%d")
+        if stamp[:8] == today:
+            return True, "行情日期匹配"
+        return False, "行情日期 %s ≠ 今日 %s（节假日/停市）" % (stamp[:8] or "空", today)
+    except Exception as e:
+        # 判定异常放行：网络抖动误杀比节假日误交易伤害更大（CI 主战场网络稳定）
+        _log("交易日判定异常（放行）：%r" % e)
+        return True, "判定异常放行"
 
 
 # ---------------- Phase 1：平仓 ----------------
@@ -521,11 +677,18 @@ def run_tailgate(broker, mode, cfg):
 
 # ---------------- 主流程 ----------------
 
-def run_once(cfg):
+def run_once(cfg, force=False):
     acc = cfg.get("account") or {}
     if not acc.get("user_id") or not acc.get("passwd"):
         _log("未配置 account，退出")
         return
+    # 交易日判定（CI 托管：节假日绝不拿旧行情下单；本地误判放行兜底）
+    ok, why = is_trading_now(force=force)
+    if not ok:
+        _log("非交易日，跳过开平仓：%s" % why)
+        _notify(cfg, "⏸ 模拟盘跳过（非交易日）", "- %s\n- 下一交易日 09:25 自动恢复" % why, defer=True)
+        return
+    exec_state_restore()
     broker, mode = pick_broker(cfg)
 
     # Phase 1：平仓（不依赖线上数据，行情+K线就够）
@@ -561,6 +724,7 @@ def run_once(cfg):
         except Exception as e:
             _log("战绩汇总失败：%r" % e)
     _notify(cfg, "执行器回报（卖%d 买%d）" % (n_sold, n_buy), "\n".join(all_lines), defer=True)
+    exec_state_save()
 
 
 def _tail_buys(broker, cfg, sigs, mkt):
@@ -645,7 +809,7 @@ def _tail_buys(broker, cfg, sigs, mkt):
     return lines, n_buy
 
 
-def run_tail(cfg):
+def run_tail(cfg, force=False):
     """14:45 尾盘确认通道（2026-08-30 定稿）——两条子通道合一：
 
     A. 持仓管理（run_tailgate，只管「今日买入」的持仓）：
@@ -660,6 +824,11 @@ def run_tail(cfg):
     if not acc.get("user_id") or not acc.get("passwd"):
         _log("未配置 account，退出")
         return
+    ok, why = is_trading_now(force=force)
+    if not ok:
+        _log("非交易日，尾盘通道跳过：%s" % why)
+        return
+    exec_state_restore()
     broker, mode = pick_broker(cfg)
     _log("=" * 30 + " 14:45 尾盘确认通道 " + "=" * 30)
 
@@ -685,6 +854,7 @@ def run_tail(cfg):
     for ln in out:
         _log(ln)
     _notify(cfg, "尾盘确认回报（买%d）" % n_buy, "\n".join(out), defer=True)
+    exec_state_save()
 
 
 def run_summary():
@@ -857,7 +1027,7 @@ def _loss_review_section(b, ds, cfg):
     return "\n".join(L)
 
 
-def run_review(cfg=None, push=True):
+def run_review(cfg=None, push=True, force=False):
     """当日复盘总结（收盘后 15:30 左右跑）：
     1. 汇总当日成交/平仓盈亏/被拒记录/总资产
     2. 写 tools/executor/sim_review.json（build.py 读它生成网站「模拟盘」模块）
@@ -866,6 +1036,11 @@ def run_review(cfg=None, push=True):
     cfg = cfg or load_cfg()
     if mode_check_no_sim(cfg):
         return
+    ok, why = is_trading_now(force=force)
+    if not ok:
+        _log("非交易日，复盘跳过：%s" % why)
+        return None
+    exec_state_restore()
     b = broker_sim.SimBroker()
     ds = b.day_summary()
     bal = ds["balance"]
@@ -994,23 +1169,38 @@ def run_review(cfg=None, push=True):
         _push_review_to_repo()
     except Exception as e:
         _log("sim_review.json 写入失败：%r" % e)
+    exec_state_save()
     return ds
 
 
 def _push_review_to_repo():
-    """把 sim_review.json 推到仓库 state/（best-effort，失败只记日志）。"""
+    """把 sim_review.json 推到仓库 state/（best-effort，失败只记日志）。
+
+    2026-08-30 修复断链：此前只更新 tools/executor/sim_review.json，
+    但推的是 state/sim_review.json（本地从未复制过去 → 推的是旧文件）。
+    现在先把 REVIEW_PATH 内容写到 state/ 再推，保证网站读到最新复盘。
+    EXE_NO_PUSH=1 时跳过真实推送（离线测试用；曾把测试交易数据误推上线）。"""
+    if os.environ.get("EXE_NO_PUSH"):
+        _log("EXE_NO_PUSH=1，跳过 sim_review 真实推送（测试模式）")
+        return
     try:
-        tools_dir = os.path.join(ROOT, "tools")
-        if tools_dir not in sys.path:
-            sys.path.insert(0, tools_dir)
-        import gh_api
-        # 只推最近 60 个交易日，控制 blob 体积
+        # 1) 同步内容到仓库路径
+        state_dir = os.path.join(ROOT, "state")
+        os.makedirs(state_dir, exist_ok=True)
         hist = json.load(open(REVIEW_PATH, encoding="utf-8"))
         days = hist.get("days") or {}
         ks = sorted(days.keys())
         for k in ks[:-60]:
             del days[k]
-        st, body = gh_api.push_files(
+        hist["days"] = days
+        with open(os.path.join(state_dir, "sim_review.json"), "w", encoding="utf-8") as f:
+            json.dump(hist, f, ensure_ascii=False, indent=1)
+        # 2) 推送
+        tools_dir = os.path.join(ROOT, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import gh_api
+        gh_api.push_files(
             "sim-review: 模拟盘每日复盘数据（executor 自动回传）", ["state/sim_review.json"])
         # push_files 内部直接 commit；无需检查返回（失败抛异常）
         _log("sim_review.json 已推送到仓库 state/")
@@ -1026,7 +1216,9 @@ def mode_check_no_sim(cfg):
 
 
 def main():
-    args = sys.argv[1:]
+    args = [a for a in sys.argv[1:]]
+    force = "--force" in args          # CI workflow_dispatch 手动测试：跳过交易日判定
+    args = [a for a in args if a != "--force"]
     cfg = load_cfg()
     if "--summary" in args:
         run_summary()
@@ -1037,11 +1229,11 @@ def main():
                 month = args[i + 1]
         run_report(month)
     elif "--review" in args:
-        run_review(cfg)
+        run_review(cfg, force=force)
     elif "--now" in args:
-        run_once(cfg)
+        run_once(cfg, force=force)
     elif "--tail" in args:
-        run_tail(cfg)
+        run_tail(cfg, force=force)
     elif "--loop" in args:
         target = ((cfg.get("schedule") or {}).get("auction_time") or "09:26")
         ttarget = ((cfg.get("schedule") or {}).get("tail_time") or "14:45")
