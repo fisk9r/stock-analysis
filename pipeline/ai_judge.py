@@ -517,13 +517,19 @@ def judge(data):
         risks.extend(v.get("risks", [])[:2])
     # Hy3 叙事若有 bullets，优先保留
     hy3 = next((v for v in verdicts if v.get("bullets")), None)
+    # 多模型综述拼接（2026-08-31 修标点 artifact）：各家 comment 自带「。」结尾时
+    # 直接连出会出现「…防分化为主。；主线强势…」的「。；」杂点，先剥尾部句号再拼接。
+    def _strip_tail_dot(s):
+        return s.rstrip().rstrip("。；;；. !！")
+    joined_comments = "；".join(
+        _strip_tail_dot(v.get("comment", "")) for v in verdicts if v.get("comment"))
     consensus = {
         "models": [v["model"] for v in verdicts],
         "direction": direction,
         "confidence": avg_conf,
         "key_picks": [p for p, _ in top_picks],
         "risks": risks[:6],
-        "comment": "；".join(v.get("comment", "") for v in verdicts if v.get("comment"))[:300],
+        "comment": (joined_comments + "。")[:300] if joined_comments else "",
         "hy3_headline": hy3.get("headline") if hy3 else None,
         "hy3_bullets": hy3.get("bullets") if hy3 else None,
         "n_models": len(verdicts),
