@@ -14,11 +14,16 @@
 
 用法：
   python tools/executor/runner.py --now        # 立即执行一轮（测试/手动）
+  python tools/executor/runner.py --scan       # 立即执行盘中巡逻（交易时段内有效）
   python tools/executor/runner.py --tail       # 立即执行尾盘确认通道（14:45 版，测试/手动）
-  python tools/executor/runner.py --loop       # 常驻模式，每天 09:26 开仓 + 14:45 尾盘确认自动执行
+  python tools/executor/runner.py --loop       # 常驻模式：09:26 开仓 + 盘中每15分钟巡逻 + 14:45 尾盘确认自动执行
   python tools/executor/runner.py --summary    # 查看模拟盘持仓概览
   python tools/executor/runner.py --report     # 月度盈亏报告（全流水+统计）
   python tools/executor/runner.py --review     # 当日复盘总结（收盘后跑，推送 PushPlus）
+
+全时段可操作（2026-08-31 用户需求）：模拟盘不再只有三个时点——
+交易时段内 executor.yml 每 30 分钟触发 --scan 盘中巡逻
+（持仓卖出裁决 + 今日买入炸板保护 + 熔断监控），本地 --loop 每 15 分钟一轮。
 
 交易纪律（用户 2026-08-29 拍板）：
   1. 操作前先判可成交性：一字板/封板买不进、跌停封死卖不出，全部留痕记录
@@ -546,6 +551,25 @@ def run_buys(broker, mode, cfg, sigs, mkt=None):
          % (mode, total or 0, "YES" if gate.tripped else "no", mkt["mode"]))
     # CAUTION：新仓减半（保留参与度，同时控制环境不确定时的敞口）
     caution_cut = 0.5 if mkt["mode"] == "CAUTION" else 1.0
+    # 连亏纪律真正生效（2026-08-31 升级：此前只在复盘文案里写，买入端从未执行）：
+    #   连亏≥3日 → 今日暂停开新仓；连亏2日 → 新仓金额减半。盈利日清零。
+    loss_streak = 0
+    try:
+        with open(_LOSS_STATE_PATH, encoding="utf-8") as f:
+            loss_streak = int((json.load(f) or {}).get("streak") or 0)
+    except Exception:
+        loss_streak = 0
+    if loss_streak >= 3:
+        _log("连亏 %d 日 → 今日暂停开新仓（连亏纪律）" % loss_streak)
+        if hasattr(broker, "record_decision"):
+            broker.record_decision("__market__", "SKIP",
+                                   "连亏%d日纪律：暂停开新仓1日" % loss_streak,
+                                   "连亏纪律", 0)
+        return ["- ⛔ 连亏 %d 日 → 今日暂停开新仓（连亏纪律，只做持仓卖出裁决）"
+                % loss_streak], 0
+    if loss_streak == 2:
+        caution_cut *= 0.5
+        _log("连亏 2 日 → 新仓金额再减半（caution_cut=%.2f）" % caution_cut)
 
     def _track(code, name, action, reason, price=0.0):
         """观望/放弃/拒绝也全部留痕（用户要求：无论怎么操作都要记录）。"""
@@ -909,6 +933,138 @@ def _tail_buys(broker, cfg, sigs, mkt):
     return lines, n_buy
 
 
+def _in_trading_window():
+    """是否在 A 股连续竞价时段（09:30-11:30 / 13:00-15:00）。
+    盘中巡逻通道的时段闸——非交易时段调用直接跳过，不浪费 CI 时长。"""
+    hm = time.strftime("%H:%M")
+    return ("09:30" <= hm <= "11:30") or ("13:00" <= hm <= "15:00")
+
+
+def run_scan(cfg, force=False):
+    """盘中巡逻通道（2026-08-31 用户需求：模拟盘不只三个时点，全时段都可操作）。
+
+    在交易时段内被反复触发（executor.yml 每 30 分钟一轮 cron）：
+      A. 持仓卖出裁决：复用 sell_decision 全规则（断板卖/高开低走锁定/日内+5%
+         落袋/-3% 止损/3 日清仓）——盘中触发比等 14:45 少承受一段回撤；
+      B. 当日买入炸板保护：今日买入的票若盘中炸板（现价较开盘跌 ≥3%）即时止损
+         （与 tailgate 深亏止损同口径，但时点提前到盘中任意时刻）；
+      C. 熔断监控：_daily_loss_check 每轮喂组合回撤，越线立即熔断拦截后续开仓。
+
+    降噪原则：无动作轮次只写 CI 日志留痕，不推送（推送杂乱是用户明确反对的）；
+    有 SELL 成交才推「盘中巡逻回报」。开仓不在巡逻轮做——竞价决策线是开盘时点
+    信号（gap 以开盘价计），盘中重跑会拿现价当开盘价误判，入场仍由 09:25 通道
+    与 14:45 尾盘确认两个回测过的时点负责。
+    """
+    acc = cfg.get("account") or {}
+    if not acc.get("user_id") or not acc.get("passwd"):
+        return
+    if not force and not _in_trading_window():
+        _log("巡逻：非连续竞价时段（%s），跳过" % time.strftime("%H:%M"))
+        return
+    ok, why = is_trading_now(force=force)
+    if not ok:
+        _log("非交易日，巡逻跳过：%s" % why)
+        return
+    try:
+        _run_scan_inner(cfg)
+    finally:
+        exec_state_save()
+
+
+def _run_scan_inner(cfg):
+    broker, mode = pick_broker(cfg)
+    _log("=" * 30 + " 盘中巡逻 %s " % time.strftime("%H:%M") + "=" * 30)
+    try:
+        poss = broker.positions(open_only=True)
+    except Exception as e:
+        _log("巡逻：持仓读取失败：%r" % e)
+        return
+    if not poss:
+        _log("巡逻：无持仓，仅做熔断监控")
+        _daily_loss_check(broker, cfg, label="盘中巡逻")
+        return
+
+    codes = [p["code"] for p in poss]
+    try:
+        quote = realtime_quote(codes)
+    except Exception as e:
+        _log("巡逻：行情失败（本轮跳过）：%r" % e)
+        return
+    if not quote:
+        _log("巡逻：行情为空，本轮跳过")
+        return
+
+    today = time.strftime("%Y-%m-%d")
+    act_lines, n_sold = [], 0
+    for p in poss:
+        q = quote.get(p["code"]) or {}
+        klines = []
+        try:
+            klines = strategy._tencent_kline(p["code"], n=12)
+        except Exception as e:
+            _log("巡逻：K线失败 %s：%r" % (p["code"], e))
+        try:
+            dec = strategy.sell_decision(p, q, klines)
+        except Exception as e:
+            _log("巡逻：策略异常 %s：%r" % (p["code"], e))
+            continue
+        pnl_pct = ((q.get("price") / p["avg_price"] - 1) * 100) \
+            if (q and q.get("price") and p.get("avg_price")) else None
+        # 盘中额外保护：今日买入的票炸板（较开盘跌≥3%）→ 即时止损
+        # （sell_decision 的规则2只覆盖「昨日续板」票；今日新买票若开盘强但盘中崩，
+        #   盘中轮比 14:45 尾盘轮提前止血）
+        if dec["verdict"] == "HOLD" and (p.get("buy_date") or "") == today:
+            opn = q.get("open") or 0
+            cur = q.get("price") or 0
+            if opn and cur and cur / opn - 1 <= -0.03:
+                dec = {"verdict": "SELL", "price": cur,
+                       "reason": "盘中巡逻：今日买入票较开盘%.1f%%炸板崩落，即时止损"
+                                 % ((cur / opn - 1) * 100)}
+        if dec["verdict"] == "SELL" and dec.get("price"):
+            cs = strategy.can_sell(q, p["code"])
+            if not cs["ok"]:
+                if hasattr(broker, "record_decision"):
+                    broker.record_decision(p["code"], "HOLD",
+                                           "巡逻拟卖被拒顺延：%s" % cs["reason"],
+                                           p.get("name") or "", dec["price"], pnl_pct)
+                act_lines.append("- ⛔ %s(%s) 拟卖被拒：%s"
+                                 % (p.get("name"), p["code"], cs["reason"]))
+                continue
+            _act_notify(cfg,
+                        "🔔 操作前确认：盘中卖出 %s(%s)" % (p.get("name"), p["code"]),
+                        "**卖出理由**：%s\n\n- 现价 %.2f｜成本 %.2f｜浮盈 %s\n- 触发通道：盘中巡逻（%s 北京时间）"
+                        % (dec["reason"], dec["price"], p["avg_price"],
+                           ("%.2f%%" % pnl_pct) if pnl_pct is not None else "—",
+                           time.strftime("%H:%M")))
+            r = broker.sell_limit(p["code"], dec["price"], sig={
+                "name": p.get("name"), "reason": dec["reason"], "source": "scan"})
+            if r.get("ok"):
+                n_sold += 1
+                act_lines.append("- **SELL %s**(%s) @%.2f %+.2f%%｜%s"
+                                 % (p.get("name"), p["code"], r["price"],
+                                    r["pnl_pct"], dec["reason"]))
+                _log("巡逻卖出 %s：%s" % (p["code"], dec["reason"]))
+            else:
+                act_lines.append("- %s(%s) 卖出失败：%s"
+                                 % (p.get("name"), p["code"], r.get("reason")))
+        else:
+            if hasattr(broker, "record_decision"):
+                broker.record_decision(p["code"], "HOLD",
+                                       "巡逻复核：%s" % dec["reason"],
+                                       p.get("name") or "", dec.get("price") or 0, pnl_pct)
+
+    # 熔断监控每轮必跑（含无动作轮）
+    pnl = _daily_loss_check(broker, cfg, label="盘中巡逻")
+
+    if n_sold:
+        _notify(cfg, "🛰 盘中巡逻回报（卖出 %d 笔）" % n_sold,
+                "**%s 北京时间盘中巡逻**\n\n%s" % (time.strftime("%H:%M"),
+                                                  "\n".join(act_lines)))
+    else:
+        _log("巡逻：本轮无动作（持仓 %d 笔，组合回撤 %s）"
+             % (len(poss), ("%.2f%%" % pnl) if pnl is not None else "n/a"))
+
+
 def run_tail(cfg, force=False):
     """14:45 尾盘确认通道（2026-08-30 定稿）——两条子通道合一：
 
@@ -1201,7 +1357,7 @@ def run_review(cfg=None, push=True, force=False):
     if not ok:
         _log("非交易日，复盘跳过：%s" % why)
         return None
-    exec_state_restore()
+    # exec_state_restore 已在 main() 入口统一调用（2026-08-31）
     b = broker_sim.SimBroker()
     ds = b.day_summary()
     bal = ds["balance"]
@@ -1307,6 +1463,9 @@ def run_review(cfg=None, push=True, force=False):
         lines.append("- 竞价纪律：高开≥2%跟进 / st=2 需≥5% / 低开≤-2%放弃 / 平开观望")
         _auction_watch_save(ds["date"], uniq)
         _log("明日竞价关注清单已写入：%d 只" % len(uniq))
+    # 2026-08-31 升级：竞价关注清单同时写入 sim_review（此前只进推送+state json，
+    # 网站模拟盘页拿不到 → 补上「明日竞价关注」卡片的数据源）
+    ds["auction_watch"] = uniq if watch_items else []
 
     # 区块4：被拒/放弃留痕（压缩为一行汇总 + 最多 3 条明细）
     n_skip = sum(1 for dc in (ds.get("decisions") or [])
@@ -1351,6 +1510,7 @@ def run_review(cfg=None, push=True, force=False):
             "trades": ds["trades"], "closed": ds["closed"], "rejects": ds["rejects"],
             "decisions": ds.get("decisions") or [],
             "holding_plans": holding_plans,
+            "auction_watch": ds.get("auction_watch") or [],
             "n_holding": len(holding),
             "summary_line": (b.summary() if hasattr(b, "summary") else ""),
         }
@@ -1417,6 +1577,13 @@ def main():
     force = "--force" in args          # CI workflow_dispatch 手动测试：跳过交易日判定
     args = [a for a in args if a != "--force"]
     cfg = load_cfg()
+    # 2026-08-31 修复（全时段可操作 prerequisite）：状态恢复统一挪到入口。
+    # 此前只有 run_review 调 exec_state_restore——CI 全新容器跑 --now/--tail
+    # 会以「空账本」启动：看不到历史持仓（该卖的没卖）、RiskGate 幂等表为空
+    # （同票可能重复开仓）。exec_state_restore 自带幂等（本地有 sim.db 跳过）。
+    # summary/report 是只读查询，不恢复。
+    if any(a in args for a in ("--now", "--tail", "--scan", "--review", "--loop")):
+        exec_state_restore()   # 内置幂等：CI 无 sim.db 才拉取；本地已有则跳过
     if "--summary" in args:
         run_summary()
     elif "--report" in args:
@@ -1429,6 +1596,8 @@ def main():
         run_review(cfg, force=force)
     elif "--now" in args:
         run_once(cfg, force=force)
+    elif "--scan" in args:
+        run_scan(cfg, force=force)
     elif "--tail" in args:
         run_tail(cfg, force=force)
     elif "--loop" in args:
@@ -1438,6 +1607,7 @@ def main():
         _log("常驻模式：每天 %s 执行（平仓+开仓），%s 尾盘确认通道，%s 复盘总结（Ctrl+C 退出）"
              % (target, ttarget, rtarget))
         fired = set()
+        _scan = {"last": 0}   # 盘中巡逻节拍（2026-08-31 全时段可操作）
         while True:
             now = time.strftime("%H:%M")
             if now == target and "trade" not in fired:
@@ -1458,6 +1628,13 @@ def main():
                     run_review(cfg)
                 except Exception as e:
                     _log("复盘异常：%r" % e)
+            # 盘中巡逻（2026-08-31 用户需求：全时段可操作）：交易时段每 15 分钟一轮
+            if _in_trading_window() and int(time.time()) - _scan.get("last", 0) >= 900:
+                _scan["last"] = int(time.time())
+                try:
+                    run_scan(cfg)
+                except Exception as e:
+                    _log("巡逻异常：%r" % e)
             if now < target:  # 跨天重置
                 fired.clear()
             time.sleep(5)

@@ -4080,6 +4080,32 @@
         }).join('');
         h += card('📋 今日决策留痕', dHtml, '不一定每天交易：持有/观望/放弃全部记录并推送理由');
       }
+      /* 明日持仓计划（2026-08-31：网站与推送内容对齐，sim_review.holding_plans） */
+      var plans = L.holding_plans || [];
+      if (plans.length) {
+        var pHtml = plans.map(function (p) {
+          var hold = p.verdict === 'HOLD';
+          var pc = p.pnl_pct;
+          return '<div class="kv" style="padding:5px 0;border-bottom:1px solid var(--line)">' +
+            '<span class="bd" style="border-color:' + (hold ? C.up : C.down) + ';color:' + (hold ? C.up : C.down) + '">' + (hold ? '✅ 继续持有' : '⚠️ 倾向卖出') + '</span> ' +
+            stk(p.code, p.name) + ' 成本 <b>' + f(p.avg_price) + '</b>' +
+            (pc != null ? ' · 现价 <b>' + f(p.price) + '</b>（<span class="' + (pc >= 0 ? 'up' : 'down') + '">' + (pc >= 0 ? '+' : '') + f(pc) + '%</span>）' : '') +
+            '<div class="muted" style="font-size:12px;margin-top:2px">' + E((p.plan || '').slice(0, 100)) + '</div></div>';
+        }).join('');
+        h += card('🎯 明日计划（持仓 ' + plans.length + ' 笔）', pHtml, '收盘后按卖出规则预演明日裁决，开盘后照计划执行');
+      }
+      /* 明日竞价关注（2026-08-31：今日未上车的高度票，st≥3 高度溢价单调） */
+      var aw = L.auction_watch || [];
+      if (aw.length) {
+        var awHtml = aw.map(function (it) {
+          return '<div class="kv" style="padding:5px 0;border-bottom:1px solid var(--line)">' +
+            '<span class="bd" style="border-color:' + C.gold + ';color:' + C.gold + '">st=' + n2(it.streak) + '板</span> ' +
+            stk(it.code, it.name) +
+            '<div class="muted" style="font-size:12px;margin-top:2px">' + E(it.reason || '') + '</div></div>';
+        }).join('') +
+        '<div class="muted" style="font-size:12px;margin-top:6px">竞价纪律：高开≥2% 跟进 / st=2 需≥5% / 低开≤-2% 放弃 / 平开观望</div>';
+        h += card('🔭 明日竞价关注（' + aw.length + ' 只）', awHtml, '今日未上车的高连板票（st≥3 高度溢价单调），次日竞价给好开价即二次入场机会');
+      }
       return h;
     }
     var views = { overview: viewOverview, watch: viewWatch, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings, sim: viewSim };

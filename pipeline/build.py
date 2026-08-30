@@ -1596,6 +1596,8 @@ def run(date_override=None, dedup_close=False):
                              "closed": dlast.get("closed") or [],
                              "rejects": dlast.get("rejects") or [],
                              "decisions": dlast.get("decisions") or [],
+                             "holding_plans": dlast.get("holding_plans") or [],
+                             "auction_watch": dlast.get("auction_watch") or [],
                              "summary_line": dlast.get("summary_line") or ""},
                     "curve": curve,
                     "months": [months[k] for k in sorted(months.keys())],
