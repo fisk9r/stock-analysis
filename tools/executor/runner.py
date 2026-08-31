@@ -865,9 +865,9 @@ def run_once(cfg, force=False):
     # 交易日判定（CI 托管：节假日绝不拿旧行情下单；本地误判放行兜底）
     ok, why = is_trading_now(force=force)
     if not ok:
+        # 2026-09-01 用户推送策略：非交易日 0 推送（连「⌛ 跳过」也不发——
+        # 固定节奏 = 交易日早盘回报 + 下午盘复盘各 1 条，其余全按需）
         _log("非交易日，跳过开平仓：%s" % why)
-        _notify(cfg, "⏸ 模拟盘跳过（非交易日）", "- %s\n- 下一交易日 09:25 自动恢复" % why, defer=True)
-        _flush_pending(cfg)
         return
     # 幂等守卫：多触发源下当日开仓只做一次（重复 dispatch 不该双倍建仓）
     if not force and _ledger_done("now"):
@@ -982,10 +982,17 @@ def _run_once_inner(cfg, force=False):
             _log(broker_sim.SimBroker().summary())
         except Exception as e:
             _log("战绩汇总失败：%r" % e)
-    # 2026-08-31 修复（用户要求：杜绝「模拟盘未操作且未推送」）：汇总回报改为立即推送，
-    # 不再 defer 到进程退出 atexit 才 flush——CI 中途被杀（超时/OOM）会导致账本已记但
-    # 推送未发，表现为「跑了却啥也没收到」。即便当日 0 成交也照发（卖0 买0 也是状态）。
-    _notify(cfg, "执行器回报（卖%d 买%d）" % (n_sold, n_buy), "\n".join(all_lines))
+    # 2026-09-01 用户推送策略（固定 2 条/天：早盘回报 + 下午盘复盘）：
+    #   · 成功轮无条件推汇总——0 成交也是当日状态，且账本幂等保证当日只此一条；
+    #   · 失败轮不推汇总——重试期间可能连续多轮，重复「卖0买0/失败」是用户
+    #     明确反感的噪音；改为每日 1 次失败告警（dedup），重试成功后由成功轮
+    #     的回报补全当日状态。
+    if data_ok:
+        _notify(cfg, "执行器回报（卖%d 买%d）" % (n_sold, n_buy), "\n".join(all_lines))
+    else:
+        _act_notify(cfg, "⚠ 开仓数据拉取失败（将自动重试）",
+                    "线上数据拉取失败，本轮不记账，冗余触发自动重试补开仓。\n\n%s"
+                    % "\n".join(all_lines), dedup_key="now_fetch_fail")
     return data_ok
 
 
@@ -1279,8 +1286,17 @@ def _run_tail_inner(cfg, force=False):
            ["", "## 尾盘入场（%d 笔）" % n_buy] + (buy_lines or ["- 无"]))
     for ln in out:
         _log(ln)
-    # 2026-08-31 修复：尾盘回报立即推送（同 run_once 汇总，避免 atexit 未触发而丢失）。
-    _notify(cfg, "尾盘确认回报（买%d）" % n_buy, "\n".join(out))
+    # 2026-09-01 用户推送策略：尾盘通道不是固定条——有动作（止损/入场成交）才推，
+    # 无动作只写日志；固定 2 条 = 早盘回报 + 下午盘复盘。失败轮同理只发每日
+    # 1 次的 dedup 告警（重试期间不重复轰炸）。
+    if data_ok and (n_act or n_buy):
+        _notify(cfg, "尾盘确认回报（止损%d 买%d）" % (n_act, n_buy), "\n".join(out))
+    elif not data_ok:
+        _act_notify(cfg, "⚠ 尾盘数据拉取失败（将自动重试）",
+                    "尾盘入场数据拉取失败，本轮不记账，窗口内冗余触发自动重试。\n\n%s"
+                    % "\n".join(out), dedup_key="tail_fetch_fail")
+    else:
+        _log("尾盘通道无动作（止损0 买%d），不推送（降噪）" % n_buy)
     exec_state_save()
     return data_ok
 
