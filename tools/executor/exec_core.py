@@ -96,6 +96,14 @@ def extract_signals(data: dict) -> list:
 
     来源优先级：recommend.core > recommend.relay > recommend.fused。
     每条信号：{code, name, streak, action, auction_rule, close, tag}
+
+    2026-09-01 数据驱动过滤（选股成功率升级）：跳过 st=0 信号（趋势/动量引擎票，
+    昨日未涨停）。依据 rec_picks 实测：st=0 共 22 样本胜率仅 22.7%/均值 -4.37%
+    （08-28 趋势·/动量· 全军覆没 -2.6%~-10%）；执行器的竞价决策线（高开≥2% 跟进）
+    与 A/B/C 分级全部建立在涨停体系 118 万 K 线回测上，对该类票不适用——
+    实证 920087 st=0 高开 2.2% 跟进次日 -6.03%。涨停体系票在 gap≥2 条件下
+    胜率 66.7%~86.7%（核心龙头最高），模拟盘只做回测验证过的高胜率体系。
+    趋势票仍进网站推荐池与买点结构化展示（信息价值保留），仅不进模拟盘交易。
     """
     rec = data.get("recommend") or {}
     out, seen = [], set()
@@ -104,6 +112,8 @@ def extract_signals(data: dict) -> list:
         code = it.get("code")
         if not code or code in seen:
             return
+        if not (it.get("streak") or 0):
+            return          # st=0：趋势/动量票，竞价纪律体系不适用，跳过
         ar = it.get("auction_rule") or {}
         # action 由决策线规则 + 高度决定；执行器 9:25 竞价后按实时开盘价最终裁决
         out.append({
