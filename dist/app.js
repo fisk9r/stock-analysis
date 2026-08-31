@@ -4253,6 +4253,9 @@
          保留「↗ 打开完整报告」直链到 trend_buy_points.html 作全屏兜底。 */
       var bp = D.buy_points || null;
       var total = bp ? (bp.accel.length + bp.others.length + bp.chanlun.length) : 0;
+      // 反查 zones 引擎买区/卖区，使网页买点视图与推送一致（带价格区间，可直接对照挂单）
+      var _zmap = {};
+      ((D.zones && D.zones.items) || []).forEach(function (z) { if (z && z.code) _zmap[z.code] = z; });
       var h = '';
       h += '<div class="bp-bar"><span>🎯 买点候选 · 上升趋势中的介入机会（每日构建生成）</span>' +
            '<a class="bp-link" href="trend_buy_points.html" target="_blank" rel="noopener">↗ 打开完整报告</a></div>';
@@ -4294,13 +4297,20 @@
           '<td class="num">' + (r.dd60 != null ? pct(r.dd60) : '—') + '</td>' +
           '<td class="num">' + f(r.score) + '</td>' +
           '<td>' + badge + '</td>' +
+          '<td class="num">' + (function () {
+            var z = _zmap[r.code]; if (!z) return '—';
+            var p = [];
+            if (z.buy_zone && z.buy_zone[0] != null) p.push('<span style="color:var(--up)">买 ' + f(z.buy_zone[0], 2) + '~' + f(z.buy_zone[1], 2) + '</span>');
+            if (z.sell_zone && z.sell_zone[0] != null) p.push('<span style="color:var(--down)">卖 ' + f(z.sell_zone[0], 2) + '~' + f(z.sell_zone[1], 2) + '</span>');
+            return p.length ? p.join('<br>') : '—';
+          })() + '</td>' +
           '<td class="muted">' + E((r.tags || '').slice(0, 56)) + '</td>' +
           '</tr>';
       }
       var cols = [
         { t: '个股' }, { t: '信号' }, { t: '现价', a: 'num' }, { t: '涨跌幅', a: 'num' },
         { t: '量比', a: 'num' }, { t: '行业' }, { t: '距60高', a: 'num' },
-        { t: '评分', a: 'num' }, { t: '趋势状态' }, { t: '说明' }
+        { t: '评分', a: 'num' }, { t: '趋势状态' }, { t: '买区/卖区', a: 'num' }, { t: '说明' }
       ];
       if (bp.accel.length) {
         var cwarn = bp.accel.filter(function (x) { return x.warn_sell; }).length;
