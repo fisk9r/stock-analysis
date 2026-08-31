@@ -120,9 +120,18 @@ def main():
     existing = list_jobs(key)
     ok = 0
     for job in cfg["jobs"]:
+        # 2026-08-31：支持 per-job "target" 指向别的工作流（executor.yml）。
+        # 模拟盘执行器此前只有 GitHub 自带 cron 一种触发，被延迟投递后任务错配，
+        # 现由外部精确定时器直打其 workflow_dispatch，显式带 task，不再依赖运行时判定。
+        if job.get("target") == "executor":
+            url = cfg.get("github_api_executor") or cfg["github_api"]
+        else:
+            url = cfg["github_api"]
+        # inputs 可逐条覆盖（默认只带 task；未提供的输入由 workflow 的 default 兜底）
+        inputs = job.get("inputs") or {"task": job["task"]}
         body = {
             "job": {
-                "url": cfg["github_api"],
+                "url": url,
                 "enabled": True,
                 "title": job["title"],
                 "saveResponses": True,
@@ -130,7 +139,7 @@ def main():
                 "requestMethod": 1,  # 1 = POST（GitHub dispatch 需要 POST）
                 "extendedData": {
                     "headers": headers,
-                    "body": json.dumps({"ref": "main", "inputs": {"task": job["task"]}}),
+                    "body": json.dumps({"ref": "main", "inputs": inputs}),
                 },
             }
         }

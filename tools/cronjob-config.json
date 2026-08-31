@@ -1,6 +1,8 @@
 {
   "comment": "cron-job.org 外部定时器配置。根治 GitHub 自带 schedule 不可靠（高负载会延迟甚至整体丢弃，正是漏发盘前推送的根因）。本文件不含任何密钥：GitHub PAT 由 setup_cronjob.py 从环境变量 GH_PAT 注入。注意：cron-job.org 创建任务用 PUT /jobs（不是 POST），schedule 是 {minutes,hours,mdays,months,wdays} 数组结构（非 cron 字符串），requestMethod 用整数（1=POST）。",
+  "comment_executor": "2026-08-31 补：模拟盘执行器(executor.yml)此前只有 GitHub 自带 cron 一种触发，且任务按『运行时刻』判定——09:25 开仓被拖到 15:07 才跑就被错配成 review，导致模拟盘全天未建仓(sim.db 全空)。现补上外部精确定时器直打 executor.yml workflow_dispatch（显式带 task，不依赖运行时判定）。",
   "github_api": "https://api.github.com/repos/fisk9r/stock-analysis/actions/workflows/stock.yml/dispatches",
+  "github_api_executor": "https://api.github.com/repos/fisk9r/stock-analysis/actions/workflows/executor.yml/dispatches",
   "headers": {
     "Accept": "application/vnd.github+json",
     "Authorization": "Bearer __GH_PAT__",
@@ -14,6 +16,18 @@
     { "title": "stock-anomaly-am",    "cron": "*/15 9-11 * * 1-5", "task": "anomaly" },
     { "title": "stock-anomaly-pm",    "cron": "*/15 13-15 * * 1-5", "task": "anomaly" },
     { "title": "stock-build",        "cron": "15 15 * * 1-5", "task": "build" },
-    { "title": "stock-close",        "cron": "55 19 * * 1-5", "task": "close_again" }
+    { "title": "stock-close",        "cron": "55 19 * * 1-5", "task": "close_again" },
+
+    { "title": "exec-now",     "cron": "25 9 * * 1-5",  "task": "now",    "target": "executor" },
+    { "title": "exec-scan-0935", "cron": "35 9 * * 1-5", "task": "scan",   "target": "executor" },
+    { "title": "exec-scan-1000", "cron": "0 10 * * 1-5", "task": "scan",   "target": "executor" },
+    { "title": "exec-scan-1030", "cron": "30 10 * * 1-5", "task": "scan",  "target": "executor" },
+    { "title": "exec-scan-1100", "cron": "0 11 * * 1-5", "task": "scan",   "target": "executor" },
+    { "title": "exec-scan-1130", "cron": "30 11 * * 1-5", "task": "scan",  "target": "executor" },
+    { "title": "exec-scan-1330", "cron": "30 13 * * 1-5", "task": "scan",  "target": "executor" },
+    { "title": "exec-scan-1400", "cron": "0 14 * * 1-5", "task": "scan",   "target": "executor" },
+    { "title": "exec-scan-1430", "cron": "30 14 * * 1-5", "task": "scan",  "target": "executor" },
+    { "title": "exec-tail",     "cron": "43 14 * * 1-5", "task": "tail",   "target": "executor" },
+    { "title": "exec-review",   "cron": "32 15 * * 1-5", "task": "review", "target": "executor" }
   ]
 }

@@ -76,26 +76,47 @@ jobs:
         with:
           python-version: "3.13"
 
-      # ---------- 1. 任务判定：dispatch 输入优先，schedule 按小时映射 ----------
+      # ---------- 1. 任务判定：dispatch 输入优先，schedule 按「触发的 cron」映射 ----------
       - name: 判定任务
         id: task
         run: |
           if [ -n "${{ github.event.inputs.task }}" ]; then
             echo "name=${{ github.event.inputs.task }}" >> $GITHUB_OUTPUT
           else
-            H=$(date -u +%H)
-            M=$(date -u +%M)
-            case "$H" in
-              01) if [ "$M" -lt 30 ]; then echo "name=now"   >> $GITHUB_OUTPUT;
-                  else echo "name=scan"  >> $GITHUB_OUTPUT; fi ;;
-              02) echo "name=scan"   >> $GITHUB_OUTPUT ;;
-              03) echo "name=scan"   >> $GITHUB_OUTPUT ;;
-              05) echo "name=scan"   >> $GITHUB_OUTPUT ;;
-              06) if [ "$M" -lt 40 ]; then echo "name=scan"  >> $GITHUB_OUTPUT;
-                  else echo "name=tail"  >> $GITHUB_OUTPUT; fi ;;
-              07) echo "name=review" >> $GITHUB_OUTPUT ;;
-              *)  echo "name=review" >> $GITHUB_OUTPUT ;;
-            esac
+            # 2026-08-31 修复（重大）：此前用「运行时刻」的 UTC 小时反推任务。
+            # GitHub cron 一旦延迟投递（已复现：09:25 开仓被拖到 15:07 才执行），
+            # 运行时刻已是 07 点(UTC) → 任务被错配成 review，开仓/巡逻全部落空，
+            # 表现为「模拟盘全天未操作、sim.db 四张表全空」。
+            # 改为以「触发本次运行的 cron 表达式」为准（github.event.schedule），
+            # 无论延迟多久，该跑开仓的仍跑开仓、该跑巡逻的仍跑巡逻。
+            SCHED="${{ github.event.schedule }}"
+            NAME=""
+            if [ -n "$SCHED" ]; then
+              # cron 表达式前两字段 = 分 时；如 "25 1 * * 1-5" → M=25 H=1
+              CRON_M=$(echo "$SCHED" | awk '{print $1}')
+              CRON_H=$(echo "$SCHED" | awk '{print $2}')
+              case "$CRON_H" in
+                1)  if [ "$CRON_M" -lt 30 ]; then NAME="now"; else NAME="scan"; fi ;;
+                2|3|5) NAME="scan" ;;
+                6)  if [ "$CRON_M" -lt 40 ]; then NAME="scan"; else NAME="tail"; fi ;;
+                7)  NAME="review" ;;
+                *)  NAME="" ;;
+              esac
+              echo "[判定] cron='$SCHED' → 任务=$NAME（延迟不影响映射）"
+            fi
+            if [ -z "$NAME" ]; then
+              # 兜底：未登记的 cron / 非 schedule 触发，仍按运行时刻判定
+              H=$(date -u +%H)
+              M=$(date -u +%M)
+              case "$H" in
+                01) if [ "$M" -lt 30 ]; then NAME="now"; else NAME="scan"; fi ;;
+                02|03|05) NAME="scan" ;;
+                06) if [ "$M" -lt 40 ]; then NAME="scan"; else NAME="tail"; fi ;;
+                *)  NAME="review" ;;
+              esac
+              echo "[判定] 无 cron 映射，按运行时刻 → 任务=$NAME"
+            fi
+            echo "name=$NAME" >> $GITHUB_OUTPUT
           fi
           echo "force=${{ github.event.inputs.force || 'false' }}" >> $GITHUB_OUTPUT
 
