@@ -35,10 +35,13 @@ def build(u, date, con=None, topn=5):
     if con is None:
         con = store.connect()
     prev = store.snapshot_history(con, "fused", days=3)
-    # prev: [(date, payload_dict)] 正序；找严格早于 date 的最近一份
+    # prev: [(date, payload_dict)] 正序；找严格早于 date 的【最近一份】。
+    # 2026-08-31 修复：此前按正序取第一个 d<date —— 拿到的是最旧一份
+    # （引擎快照表中残留更早的空快照 → yesterday=[] → rated 空 → 恒 None，
+    # 线上「推荐准确率归因」卡长期空置）。改为倒序取最近一份且跳过空快照。
     yesterday, ydate = None, None
-    for d, pj in prev:
-        if d < date:
+    for d, pj in reversed(prev):
+        if d < date and pj:
             yesterday = pj
             ydate = d
             break
