@@ -59,6 +59,7 @@ concurrency:
 
 permissions:
   contents: write   # 读写 Release asset（数据库与状态快照）
+  actions: write    # 2026-08-31：补派 executor.yml（其自身 cron 被 GitHub 漏投递的冗余链）
   # 站点已改由 Cloudflare Pages 托管（仓库转私有后 GH Pages free 不可用），无需 pages/id-token 权限
 
 env:
@@ -127,11 +128,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 瞬时故障重试（2026-08-31 修复）：GitHub API 偶发 503/502 曾直接把
+          # 恢复/回存步骤打死（8-17 回存 503、8-27 恢复 404 各红 X 一次）。
+          retry() { local n=1; while [ $n -le 3 ]; do "$@" && return 0; echo "⚠ 第 $n 次失败：$*，15s 后重试"; sleep 15; n=$((n+1)); done; return 1; }
           mkdir -p cache dist
           # 优先取整包；取不到再找分片（首次播种时本机网络差会走分片上传）
-          if gh release download "$DB_TAG" -p "$DB_FILE" -D cache/ 2>/dev/null; then
+          if retry gh release download "$DB_TAG" -p "$DB_FILE" -D cache/ 2>/dev/null; then
             echo "整包快照已下载"
-          elif gh release download "$DB_TAG" -p "$DB_FILE.part*" -D cache/parts/ 2>/dev/null; then
+          elif retry gh release download "$DB_TAG" -p "$DB_FILE.part*" -D cache/parts/ 2>/dev/null; then
             N=$(ls cache/parts/ | wc -l)
             echo "检测到 $N 个分片，正在拼接…"
             cat $(ls cache/parts/$DB_FILE.part* | sort) > "cache/$DB_FILE"
@@ -233,7 +237,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gzip -6 -c cache/market.db > "cache/$DB_FILE"
-          gh release upload "$DB_TAG" "cache/$DB_FILE" --clobber
+          retry() { local n=1; while [ $n -le 3 ]; do "$@" && return 0; echo "⚠ 第 $n 次失败：$*，15s 后重试"; sleep 15; n=$((n+1)); done; return 1; }
+          retry gh release upload "$DB_TAG" "cache/$DB_FILE" --clobber
           echo "✅ 数据库已回存（$(du -h cache/$DB_FILE | cut -f1)）"
           # 整包已回存，首次播种用的分片就没用了，清掉免得下次误拼旧数据
           for a in $(gh release view "$DB_TAG" --json assets -q '.assets[].name' | grep -E "^$DB_FILE\.(part|manifest)" || true); do
@@ -254,7 +259,8 @@ jobs:
             $( ls dist/last_push_*.md 2>/dev/null ) \
             2>/dev/null || true
           if [ -f "/tmp/$STATE_FILE" ]; then
-            gh release upload "$DB_TAG" "/tmp/$STATE_FILE" --clobber
+            retry() { local n=1; while [ $n -le 3 ]; do "$@" && return 0; echo "⚠ 第 $n 次失败：$*，15s 后重试"; sleep 15; n=$((n+1)); done; return 1; }
+            retry gh release upload "$DB_TAG" "/tmp/$STATE_FILE" --clobber
             echo "✅ 状态已回存（$(du -h /tmp/$STATE_FILE | cut -f1)）"
           fi
 
@@ -311,4 +317,41 @@ jobs:
             *.log
           retention-days: 7
           if-no-files-found: ignore
+
+  # ---------- 9. 冗余触发模拟盘执行器（2026-08-31）----------
+  # 背景：executor.yml 自己的 11 个 cron 实测被 GitHub 漏投递——2026-08-31 十个
+  # 时点（09:25 开仓 + 8 轮巡逻 + 14:43 尾盘）一个都没送达，只有 06:43 那轮延迟
+  # 24 分钟落到 07:07 UTC、被判定成 review，导致模拟盘整天零操作。
+  # stock.yml 的触发源最多（自身 cron + 外部 15 分钟定时器 + watchdog +
+  # scheduler-backup），拿它的每次运行顺手补派执行器，等于给模拟盘加第二条独立
+  # 触发链。幂等由执行器侧「任务账本」保证（同一任务当日只执行一次，失败才重试），
+  # 这里只做时段闸门——run_once 没有时段闸（只判交易日），开仓绝不能在收盘后被
+  # 触发，否则会用收盘价建仓。
+  dispatch-executor:
+    needs: run
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 按北京时段补派执行器任务
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TZ: Asia/Shanghai
+        run: |
+          set -e
+          HM=$(date +%H:%M); DOW=$(date +%u)
+          if [ "$DOW" -gt 5 ]; then echo "周末不派发执行器（$HM）"; exit 0; fi
+          case "$HM" in
+            09:2[5-9]|09:3[0-9]) TASK=now ;;
+            09:4[0-9]|1[0-3]:[0-5][0-9]|14:[0-3][0-9]) TASK=scan ;;
+            14:4[0-9]|14:5[0-9]|15:0[0-9]) TASK=tail ;;
+            15:[1-5][0-9]) TASK=review ;;
+            *) echo "非模拟盘时段（$HM），跳过"; exit 0 ;;
+          esac
+          echo "补派执行器任务：$TASK（北京时间 $HM）"
+          code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/fisk9r/stock-analysis/actions/workflows/executor.yml/dispatches \
+            -d "{\"ref\":\"main\",\"inputs\":{\"task\":\"$TASK\",\"force\":\"false\"}}")
+          echo "dispatch HTTP $code（204=已触发；重复触发由执行器账本幂等拦截）"
 

@@ -255,6 +255,12 @@ _EXEC_STATE_MEMBERS = [
     # 高度溢价单调 st=1→8 胜率 55.6%→82.4%——当天没买到的票明天竞价给好开价
     # 仍是机会，跨 run 持久化后次日 09:25 开仓通道前即时提醒）
     "state/auction_watch.json",
+    # 2026-08-31 升级：任务账本（幂等守卫）——记录各任务当日是否已执行。
+    # 背景：executor.yml 的 11 个 cron 实测被 GitHub 漏投递（2026-08-31 十个时点
+    # 只送达 1 个，且延迟 24 分钟落到 07:07 UTC 被判成 review），因此新增
+    # stock.yml 冗余触发链；多触发源必然产生重复 dispatch，幂等必须内建在执行器，
+    # 而不是靠触发端的去重文件（触发端去重挡不住手动 dispatch 和 PC 计划任务）。
+    "state/task_ledger.json",
 ]
 
 
@@ -267,6 +273,64 @@ def _exec_state_paths():
     ex = os.path.dirname(os.path.abspath(__file__))
     return [os.path.join(ex, m) for m in _EXEC_STATE_MEMBERS if
             os.path.exists(os.path.join(ex, m))]
+
+
+# ---------------- 任务账本（2026-08-31 幂等守卫） ----------------
+# 多触发源（executor cron / stock.yml 冗余链 / PC 计划任务 / 手动 dispatch）下，
+# 同一任务同一天可能被触发多次。重复开仓会双倍建仓、重复复盘会重复推送，
+# 因此每个任务执行前查账本、执行成功后记账（失败不记账 → 允许自动重试）。
+def _ledger_path():
+    ex = os.path.dirname(os.path.abspath(__file__))
+    d = os.path.join(ex, "state")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(d, "task_ledger.json")
+
+
+def _ledger_load():
+    try:
+        with open(_ledger_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _ledger_save(led):
+    try:
+        with open(_ledger_path(), "w", encoding="utf-8") as f:
+            json.dump(led, f, ensure_ascii=False)
+    except Exception as e:
+        _log("任务账本写入失败：%r" % e)
+
+
+def _ledger_done(task, within_sec=None, date=None):
+    """该任务当日是否已执行过；within_sec 给定则只在该时间窗内算「已执行」。"""
+    led = _ledger_load()
+    d = date or time.strftime("%Y-%m-%d")
+    ts = (led.get(d) or {}).get(task)
+    if not ts:
+        return False
+    if within_sec and (time.time() - float(ts)) > within_sec:
+        return False
+    return True
+
+
+def _ledger_mark(task):
+    led = _ledger_load()
+    d = time.strftime("%Y-%m-%d")
+    led.setdefault(d, {})[task] = int(time.time())
+    for k in sorted(led.keys())[:-10]:      # 只留最近 10 天
+        led.pop(k, None)
+    _ledger_save(led)
+
+
+def _ledger_missing(date=None):
+    """当日缺失的必备任务（用于复盘时自检「调度缺口」并上报）。"""
+    d = date or time.strftime("%Y-%m-%d")
+    miss = [t for t in ("now", "scan") if not _ledger_done(t, date=d)]
+    return miss
 
 
 def exec_state_restore(force=False):
@@ -754,8 +818,13 @@ def run_once(cfg, force=False):
         _notify(cfg, "⏸ 模拟盘跳过（非交易日）", "- %s\n- 下一交易日 09:25 自动恢复" % why, defer=True)
         _flush_pending(cfg)
         return
+    # 幂等守卫：多触发源下当日开仓只做一次（重复 dispatch 不该双倍建仓）
+    if not force and _ledger_done("now"):
+        _log("今日开仓通道已执行（任务账本命中），跳过重复触发")
+        return
     try:
         _run_once_inner(cfg, force=force)
+        _ledger_mark("now")     # 只有成功才记账，异常留给下轮自动重试
     finally:
         # 2026-08-30 修复：run_once 抛异常时也必须回存状态，
         # 否则本轮成交/风控记录丢失，下轮以旧状态运行
@@ -965,8 +1034,14 @@ def run_scan(cfg, force=False):
     if not ok:
         _log("非交易日，巡逻跳过：%s" % why)
         return
+    # 幂等降频：巡逻允许一天多轮，但 10 分钟内的重复触发直接跳过（省 CI 时长、
+    # 也避免同一笔持仓在两轮里被重复裁决/重复推送）
+    if not force and _ledger_done("scan", within_sec=600):
+        _log("巡逻降频：距上一轮 <10 分钟，跳过")
+        return
     try:
         _run_scan_inner(cfg)
+        _ledger_mark("scan")
     finally:
         exec_state_save()
 
@@ -1084,8 +1159,13 @@ def run_tail(cfg, force=False):
     if not ok:
         _log("非交易日，尾盘通道跳过：%s" % why)
         return
+    # 幂等守卫：尾盘通道当日只做一次
+    if not force and _ledger_done("tail"):
+        _log("今日尾盘通道已执行（任务账本命中），跳过重复触发")
+        return
     try:
         _run_tail_inner(cfg, force=force)
+        _ledger_mark("tail")
     finally:
         exec_state_save()
 
@@ -1357,6 +1437,10 @@ def run_review(cfg=None, push=True, force=False):
     if not ok:
         _log("非交易日，复盘跳过：%s" % why)
         return None
+    # 幂等守卫：复盘当日只推一次（重复复盘 = 同一份战绩反复轰炸手机）
+    if not force and _ledger_done("review"):
+        _log("今日复盘已执行（任务账本命中），跳过重复推送")
+        return None
     # exec_state_restore 已在 main() 入口统一调用（2026-08-31）
     b = broker_sim.SimBroker()
     ds = b.day_summary()
@@ -1487,11 +1571,26 @@ def run_review(cfg=None, push=True, force=False):
     except Exception as e:
         _log("归因总结生成失败（不影响复盘）：%r" % e)
 
+    # 2026-08-31 升级：调度缺口自检——「今天没成交」必须说清是纪律空仓还是根本没跑。
+    # 背景：executor cron 被 GitHub 漏投递（10 个时点只送达 1 个），当天 0 成交 0 持仓，
+    # 复盘却只报「今日持平」，用户无从判断模拟盘是没信号还是没执行。
+    try:
+        miss = _ledger_missing()
+        if miss:
+            name = {"now": "09:25 开仓通道", "scan": "盘中巡逻"}
+            lines.append("")
+            lines.append("**⚠ 调度缺口**：今日 %s 未执行（cron 未送达或容器故障），"
+                         "模拟盘的「无成交」不代表无信号——请核对 Actions 运行记录。"
+                         % "、".join(name[m] for m in miss))
+    except Exception as e:
+        _log("调度缺口自检失败（不影响复盘）：%r" % e)
+
     text = "\n".join(lines)
     _log(text)
     if push:
         _notify(cfg, "📊 模拟盘复盘 %s（%+.2f%%）%s" % (ds["date"], ds["day_realized_pct"], verdict),
                 text)
+        _ledger_mark("review")     # 推送成功才记账，失败允许下轮重推
 
     # ---- 写 sim_review.json（网站模块数据源；历史按日累积）----
     try:
