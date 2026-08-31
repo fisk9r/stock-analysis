@@ -561,6 +561,17 @@ def run(date_override=None, dedup_close=False):
                                "l": b.get("l"), "c": b.get("c"), "v": b.get("v")}
                               for b in _bs[-30:]]
                     _kscore = _kab2(_kbars)
+                # 趋势双态补算（2026-08-31：延续票此前缺 trend_state/accel 等字段，
+                # 前端徽标永远不显示、notifier「加速上行 TOP3」也漏算延续票——
+                # 该分支早于 08-28 双态功能上线，后续没同步）。
+                _ma20_prev = sum(_closes[-25:-5]) / 20 if len(_closes) >= 25 else _ma20
+                _slope20 = ((_ma20 - _ma20_prev) / _ma20_prev * 100) if _ma20_prev else 0
+                _ma20_prev2 = sum(_closes[-30:-10]) / 20 if len(_closes) >= 30 else _ma20_prev
+                _slope20_prev2 = ((_ma20_prev - _ma20_prev2) / _ma20_prev2 * 100) if _ma20_prev2 else 0.0
+                _slope_delta = _slope20 - _slope20_prev2
+                _gain20 = (float(_bs[-1]["c"]) / (sum(_closes[-21:-1]) / 20) - 1) * 100 \
+                    if len(_closes) >= 21 and sum(_closes[-21:-1]) else 0.0
+                _tstate, _accel = engine.classify_trend_state(_avg5, _gain20 / 20.0, _slope_delta)
                 _p = {"code": _code, "name": _name, "streak": 0, "industry": _ind,
                       "close": round(float(_bs[-1]["c"]), 2),
                       "float_mv": (u.stocks.get(_code, {}) or {}).get("float_mv"),
@@ -576,6 +587,9 @@ def run(date_override=None, dedup_close=False):
                           "ma5": round(_ma5, 2), "ma10": round(_ma10, 2),
                           "ma20": round(_ma20, 2), "align": bool(_align),
                           "avg_daily": round(_avg5, 2), "band": _band,
+                          "trend_state": _tstate, "accel": round(_accel, 2),
+                          "slope20": round(_slope20, 2), "slope_delta": round(_slope_delta, 2),
+                          "daily20": round(_gain20 / 20.0, 2),
                           "continued_hist": True,
                           "kronos_score": round(_kscore, 1),
                       },
