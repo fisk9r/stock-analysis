@@ -1552,25 +1552,35 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     # ---- 买点候选（趋势加速优先）：从 data.buy_points 取加速组，红=买/优先；避免与牛股雷达/经典策略重复 ----
     _bp = data.get("buy_points") or {}
     # 剔除「已临卖点」矛盾票（warn_sell）：不把引擎判卖出的票当买点推荐
-    _acc_bp = [b for b in (_bp.get("accel") or []) if not b.get("warn_sell")][:5]
+    _all_acc = [b for b in (_bp.get("accel") or []) if not b.get("warn_sell")]
+    _acc_bp = _all_acc[:5]
     if _acc_bp:
-        _sec("🎯 买点候选 · 加速优先", [
+        _acc_rows = [
             "🔴 **%s**(%s) %.2f ｜ %s%s ｜ 评分%.0f"
             % (b.get("name", "?"), b.get("ind") or "—", b.get("price") or 0,
                b.get("btype") or "",
                (" ×%.2f" % b["accel"] if b.get("accel") is not None else ""),
                b.get("score") or 0)
-            for b in _acc_bp])
+            for b in _acc_bp]
+        if len(_all_acc) > len(_acc_bp):
+            _acc_rows.append("…（加速买点共 %d 只，列评分前 %d；完整清单见站点「买点候选」视图）"
+                             % (len(_all_acc), len(_acc_bp)))
+        _sec("🎯 买点候选 · 加速优先", _acc_rows)
     # 2026-08-31 升级（用户要求：所有内容均需要推送）：加速优先之外的「其他买点」
     # （趋势多头/回踩/突破）也全部推送，避免买点候选只发头部几只而漏掉其余。
     # 同样剔除矛盾票（warn_sell），按评分取前 6 只控量（缠论买点另有独立段）。
-    _oth_bp = [b for b in (_bp.get("others") or []) if not b.get("warn_sell")][:6]
+    _all_oth = [b for b in (_bp.get("others") or []) if not b.get("warn_sell")]
+    _oth_bp = _all_oth[:6]
     if _oth_bp:
-        _sec("📈 买点候选 · 其他（趋势多头）", [
+        _oth_rows = [
             "🔴 **%s**(%s) %.2f ｜ %s ｜ 评分%.0f"
             % (b.get("name", "?"), b.get("ind") or "—", b.get("price") or 0,
                b.get("btype") or "", b.get("score") or 0)
-            for b in _oth_bp])
+            for b in _oth_bp]
+        if len(_all_oth) > len(_oth_bp):
+            _oth_rows.append("…（趋势多头买点共 %d 只，列评分前 %d；完整清单见站点「买点候选」视图）"
+                             % (len(_all_oth), len(_oth_bp)))
+        _sec("📈 买点候选 · 其他（趋势多头）", _oth_rows)
     # ---- 自选/持仓操作结论（P1/P4：跟着做）----
     _wr = rec.get("watch_reco")
     if _wr and _wr.get("items") and _on("rec"):
