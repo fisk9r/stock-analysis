@@ -1643,13 +1643,22 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
             _sec("🧭 今日作战指令", _brief[:8])
     except Exception:
         pass
-    bull = data.get("bull") or [] if _on("bull") else []
+    # 去重：买点候选(加速优先/其他)与牛股雷达/经典策略同源 bull/strategies，
+    # 已作为买点展示的票不再在雷达里重复列，避免同一只票在推送里出现两次。
+    _bp_codes = set()
+    for _g in (_bp.get("accel") or []):
+        if not _g.get("warn_sell") and _g.get("code"):
+            _bp_codes.add(_g["code"])
+    for _g in (_bp.get("others") or []):
+        if not _g.get("warn_sell") and _g.get("code"):
+            _bp_codes.add(_g["code"])
+    bull = [b for b in (data.get("bull") or []) if b.get("code") not in _bp_codes] if _on("bull") else []
     _sec("🐂 牛股雷达", [
         "**%s**〔%s〕%.2f元 %+.1f%%"
         % (b.get("name", "?"), "+".join((b.get("signals") or [])[:2]),
            b.get("price") or 0, b.get("pct") or 0)
         for b in bull[:4]])
-    strat = data.get("strategies") or [] if _on("strat") else []
+    strat = [s for s in (data.get("strategies") or []) if s.get("code") not in _bp_codes] if _on("strat") else []
     _sec("🎯 经典策略", [
         "**%s**〔%s〕%.2f元 %+.1f%%"
         % (s.get("name", "?"), "+".join((s.get("signals") or [])[:2]),
