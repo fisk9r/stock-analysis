@@ -146,8 +146,44 @@ def _flush_pending(cfg):
     _notify_now(cfg, "📦 合并推送（%d 条）" % n, "\n".join(lines))
 
 
+def _serverchan_key(ncfg):
+    """ServerChan sendkey 三级查找（2026-09-01 推送加固）：
+    cfg.notify.serverchan_key > NOTIFY_JSON.wechat_serverchan.sendkey（CI Secret）
+    > 根目录 config/notify.json（CI 由 workflow 注入）。支持 str 或 [str]。"""
+    def _norm(k):
+        if isinstance(k, list):
+            k = k[0] if k else ""
+        return (str(k).strip() if k else "")
+    k = _norm(ncfg.get("serverchan_key") or "")
+    if k:
+        return k
+    env_ncfg = os.environ.get("NOTIFY_JSON", "").strip()
+    if env_ncfg:
+        try:
+            k = _norm((json.loads(env_ncfg).get("wechat_serverchan") or {}).get("sendkey"))
+            if k:
+                return k
+        except Exception:
+            pass
+    try:
+        root_ncfg = os.path.join(ROOT, "config", "notify.json")
+        if os.path.exists(root_ncfg):
+            with open(root_ncfg, encoding="utf-8") as f:
+                k = _norm((json.load(f).get("wechat_serverchan") or {}).get("sendkey"))
+            if k:
+                return k
+    except Exception:
+        pass
+    return ""
+
+
 def _notify_now(cfg, title, text):
-    """实际执行推送（原 _notify 主体）。"""
+    """实际执行推送（原 _notify 主体）。
+    2026-09-01 推送加固（用户底线：不允许「跑了却没收到」）：
+      · PushPlus 改走 https（原 http 明文，可能被中间设备拦截）；
+      · 单 token 3 次尝试 + 退避重试（此前单次失败即丢）；
+      · PushPlus 全部失败（或未配置）时自动回落 ServerChan 兜底——
+        SC 每日 5 条额度紧张，仅在主通道全灭时才消耗。"""
     results = []
     ncfg = cfg.get("notify") or {}
     # --- PushPlus ---
@@ -183,38 +219,53 @@ def _notify_now(cfg, title, text):
                             pp_tokens.append(x.strip())
         except Exception:
             pass
+    pp_ok = 0
     if pp_tokens:
         try:
             import urllib.request
             ok = 0
             for tk in pp_tokens:
-                try:
-                    payload = json.dumps({"token": tk, "title": title, "content": text,
-                                          "template": "markdown"}).encode()
-                    req = urllib.request.Request(
-                        "http://www.pushplus.plus/send", data=payload,
-                        headers={"Content-Type": "application/json"})
-                    with urllib.request.urlopen(req, timeout=15) as r:
-                        js = json.loads(r.read().decode("utf-8"))
-                    if js.get("code") == 200:
-                        ok += 1
-                except Exception as e:
-                    _log("PushPlus 单 token 失败：%r" % e)
+                sent = False
+                # 2026-09-01：单 token 3 次尝试 + 退避（此前单次失败即丢推送）
+                for attempt in range(3):
+                    try:
+                        payload = json.dumps({"token": tk, "title": title, "content": text,
+                                              "template": "markdown"}).encode()
+                        req = urllib.request.Request(
+                            "https://www.pushplus.plus/send", data=payload,
+                            headers={"Content-Type": "application/json"})
+                        with urllib.request.urlopen(req, timeout=15) as r:
+                            js = json.loads(r.read().decode("utf-8"))
+                        if js.get("code") == 200:
+                            sent = True
+                            break
+                        _log("PushPlus 返回异常 code=%s msg=%s"
+                             % (js.get("code"), js.get("msg")))
+                    except Exception as e:
+                        _log("PushPlus 尝试 %d/3 失败：%r" % (attempt + 1, e))
+                    if attempt < 2:
+                        time.sleep(1.5 * (attempt + 1))
+                if sent:
+                    ok += 1
+            pp_ok = ok
             results.append("PushPlus %d/%d" % (ok, len(pp_tokens)))
         except Exception as e:
             results.append("PushPlus失败:%r" % e)
-    # --- ServerChan（可选备用通道）---
-    key = (ncfg.get("serverchan_key") or "").strip()
-    if key:
-        try:
-            import urllib.request
-            import urllib.parse
-            data = urllib.parse.urlencode({"title": title, "desp": text[:4000]}).encode()
-            urllib.request.urlopen(
-                "https://sctapi.ftqq.com/%s.send" % key, data=data, timeout=15)
-            results.append("ServerChan ok")
-        except Exception as e:
-            results.append("ServerChan失败:%r" % e)
+    # --- ServerChan（兜底通道）---
+    # 2026-09-01 语义变更：仅当 PushPlus 全部失败（或未配置）时才发送——
+    # SC 每日 5 条额度留给异动/强晋级推送，正常情况不再双通道重复消耗。
+    if pp_ok == 0:
+        key = _serverchan_key(ncfg)
+        if key:
+            try:
+                import urllib.request
+                import urllib.parse
+                data = urllib.parse.urlencode({"title": title, "desp": text[:4000]}).encode()
+                urllib.request.urlopen(
+                    "https://sctapi.ftqq.com/%s.send" % key, data=data, timeout=15)
+                results.append("ServerChan ok（兜底）")
+            except Exception as e:
+                results.append("ServerChan兜底失败:%r" % e)
     if not results:
         _log("（未配置任何推送通道，跳过推送）")
     else:
@@ -823,8 +874,14 @@ def run_once(cfg, force=False):
         _log("今日开仓通道已执行（任务账本命中），跳过重复触发")
         return
     try:
-        _run_once_inner(cfg, force=force)
-        _ledger_mark("now")     # 只有成功才记账，异常留给下轮自动重试
+        data_ok = _run_once_inner(cfg, force=force)
+        if data_ok:
+            _ledger_mark("now")     # 只有成功才记账，异常留给下轮自动重试
+        else:
+            # 2026-09-01 升级：数据拉取失败不记账——否则 09:25-09:45 窗口内所有
+            # 冗余触发被「已执行」挡掉，全天无开仓（「挂起」的另一种形态）。
+            # 不记账 → 09:28 备份 cron / stock.yml 冗余 dispatch 自动重试补开仓。
+            _log("⚠ 开仓数据拉取失败：本轮不记任务账本（冗余触发将自动重试）")
     finally:
         # 2026-08-30 修复：run_once 抛异常时也必须回存状态，
         # 否则本轮成交/风控记录丢失，下轮以旧状态运行
@@ -860,6 +917,8 @@ def _daily_loss_check(broker, cfg, gate=None, label=""):
 
 
 def _run_once_inner(cfg, force=False):
+    """返回 data_ok：True=线上数据拉取成功（无论买卖几笔）；False=拉取失败。
+    run_once 据此决定是否记任务账本（失败不记账 → 冗余触发自动重试）。"""
     broker, mode = pick_broker(cfg)
     # 2026-08-31 修复（致命）：此前 L894 直接引用 acc["user_id"]，但本函数无 acc
     # 变量/参数（acc 只在 run_once 作用域）→ 恒抛 NameError → fetch 失败降级 0 成交，
@@ -894,6 +953,7 @@ def _run_once_inner(cfg, force=False):
     buy_lines, n_buy = [], 0
     mkt = {"mode": "NORMAL", "reason": "线上数据未取到，环境闸门放行（个股决策线仍生效）"}
     _log("拉取线上数据 %s ..." % SITE)
+    data_ok = False
     try:
         data = fetch_user_data(acc["user_id"], acc["passwd"])
         sigs = extract_signals(data)
@@ -901,6 +961,7 @@ def _run_once_inner(cfg, force=False):
         _log("大盘环境闸门：%s｜%s" % (mkt["mode"], mkt["reason"]))
         _log("信号 %d 条（core+relay+fused 去重）" % len(sigs))
         buy_lines, n_buy = run_buys(broker, mode, cfg, sigs, mkt)
+        data_ok = True
     except Exception as e:
         _log("✗ 数据拉取/解密失败：%r" % e)
         buy_lines = ["- 数据拉取失败：%r" % e]
@@ -925,6 +986,7 @@ def _run_once_inner(cfg, force=False):
     # 不再 defer 到进程退出 atexit 才 flush——CI 中途被杀（超时/OOM）会导致账本已记但
     # 推送未发，表现为「跑了却啥也没收到」。即便当日 0 成交也照发（卖0 买0 也是状态）。
     _notify(cfg, "执行器回报（卖%d 买%d）" % (n_sold, n_buy), "\n".join(all_lines))
+    return data_ok
 
 
 def _tail_buys(broker, cfg, sigs, mkt):
@@ -1171,14 +1233,24 @@ def run_tail(cfg, force=False):
         _log("今日尾盘通道已执行（任务账本命中），跳过重复触发")
         return
     try:
-        _run_tail_inner(cfg, force=force)
-        _ledger_mark("tail")
+        data_ok = _run_tail_inner(cfg, force=force)
+        if data_ok:
+            _ledger_mark("tail")
+        else:
+            # 2026-09-01：同 run_once 语义——尾盘入场数据拉取失败不记账，
+            # 14:40-15:09 窗口内的冗余 dispatch 自动重试补入场。
+            _log("⚠ 尾盘数据拉取失败：本轮不记任务账本（冗余触发将自动重试）")
     finally:
         exec_state_save()
 
 
 def _run_tail_inner(cfg, force=False):
+    """返回 data_ok：True=尾盘入场数据拉取成功；False=失败（不记 tail 账本）。"""
     broker, mode = pick_broker(cfg)
+    # 2026-09-01 修复（致命，与 _run_once_inner 08-31 同款）：本函数此前直接引用
+    # acc["user_id"]，但 acc 只在 run_tail 作用域 → 恒抛 NameError → 尾盘入场
+    # 通道的数据拉取从未成功过（14:45 微红横盘买入 0 笔的根因）。
+    acc = cfg.get("account") or {}
     _log("=" * 30 + " 14:45 尾盘确认通道 " + "=" * 30)
 
     # A. 持仓管理
@@ -1187,11 +1259,13 @@ def _run_tail_inner(cfg, force=False):
     # B. 尾盘入场
     buy_lines, n_buy = [], 0
     mkt = {"mode": "NORMAL", "reason": "线上数据未取到"}
+    data_ok = False
     try:
         data = fetch_user_data(acc["user_id"], acc["passwd"])
         sigs = extract_signals(data)
         mkt = market_gate(data)
         buy_lines, n_buy = _tail_buys(broker, cfg, sigs, mkt)
+        data_ok = True
     except Exception as e:
         _log("✗ 尾盘入场数据拉取失败：%r" % e)
         buy_lines = ["- 数据拉取失败：%r" % e]
@@ -1208,6 +1282,7 @@ def _run_tail_inner(cfg, force=False):
     # 2026-08-31 修复：尾盘回报立即推送（同 run_once 汇总，避免 atexit 未触发而丢失）。
     _notify(cfg, "尾盘确认回报（买%d）" % n_buy, "\n".join(out))
     exec_state_save()
+    return data_ok
 
 
 def run_summary():

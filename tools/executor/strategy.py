@@ -17,14 +17,29 @@ import time
 _CTX = __import__("ssl")._create_unverified_context()
 
 
-def _tencent_kline(code: str, n: int = 10, timeout: int = 10) -> list:
-    """腾讯日 K：qfqday 行=[日期,开,收,高,低,量]。返回 [{d,o,c,h,l}]，旧→新。"""
+def _tencent_kline(code: str, n: int = 10, timeout: int = 10, retries: int = 2) -> list:
+    """腾讯日 K：qfqday 行=[日期,开,收,高,低,量]。返回 [{d,o,c,h,l}]，旧→新。
+
+    2026-09-01 加固：加 3 次尝试 + 退避重试（与 realtime_quote 同口径）——
+    CI 弱网下单次失败会让卖出裁决拿到空 K 线（断板/续板判定失效 → 误判 HOLD
+    该卖不卖），重试显著降低该风险。"""
     prefix = "sh" if code[0] in ("6", "9") else ("bj" if code[0] in ("4", "8") else "sz")
     url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
            "param=%s%s,day,,,%d,qfq" % (prefix, code, n))
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as r:
-        js = __import__("json").loads(r.read().decode("utf-8"))
+    js = None
+    last_err = None
+    for attempt in range(1 + max(0, retries)):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as r:
+                js = __import__("json").loads(r.read().decode("utf-8"))
+            break
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(1.5 * (attempt + 1))
+    if js is None:
+        raise last_err  # 全部重试失败，保持原有异常语义（调用方已有降级路径）
     node = (js.get("data") or {}).get(prefix + code) or {}
     rows = node.get("qfqday") or node.get("day") or []
     out = []
