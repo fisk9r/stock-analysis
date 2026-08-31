@@ -64,11 +64,68 @@ def snapshot_to_bars(con, rows, date=None):
     return len(tup)
 
 
+def trade_calendar(days=45):
+    """权威交易日历：腾讯指数日K（sh000001 每个真实交易日必有一根）。
+    失败返回 None（调用方须跳过校验，不得当作「全是交易日」）。"""
+    try:
+        import json as _json
+        import urllib.request
+        import ssl
+        url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh000001,day,,,%d,qfq" % days
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        ctx = ssl._create_unverified_context()
+        j = _json.loads(urllib.request.urlopen(req, context=ctx, timeout=20).read())
+        d = j["data"]["sh000001"]
+        rows = d.get("qfqday") or d.get("day") or []
+        cal = set(r[0] for r in rows if len(r) > 0)
+        log("交易日历：%d 个交易日（%s ~ %s）" % (len(cal), min(cal), max(cal)))
+        return cal
+    except Exception as e:
+        log("交易日历拉取失败（本次跳过日历校验）：%r" % e)
+        return None
+
+
+def purge_fake_days(con, cal):
+    """自愈：删除日历之外的假交易日数据（2026-08-31 教训：周日 cron 把周五
+    收盘快照整库写成「08-30」假 bar——涨幅全 0、amount 与上一交易日分毫不差，
+    污染推荐/归因/回测/趋势窗口）。只动 bars/rec_picks/engine_snapshots/
+    rec_history/seat_daily/theme_daily 这些 date 键控表；派生数据每轮重建。"""
+    if not cal:
+        return
+    lo = min(cal)
+    bad = [r[0] for r in con.execute(
+        "SELECT DISTINCT date FROM bars WHERE date>=? ORDER BY date", (lo,))
+        if r[0] not in cal]
+    if not bad:
+        return
+    for d in bad:
+        n = con.execute("SELECT COUNT(*) FROM bars WHERE date=?", (d,)).fetchone()[0]
+        for tbl in ("bars", "rec_picks", "engine_snapshots", "rec_history",
+                    "seat_daily", "theme_daily"):
+            try:
+                con.execute("DELETE FROM %s WHERE date=?" % tbl, (d,))
+            except Exception:
+                pass  # 个别表无 date 列则跳过
+        con.commit()
+        log("已清除假交易日 %s（%d 行假 bar）" % (d, n))
+
+
 def refresh_bars(con, stocks, full_days=260):
     n_code = con.execute("SELECT COUNT(DISTINCT code) FROM bars").fetchone()[0] or 0
     n_date = con.execute("SELECT COUNT(DISTINCT date) FROM bars").fetchone()[0] or 0
     last = con.execute("SELECT MAX(date) FROM bars").fetchone()[0]
     today = _bj_now().strftime("%Y-%m-%d")
+
+    # ---- 交易日守门（2026-08-31 修复，放在最前：所有路径都要过闸）----
+    # market_closed() 只看钟点：周末/节假日到点同样「已收盘」，但快照是陈旧的
+    # （price==prev_close、pct 全 0）。此前周日 20:00 的周末发酵 run 跑了完整
+    # 流水线，把周五快照整库写成假交易日。现在用指数日历双重防御：
+    # ① 清理已入库的假交易日；② 今日不在日历则拒绝写快照。
+    cal = trade_calendar()
+    purge_fake_days(con, cal)
+    if cal is not None and today not in cal:
+        log("今日 %s 非交易日（指数日历校验），跳过本次行情刷新" % today)
+        return 0
 
     need_full = n_code < len(stocks) * 0.6 or n_date < 60
     if need_full:
@@ -85,6 +142,11 @@ def refresh_bars(con, stocks, full_days=260):
         return _pull_klines(con, stocks, 35)
 
     if market_closed():
+        # 双保险：日历拉取失败时用「全市场涨跌几乎全 0」识别休市快照
+        nz = sum(1 for r in stocks if r.get("pct") not in (None, 0))
+        if stocks and nz / len(stocks) < 0.05:
+            log("快照涨跌几乎全为 0（疑似休市陈旧快照），拒绝写入日K")
+            return 0
         snapshot_to_bars(con, stocks, today)
     else:
         log("尚未收盘（%s），跳过当日快照入库，分析将以上一交易日为准" % _bj_now().strftime("%H:%M"))
