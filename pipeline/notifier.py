@@ -328,19 +328,81 @@ def send_wechat_serverchan(cfg, title, text):
     return (len(ok_list) > 0), msg
 
 
+def md2html(title, text):
+    """推送文本 → HTML（2026-09-01 用户需求：买入/卖出/持有三色标注 + 分区排版）。
+
+    此前 PushPlus 走 markdown 模板，纯文本一大段、关键动作不醒目。现在做真正的
+    markdown→HTML 转换后再用 html 模板：分区标题带色条、列表分行、动作关键字
+    上色（A 股习惯：买入=红／卖出=绿／持有=蓝／观望=灰），买点/重点行高亮。
+    """
+    def _esc(s):
+        return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+    def _bold(s):
+        import re as _re
+        return _re.sub(r"\*\*(.+?)\*\*", r'<strong>\1</strong>', s)
+
+    def _color(line):
+        out = line
+        for kw, css in (("买入", "#e02020"), ("加仓", "#e02020"), ("建仓", "#e02020"),
+                        ("买点", "#e02020"), ("BUY", "#e02020"),
+                        ("卖出", "#0a8f3c"), ("止损", "#0a8f3c"), ("清仓", "#0a8f3c"),
+                        ("减仓", "#0a8f3c"), ("SELL", "#0a8f3c"),
+                        ("持有", "#2f6fed"), ("HOLD", "#2f6fed"),
+                        ("观望", "#6b7280"), ("WATCH", "#6b7280")):
+            if kw in out:
+                out = out.replace(
+                    kw, '<span style="color:%s;font-weight:600">%s</span>' % (css, kw))
+        return out
+
+    parts = []
+    for ln in (text or "").splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if s.startswith("## "):
+            parts.append(
+                '<div style="margin:12px 0 6px;padding:5px 9px;border-left:4px solid #2f6fed;'
+                'background:#f4f7ff;font-weight:700;font-size:15px">%s</div>' % _esc(s[3:]))
+        elif s.startswith("> "):
+            parts.append(
+                '<div style="margin:6px 0;padding:4px 8px;background:#fafafa;'
+                'border-left:3px solid #d0d0d0;color:#666">%s</div>'
+                % _color(_bold(_esc(s[2:]))))
+        elif s.startswith("- ") or s.startswith("* "):
+            hi = ("买点" in s or "重点" in s or "到价" in s)
+            bg = 'background:#fff8e6;' if hi else ''
+            parts.append(
+                '<div style="margin:3px 0;line-height:1.65;%s">• %s</div>'
+                % (bg, _color(_bold(_esc(s[2:])))))
+        elif s.startswith("|"):
+            parts.append(
+                '<div style="font-family:monospace;font-size:12px;color:#444;'
+                'white-space:pre-wrap">%s</div>' % _esc(s))
+        elif set(s) <= set("-—= "):
+            parts.append('<hr style="border:none;border-top:1px solid #eee;margin:10px 0">')
+        else:
+            parts.append(
+                '<div style="margin:4px 0;line-height:1.65;color:#333">%s</div>'
+                % _color(_bold(_esc(s))))
+    return ('<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif;'
+            'font-size:14px;color:#222">%s</div>' % "".join(parts))
+
+
 def send_wechat_pushplus(cfg, title, text):
     tokens = _iter_pushplus(cfg)
     if not tokens:
         return False, "未配置 token"
-    url = "http://www.pushplus.plus/send"
+    url = "https://www.pushplus.plus/send"   # 2026-09-01：http 明文 → https
     ok_list, fail_list = [], []
     for token in tokens:
         try:
-            payload = {"token": token, "title": title, "content": text,
-                       # 关键：默认 html 模板会把 **粗体**、- 列表当纯文本裸显（极难读）；
-                       # 切到 markdown 模板后分区标题/加粗/列表全部正常渲染。
-                       # 可在 notify.json wechat_pushplus.template 覆盖。
-                       "template": cfg.get("template") or "markdown"}
+            # 2026-09-01：三色 HTML 排版（md2html 转换后走 html 模板；
+            # 早期直接把 markdown 塞进 html 模板会裸显符号，现在已完成真转换）
+            _content = md2html(title, text)
+            payload = {"token": token, "title": title, "content": _content,
+                       # 可在 notify.json wechat_pushplus.template 覆盖（万一需要回退 markdown）
+                       "template": cfg.get("template") or "html"}
             # topic 为群组编码，缺省走一对一推送；配置了才带上
             topic = cfg.get("topic")
             if topic:
@@ -1572,6 +1634,16 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         if _sz:
             _parts.append("目标%.2f~%.2f" % (_sz[0], _sz[1]))
         return (" ｜ " + " ／ ".join(_parts)) if _parts else ""
+    # ---- 扫描覆盖度（2026-09-01 用户要求：结论必须是全 A 股全部过一遍后的结果）----
+    # 口径：screen_uptrend 遍历 u.bars 全量 5544 只 → TopN；连板体系扫当日涨停池。
+    # 显式展示覆盖度，避免用户误以为只是抽样样本。
+    _cov = (data or {}).get("scan_coverage") or {}
+    if _cov.get("universe"):
+        _sec("🔍 扫描范围", [
+            "全市场 **%d** 只股票全部参与计算（当日涨停 %d 只）"
+            % (_cov["universe"], _cov.get("limit_up_today") or 0),
+            "> 以下推荐与买点均为全量扫描后排序得出，不是抽样样本。",
+        ])
     # 剔除「已临卖点」矛盾票（warn_sell）：不把引擎判卖出的票当买点推荐
     _all_acc = [b for b in (_bp.get("accel") or []) if not b.get("warn_sell")]
     _acc_bp = _all_acc[:5]
@@ -1607,7 +1679,9 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     # ---- 自选/持仓操作结论（P1/P4：跟着做）----
     _wr = rec.get("watch_reco")
     if _wr and _wr.get("items") and _on("rec"):
-        _sec("⭐ 自选/持仓操作", watchreco_lines({"recommend": rec}, n=6))
+        # 2026-09-01：自选/持仓票已排序前置（watchreco.distill），条数 6→10
+        # 保证用户加入自选的票（如中化国际 600500）每天都能收到操作说明。
+        _sec("⭐ 自选/持仓操作", watchreco_lines({"recommend": rec}, n=10))
     # ---- 综合最优解（融合连板/趋势/席位/题材/连续信号/区间，多引擎共振优先）----
     fused = rec.get("fused") or []
     if fused:

@@ -54,14 +54,16 @@ def _verdict(it):
     return "观望"
 
 
-def distill(zones_data, holding_codes=None, watch_names=None, topn=14):
+def distill(zones_data, holding_codes=None, watch_names=None, topn=14, watch_codes=None):
     """zones.scan 输出 → 自选/持仓操作结论列表（按紧急度→买入价值排序）。
 
     holding_codes：持仓代码集合（用于区分「持仓」与「自选」语境）。
+    watch_codes：用户关注池代码集合（notify/holdings/watch.json 合并）。
     返回 {"n": int, "sell_n": int, "buy_n": int, "items": [...]}。
     """
     items = []
     holding_codes = set(holding_codes or [])
+    watch_codes = set(watch_codes or [])
     for it in (zones_data or {}).get("items") or []:
         try:
             code = it.get("code")
@@ -77,6 +79,8 @@ def distill(zones_data, holding_codes=None, watch_names=None, topn=14):
                 "pct": it.get("pct"),
                 "action": v,
                 "is_holding": bool(is_holding),
+                # 2026-09-01：是否用户关注池成员（自选股），用于排序前置
+                "is_watch": code in watch_codes,
                 "pnl_pct": it.get("pnl_pct"),
                 "buy_zone": buy, "sell_zone": sell, "stop": it.get("stop"),
                 "horizon": it.get("horizon"),
@@ -89,7 +93,12 @@ def distill(zones_data, holding_codes=None, watch_names=None, topn=14):
             items.append(entry)
         except Exception:
             continue
-    items.sort(key=lambda x: (_URGENCY.get(x["action"], 9),
+    # 2026-09-01 排序前置（用户诉求：自选票加入后每天都要收到操作说明）：
+    # 此前统一按紧急度排序，自选/持仓票常被推荐池的票挤到 n=6 之外被截断，
+    # 表现为「票加进自选了但推送里看不到它的操作提示」（中化国际 600500 即此例）。
+    # 现在顺序：持仓(有成本) > 自选(关注池) > 其它推荐票，组内再按紧急度排序。
+    items.sort(key=lambda x: (0 if x.get("is_holding") else (1 if x.get("is_watch") else 2),
+                              _URGENCY.get(x["action"], 9),
                               -(x.get("pnl_pct") if x.get("pnl_pct") is not None else -99)))
     items = items[:topn]
     return {

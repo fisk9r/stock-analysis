@@ -485,6 +485,22 @@ def run(date_override=None, dedup_close=False):
         log("  盘前策略生成失败（不影响主流程）：%r" % e)
         plan = {}
 
+    # ---- 扫描覆盖度（2026-09-01 用户需求：必须是全 A 股全部过一遍后的结论）----
+    # 口径：u.bars = 本地全市场日K库（5550 只股票，最新交易日 5544 只有行情）；
+    # 趋势通道 screen_uptrend 遍历 u.bars 全量（for code in u.bars.items()）后取 TopN；
+    # 连板体系扫当日涨停池 + 近期涨停基因池。这里把覆盖度落进 data，供推送/看板显式展示。
+    try:
+        _uni = len(u.bars or {})
+        _zt = len(u.zt.get(date) or set()) if hasattr(u, "zt") else 0
+        data["scan_coverage"] = {
+            "universe": _uni,                 # 全市场参与计算的股票数
+            "limit_up_today": _zt,            # 当日涨停家数（连板体系的候选源）
+            "date": date,
+        }
+        log("  扫描覆盖：全市场 %d 只（当日涨停 %d 只）" % (_uni, _zt))
+    except Exception as e:
+        log("  扫描覆盖度统计失败（不影响主流程）：%r" % e)
+
     # 趋势向上选股（独立于连板体系，覆盖主升段趋势票）
     try:
         rec["trend"] = engine.screen_uptrend(u, date, code2boards, topn=12)
@@ -1257,8 +1273,11 @@ def run(date_override=None, dedup_close=False):
         import watchreco
         _wn = w_names if 'w_names' in locals() and isinstance(w_names, dict) else {}
         _zc = z_costs if 'z_costs' in locals() else {}
+        # 2026-09-01：传 watch_codes（关注池）→ 自选票排序前置，保证每天都有操作说明
+        _wcodes = w_codes if 'w_codes' in locals() and isinstance(w_codes, list) else []
         rec["watch_reco"] = watchreco.distill(
-            data.get("zones"), holding_codes=set(_zc.keys()), watch_names=_wn)
+            data.get("zones"), holding_codes=set(_zc.keys()), watch_names=_wn,
+            watch_codes=set(_wcodes))
         _wr = rec["watch_reco"]
         # 补行业字段（zones 无行业信息）→ 供盘前「板块当日预判」关联到个股
         def _industry_of(_c):
