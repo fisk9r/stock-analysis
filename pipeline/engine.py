@@ -2257,7 +2257,13 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
     # 空标签兜底（2026-08-29：实测 rec.all 有 11 只 tag=undefined）——
     # 首板无板块合力且 sc<40 不落任何桶，给「观察」中性标签，前端不再显示空白。
     for it in items:
-        it.setdefault("tag", "观察")
+        if it.get("tag") is None:
+            it["tag"] = "观察"
+            # 2026-08-31 月度归因确诊：无标签首板（无板块合力、sc<40）n=123，
+            # 次日胜率仅 39.8%/均值+0.18%，是全部标签中最弱一桶（近乎噪声）。
+            # 弱票降权 15% 自然靠后，避免挤占有合力确认的主推；仍保留可见（观察）。
+            if (it.get("score") or 0) > 0:
+                it["score"] = round((it.get("score") or 0) * 0.85, 1)
     # ── 分桶内重排序（2026-08-28 用户反馈排序错乱）──
     # 分组循环前 items 虽按原分降序，但循环中 WARN 负反馈会把 score×0.92 降权，
     # 桶内顺序不再等于新分降序 → 每个桶输出前必须按最终 score 重排一次。
