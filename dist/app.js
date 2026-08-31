@@ -4238,7 +4238,15 @@
       }
       return h;
     }
-    var views = { overview: viewOverview, watch: viewWatch, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings, sim: viewSim };
+    var views = { overview: viewOverview, watch: viewWatch, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings, buypoint: viewBuypoint, sim: viewSim };
+    function viewBuypoint() {
+      /* 买点候选是每日构建产出的独立零依赖单文件报告（trend_buy_points.html），
+         用 iframe 隔离渲染，避免与 SPA 自身 CSS/JS 冲突；缺失时给直链兜底。 */
+      return '<div class="bp-wrap">' +
+        '<div class="bp-bar"><span>🎯 买点候选 · 上升趋势中的介入机会（每日构建生成）</span>' +
+        '<a class="bp-link" href="trend_buy_points.html" target="_blank" rel="noopener">↗ 新窗口打开</a></div>' +
+        '<iframe class="bp-frame" src="trend_buy_points.html" title="买点候选" loading="lazy"></iframe></div>';
+    }
     var done = {};
     function show(k) {
       var el = document.getElementById('v-' + k);

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""从线上解密快照(live_dump.json) 挖掘「上升趋势中处于买点」的票。
+"""从分析结果数据(或线上解密快照 live_dump.json) 挖掘「上升趋势中处于买点」的票。
 
 不按"趋势"标签呈现，按买点信号归类：
   - bull（二波启动 / 均线发散 / N字回踩）= 上升途中回踩企稳后再起 → 买点
@@ -8,8 +8,10 @@
   - chanlun.buys（一/二/三买）= 缠论结构买点
 zones 多为持仓管理(正常持有/逼近卖出)，不纳入新挖掘。
 
-输出：reports/trend_buy_points_<date>.html （HUD 暗色零依赖单文件）
-用法：node tools/live_inspect.js owner <pass> --deep 后 python tools/gen_buypoint_report.py
+输出：dist/trend_buy_points.html（稳定名，线上站点可直达）+ dist/trend_buy_points_<date>.html（按日归档）
+用法：
+  - 每日构建(build.py)自动调用 generate(data, DIST) 产出线上报告；
+  - 调试：node tools/live_inspect.js owner <pass> --deep 后 python tools/gen_buypoint_report.py
 """
 import json
 import os
@@ -34,13 +36,11 @@ def buy_type(signals):
     return "其它"
 
 
-def main():
-    d = json.load(open(SNAP, encoding="utf-8"))
-    date = (d.get("meta") or {}).get("date", "")
-    # ---- 合并 bull + strategies 去重 ----
+def _merge(data):
+    """合并 bull + strategies 去重，返回按评分降序的列表。"""
     merged = {}
-    for src, key in (("bull", "bull"), ("strategies", "strategies")):
-        for x in (d.get(src) or []):
+    for src in ("bull", "strategies"):
+        for x in (data.get(src) or []):
             code = x.get("code")
             if not code:
                 continue
@@ -66,13 +66,14 @@ def main():
                 rec["score"] = max(rec["score"], x.get("score") or 0)
                 rec["btype"] = bt if bt != "其它" else rec["btype"]
                 rec["tags"] = rec["tags"] or x.get("tags", "")
-    trend_buy = sorted(merged.values(), key=lambda r: -r["score"])
+    return sorted(merged.values(), key=lambda r: -r["score"])
 
-    # ---- 缠论买点 ----
-    chan = (d.get("chanlun") or {}).get("buys") or []
+
+def _render(data, date):
+    trend_buy = _merge(data)
+    chan = (data.get("chanlun") or {}).get("buys") or []
     chan = [c for c in chan if c.get("signal")]
 
-    # ---- 渲染 ----
     rows_a = []
     for r in trend_buy:
         pct = r["pct"]
@@ -159,13 +160,33 @@ td { padding:7px 8px; border-bottom:1px solid #13203a; vertical-align:top; }
 </div>
 </body></html>
 """ % (date, date, len(trend_buy), "\n".join(rows_a), len(chan), "\n".join(rows_b), date)
+    return html
 
-    os.makedirs(OUT, exist_ok=True)
-    path = os.path.join(OUT, "trend_buy_points_%s.html" % date)
-    open(path, "w", encoding="utf-8").write(html)
+
+def generate(data, out_dir=None):
+    """从分析结果 dict 生成买点候选报告。返回生成的稳定名路径（dist/trend_buy_points.html）。"""
+    if out_dir is None:
+        out_dir = OUT
+    date = (data.get("meta") or {}).get("date", "") or ""
+    html = _render(data, date)
+    os.makedirs(out_dir, exist_ok=True)
+    # 稳定名（线上站点直达）
+    stable = os.path.join(out_dir, "trend_buy_points.html")
+    open(stable, "w", encoding="utf-8").write(html)
+    # 按日归档
+    if date:
+        arch = os.path.join(out_dir, "trend_buy_points_%s.html" % date)
+        open(arch, "w", encoding="utf-8").write(html)
+    return stable
+
+
+def main():
+    d = json.load(open(SNAP, encoding="utf-8"))
+    path = generate(d)
     print("写出生买点报告:", path)
-    print("趋势买点(合并去重) %d 只 | 缠论买点 %d 只" % (len(trend_buy), len(chan)))
-    print("Top5:", ", ".join("%s(%.1f)" % (r["name"], r["score"]) for r in trend_buy[:5]))
+    print("趋势买点(合并去重) %d 只 | 缠论买点 %d 只" % (
+        len(_merge(d)), len([c for c in ((d.get("chanlun") or {}).get("buys") or []) if c.get("signal")])))
+    print("Top5:", ", ".join("%s(%.1f)" % (r["name"], r["score"]) for r in _merge(d)[:5]))
 
 
 if __name__ == "__main__":

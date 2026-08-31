@@ -1695,6 +1695,17 @@ def run(date_override=None, dedup_close=False):
     except Exception:
         pass
 
+    # 买点候选报告（上升趋势中的介入机会）→ 线上站点直达 dist/trend_buy_points.html
+    # 与推送文案一致：只挖买点信号、不挂"趋势"标签。失败不影响主流程（已兜底）。
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import gen_buypoint_report as _gbp
+        _bp = _gbp.generate(data, DIST)
+        if _bp:
+            log("  买点候选报告：%s" % os.path.relpath(_bp, ROOT))
+    except Exception as e:
+        log("  买点候选报告生成跳过：%r" % e)
+
     con.close()
     return data
 
@@ -1811,30 +1822,12 @@ def push_anomaly():
 def _anomaly_basis_once():
     """盘中异动的『判断依据/介入纪律』只在今日首条推送里完整说一次；
     后续每 15 分钟的推送改用一行简注代替，避免同一段说明反复刷屏（用户反馈：复盘美观、盘中杂乱）。
-    依赖 notifier 的去重账本（push_ledger.jsonl）按日判定，与异常冷却去重同源、零新增状态。"""
-    try:
-        logp = notifier._ledger_path()
-        today = notifier._bj_now().strftime("%Y-%m-%d")
-        if os.path.exists(logp):
-            with open(logp, encoding="utf-8") as fh:
-                for line in fh:
-                    try:
-                        p = json.loads(line)
-                    except Exception:
-                        continue
-                    if p.get("mode") == "anomaly_basis" and str(p.get("ts", "")).startswith(today):
-                        return "（判断依据见今日首条盘中异动，不重复）"
-        # 今日首条：输出完整判断依据，并记账（后续推送即走简注分支）
-        basis = ("> 📌 判断依据：新封板=封板强度信号；急拉=主力资金净流入；妖股潜力=实时资金维度打分≥55；"
-                 "题材联动=同板块≥3只涨停即板块爆发。介入纪律：高开≥2%才跟进、低开≤-2%直接放弃，"
-                 "炸板≥3次不追。以下仅列本轮**新出现**标的，已报过的不重复。")
-        notifier._append_ledger({"ts": notifier._bj_now().strftime("%Y-%m-%d %H:%M:%S"),
-                                  "mode": "anomaly_basis", "title": "anomaly-basis"})
-        return basis
-    except Exception:
-        # 异常时退化为每次都给（不静默丢失说明，仅丧失去重收益）
-        return ("> 📌 判断依据：新封板=封板强度；急拉=主力资金净流入；妖股潜力=实时资金维度打分≥55；"
-                "题材联动=同板块≥3只涨停即板块爆发。介入纪律：高开≥2%才跟进、低开≤-2%直接放弃。")
+    复用 notifier.basis_once 通用去重（与盘前/竞价竞价纪律同源，按北京日判定 push_ledger.jsonl）。"""
+    full = ("> 📌 判断依据：新封板=封板强度信号；急拉=主力资金净流入；妖股潜力=实时资金维度打分≥55；"
+            "题材联动=同板块≥3只涨停即板块爆发。介入纪律：高开≥2%才跟进、低开≤-2%直接放弃，"
+            "炸板≥3次不追。以下仅列本轮**新出现**标的，已报过的不重复。")
+    brief = "（判断依据见今日首条盘中异动，不重复）"
+    return notifier.basis_once("anomaly_basis", full, brief)
 
 
 def _anomaly_focused(s, new_codes, url, demon_map=None):

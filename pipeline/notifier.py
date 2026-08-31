@@ -2163,7 +2163,7 @@ def format_stock_summary(data, url="", mode="close", con=None):
                         w["name"], w.get("reason", ""),
                         ("｜" + _ar) if _ar else ""))
                 L.append("- 关注池：" + "、".join(_ws))
-                L.append("- ⏰ 竞价总纪律（全样本13个月回测）：涨停票次日**高开≥2%才跟进**、**低开≤-2%直接放弃**——高开>5%胜率85.9%/+6.8%，低开<-2%仅26.5%/-3.0%")
+                L.append(basis_once("open_discipline", _OPEN_DISCIPLINE_FULL, _OPEN_DISCIPLINE_BRIEF))
             if pp.get("risks"):
                 L.append("- 风险提醒：%s" % "；".join(pp["risks"]))
         # ⑥ ⚡ 短线/超短线盘前操作提示（追板回落/破位/停滞 当日离场或换强）
@@ -2308,6 +2308,42 @@ def format_sc(data, url="", mode="close", con=None):
     return {"title": _title, "text": _fmt_close_compact(data, url, mode, con=con)}
 
 
+# ── 通用「判断依据只说一次」去重 ──────────────────────────────────────────────
+# 同源复用 push_ledger.jsonl 的按北京日判定（与异常冷却去重同一套账本、零新增状态）。
+# 用法：同一 ledger_mode 当日首条推送给 full_text，后续推送给 brief_text。
+# 已用于盘中异动(anomaly_basis)；现扩展到盘前(preauction)/竞价(auction)的竞价纪律说明，
+# 避免同一段回测纪律在 08:50 盘前与 09:25 竞价两条推送里重复刷屏。
+_OPEN_DISCIPLINE_FULL = (
+    "- ⏰ 竞价总纪律（13个月全样本回测）：涨停票次日**高开≥2%才跟进**、**低开≤-2%直接放弃**"
+    "——高开>5%胜率85.9%/+6.8%，低开<-2%仅26.5%/-3.0%；连板低开一律回避（收红率仅24%）。")
+_OPEN_DISCIPLINE_BRIEF = (
+    "- ⏰ 竞价纪律（见今日盘前首条推送，此处不重复展开）：高开≥2%跟进 / 低开≤-2%放弃 / 连板低开回避。")
+
+
+def basis_once(ledger_mode, full_text, brief_text):
+    """同一 ledger_mode 当日首条给 full_text，后续给 brief_text（按北京日去重）。
+
+    依赖 state/push_ledger.jsonl（_ledger_path / _bj_now / _append_ledger，与异常冷却同源）。
+    任何异常都退化为 full_text（不静默丢失说明，仅丧失去重收益）。"""
+    try:
+        logp = _ledger_path()
+        today = _bj_now().strftime("%Y-%m-%d")
+        if os.path.exists(logp):
+            with open(logp, encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        p = json.loads(line)
+                    except Exception:
+                        continue
+                    if p.get("mode") == ledger_mode and str(p.get("ts", "")).startswith(today):
+                        return brief_text
+        _append_ledger({"ts": _bj_now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "mode": ledger_mode, "title": ledger_mode})
+        return full_text
+    except Exception:
+        return full_text
+
+
 def format_auction_summary(data, url="", con=None):
     """竞价后确认（9:25）：结合前一交易日推荐名单，对比今日竞价强弱，判定续强/掉队/新晋（Markdown 分区）。"""
     m = data.get("meta", {})
@@ -2393,8 +2429,7 @@ def format_auction_summary(data, url="", con=None):
             if lp_avoid:
                 L.append("- 🚫 低开放弃：%s" % "、".join(lp_avoid[:8]))
 
-    L.append("> **竞价纪律（480 笔历史推荐实测）**：低开票一律回避（收红率仅 24%）；"
-             "不低开 + 核心龙头或缩量板胜率 78% 均值 +5.5%。以下名单已按此执行。")
+    L.append(basis_once("open_discipline", _OPEN_DISCIPLINE_FULL, _OPEN_DISCIPLINE_BRIEF))
     L.append("")
 
     L.append("### 续强确认（昨日推荐 · 今日竞价强）")
