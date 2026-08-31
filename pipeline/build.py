@@ -1332,7 +1332,7 @@ def run(date_override=None, dedup_close=False):
                 if st.get("win_rate", 0) >= 55 and st.get("n", 0) >= 8:
                     reps = [h for h in hits if h.get("label") == label][:3]
                     items.append({"label": label, "win_rate": st["win_rate"],
-                                  "n": st["n"], "avg_pct": st.get("avg_pct"), "reps": reps})
+                                  "n": st["n"], "avg_pct": st.get("avg_ret"), "reps": reps})
             data["seat_follow"] = {"n": len(items), "items": items} if items else None
             if data["seat_follow"]:
                 log("  可跟席位：%d 个（胜率≥55%%）" % len(items))
@@ -1344,7 +1344,7 @@ def run(date_override=None, dedup_close=False):
                 if st.get("win_rate", 0) < 40 and st.get("n", 0) >= 20:
                     reps = [h for h in hits if h.get("label") == label][:3]
                     avoid.append({"label": label, "win_rate": st["win_rate"],
-                                  "n": st["n"], "avg_pct": st.get("avg_pct"), "reps": reps})
+                                  "n": st["n"], "avg_pct": st.get("avg_ret"), "reps": reps})
             data["seat_avoid"] = {"n": len(avoid), "items": avoid} if avoid else None
             if data["seat_avoid"]:
                 log("  回避席位：%d 个（胜率<40%% 且样本≥20）" % len(avoid))

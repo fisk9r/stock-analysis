@@ -845,6 +845,13 @@
             return E(a.label) + '（胜率' + f(a.win_rate, 0) + '%/' + a.n + '次' + (a.avg_pct != null ? '，均值' + (a.avg_pct > 0 ? '+' : '') + f(a.avg_pct, 2) + '%' : '') + '）';
           }).join('、') + '</div>';
       }
+      /* 2026-08-31 可跟席位汇总条（胜率≥55%且样本≥8）：此前无渲染路径，数据达标会静默丢弃 */
+      if (D.seat_follow && D.seat_follow.items && D.seat_follow.items.length) {
+        stBody += '<div style="margin-top:8px;font-size:12px;color:' + C.up + '">✅ 可跟席位（历史跟随正期望）：' +
+          D.seat_follow.items.map(function (a) {
+            return E(a.label) + '（胜率' + f(a.win_rate, 0) + '%/' + a.n + '次' + (a.avg_pct != null ? '，均值' + (a.avg_pct > 0 ? '+' : '') + f(a.avg_pct, 2) + '%' : '') + '）';
+          }).join('、') + '</div>';
+      }
       h += card('🐉 游资席位画像', stBody, '识别当日龙虎榜上的知名游资营业部（坊间归因，仅供参考），并给出其历史 T+1 跟随胜率，辅助判断是否值得跟；胜率<40% 的席位标红回避（如散户集中营）；样本≥8 才显示胜率');
     }
 
