@@ -268,7 +268,7 @@
       var acc7 = sec7('加速趋势', acc, '', function (t) {
         var bm = t.trend_meta || {};
         return '<span style="color:var(--up);font-size:10.5px;font-weight:700">🚀加速 ' + f(bm.accel, 1) + 'x</span>' +
-          (t.verdict && t.verdict.action ? '<span class="muted" style="font-size:10.5px">' + E((t.verdict.action || '').slice(0, 6)) + '</span>' : '');
+          (t.verdict && t.verdict.action ? '<span class="' + (actCls(t.verdict.action) || 'muted') + '" style="font-size:10.5px">' + E((t.verdict.action || '').slice(0, 6)) + '</span>' : '');
       });
       if (acc7) body7 += '<div style="margin-bottom:8px"><b style="color:var(--muted);font-size:12px">📈 加速上行趋势</b><div class="chips" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:6px">' + acc7 + '</div></div>';
       /* ③ 综合最优解 Top3 */
@@ -2128,7 +2128,7 @@
           instHtml = '<div style="margin-top:4px;padding:4px 8px;border-left:3px solid ' + ic + ';background:rgba(128,128,128,.06);border-radius:4px">' +
             '<b style="color:' + ic + '">🏦 机构/主力介入：' + E(iv.level) + '</b>' +
             (iv.tags && iv.tags.length ? '<span class="muted" style="font-size:10px"> · ' + E(iv.tags.join(' · ')) + '</span>' : '') +
-            (iv.action ? '<div class="muted" style="font-size:10px;margin-top:2px">' + E(iv.action) + '</div>' : '') + '</div>';
+            (iv.action ? '<div class="' + (actCls(iv.action) || 'muted') + '" style="font-size:10px;margin-top:2px">' + E(iv.action) + '</div>' : '') + '</div>';
         }
         var band = (t.buy_zone && t.sell_zone)
           ? '<span class="chip">回踩买 <b>' + f(t.buy_zone[0], 2) + '~' + f(t.buy_zone[1], 2) + '</b></span>' +
@@ -3417,6 +3417,13 @@
     };
     return '<span class="bd ' + (m[s] || 't-min') + '">' + E(s) + '</span>';
   }
+  /* 买/卖动作着色（A股惯例：红=买/优先，绿=卖/回避）；返回 '' 表示中性不动色 */
+  function actCls(a) {
+    a = a || '';
+    if (/买入|加仓|回踩买入|低吸|建仓|吸筹/.test(a)) return 'up';
+    if (/卖出|止盈|离场|减仓|清仓/.test(a)) return 'down';
+    return '';
+  }
   function viewBull() {
     var rep = D.bull || [];
     var h = '';
@@ -3627,7 +3634,7 @@
         '<div style="margin:6px 0"><b style="color:var(--muted);font-size:12px">风险</b> ' + risks + '</div>' +
         (plus ? '<div style="margin:6px 0"><b style="color:var(--muted);font-size:12px">亮点</b> ' + plus + '</div>' : '') +
         ((d.signals && d.signals.length) ? '<div style="margin:6px 0"><b style="color:var(--muted);font-size:12px">信号</b> ' + d.signals.map(sigBadge).join(' ') + '</div>' : '') +
-        '<div class="note" style="margin-top:6px">动作：<b>' + E(d.action) + '</b> · ' + E(d.why || '') + '</div>' +
+        '<div class="note" style="margin-top:6px">动作：<b class="' + (actCls(d.action) || '') + '">' + E(d.action) + '</b> · ' + E(d.why || '') + '</div>' +
         '</div></div>';
     }).join('');
     h += cards;
