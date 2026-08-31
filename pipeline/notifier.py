@@ -1551,16 +1551,38 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
             _sec("🐢 趋势 · 缓坡慢牛", [_trend_line(t) for t in _slow])
     # ---- 买点候选（趋势加速优先）：从 data.buy_points 取加速组，红=买/优先；避免与牛股雷达/经典策略重复 ----
     _bp = data.get("buy_points") or {}
+    # 2026-08-31 升级（可操作性）：买点候选反查 zones 引擎的买区/目标区，附价格区间，
+    # 让推送里的「买点」可直接对照挂单。无 zones 买区的票退化为只显现价（不报错）。
+    _zone_bz = {}
+    for _z in ((data.get("zones") or {}).get("items") or []):
+        _zc = _z.get("code")
+        if not _zc:
+            continue
+        _zb = _z.get("buy_zone")
+        _zs = _z.get("sell_zone")
+        _bz = _zb if (_zb and _zb[0] is not None) else None
+        _sz = _zs if (_zs and _zs[0] is not None) else None
+        if _bz or _sz:
+            _zone_bz[_zc] = (_bz, _sz)
+    def _bp_zt(code):
+        _bz, _sz = _zone_bz.get(code) or (None, None)
+        _parts = []
+        if _bz:
+            _parts.append("买点%.2f~%.2f" % (_bz[0], _bz[1]))
+        if _sz:
+            _parts.append("目标%.2f~%.2f" % (_sz[0], _sz[1]))
+        return (" ｜ " + " ／ ".join(_parts)) if _parts else ""
     # 剔除「已临卖点」矛盾票（warn_sell）：不把引擎判卖出的票当买点推荐
     _all_acc = [b for b in (_bp.get("accel") or []) if not b.get("warn_sell")]
     _acc_bp = _all_acc[:5]
     if _acc_bp:
         _acc_rows = [
-            "🔴 **%s**(%s) %.2f ｜ %s%s ｜ 评分%.0f"
+            "🔴 **%s**(%s) %.2f ｜ %s%s ｜ 评分%.0f%s"
             % (b.get("name", "?"), b.get("ind") or "—", b.get("price") or 0,
                b.get("btype") or "",
                (" ×%.2f" % b["accel"] if b.get("accel") is not None else ""),
-               b.get("score") or 0)
+               b.get("score") or 0,
+               _bp_zt(b.get("code")))
             for b in _acc_bp]
         if len(_all_acc) > len(_acc_bp):
             _acc_rows.append("…（加速买点共 %d 只，列评分前 %d；完整清单见站点「买点候选」视图）"
@@ -1573,9 +1595,10 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     _oth_bp = _all_oth[:6]
     if _oth_bp:
         _oth_rows = [
-            "🔴 **%s**(%s) %.2f ｜ %s ｜ 评分%.0f"
+            "🔴 **%s**(%s) %.2f ｜ %s ｜ 评分%.0f%s"
             % (b.get("name", "?"), b.get("ind") or "—", b.get("price") or 0,
-               b.get("btype") or "", b.get("score") or 0)
+               b.get("btype") or "", b.get("score") or 0,
+               _bp_zt(b.get("code")))
             for b in _oth_bp]
         if len(_all_oth) > len(_oth_bp):
             _oth_rows.append("…（趋势多头买点共 %d 只，列评分前 %d；完整清单见站点「买点候选」视图）"
