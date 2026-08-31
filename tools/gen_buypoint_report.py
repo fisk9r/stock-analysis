@@ -52,16 +52,26 @@ def _merge(data):
     已处于「加速上行」的票直接作为买点候选并优先推荐（用户 2026-08-31 需求）。
     """
     merged = {}
-    # 交叉引用 recommend.trend 的逐票 verdict.action：买点候选若被趋势引擎判为
-    # 「卖出/止盈/离场/减仓」，属「技术加速但已临卖点」矛盾票——保留可见但打 warn_sell，
-    # 前端用黄标⚠区分、推送中剔除（不把卖出票当买点推荐）。
-    _trend_list = (data.get("recommend") or {}).get("trend") or []
-    _action_map = {}
-    for _t in _trend_list:
+    # 交叉引用多源逐票「卖出/止盈/离场/减仓/逼近卖出」动作，标记矛盾买点票 warn_sell：
+    #  - recommend.trend.verdict.action（趋势引擎实判）
+    #  - recommend.watch_reco.items.action（自选/持仓操作结论，持仓票止盈尤其关键）
+    #  - zones.items.action（买卖区间「逼近卖出」；注意仅 action 命中才算，
+    #    仅存在 sell_zone 但 action=正常持有 不算矛盾，如冠龙节能）
+    # 矛盾票保留可见但打 warn_sell：前端黄标⚠区分、排序沉底、推送剔除（不把卖出票当买点推荐）。
+    _conflict = {}  # code -> [(src, action), ...]
+    for _t in ((data.get("recommend") or {}).get("trend") or []):
         _v = _t.get("verdict")
         _act = _v.get("action") if isinstance(_v, dict) else None
         if _act:
-            _action_map[_t.get("code")] = _act
+            _conflict.setdefault(_t.get("code"), []).append(("trend", _act))
+    for _x in ((data.get("recommend") or {}).get("watch_reco") or {}).get("items") or []:
+        _act = _x.get("action")
+        if _act:
+            _conflict.setdefault(_x.get("code"), []).append(("watch", _act))
+    for _z in ((data.get("zones") or {}).get("items") or []):
+        _act = _z.get("action")
+        if _act:
+            _conflict.setdefault(_z.get("code"), []).append(("zone", _act))
     # 来源1/2：bull（回踩后再起） + strategies（多头突破）
     for src in ("bull", "strategies"):
         for x in (data.get(src) or []):
@@ -129,11 +139,13 @@ def _merge(data):
             rec["accel_flag"] = flag
             rec["signals"] = list(set(rec["signals"] + [bt]))
             rec["tags"] = rec["tags"] or "；".join((x.get("reasons") or [])[:3])
-    # 标记「已临卖点」矛盾票（其趋势 verdict 实为卖出/止盈）
+    # 标记「已临卖点」矛盾票（任一类 sell 动作命中即算）
     for _rec in merged.values():
-        _act = _action_map.get(_rec["code"])
-        _rec["live_action"] = _act or ""
-        _rec["warn_sell"] = bool(_act and _SELL_RE.search(_act))
+        _acts = _conflict.get(_rec["code"], [])
+        _sells = [a for _s, a in _acts if _SELL_RE.search(a)]
+        _rec["live_action"] = _sells[0] if _sells else ""
+        _rec["warn_sell"] = bool(_sells)
+        _rec["warn_src"] = ",".join(sorted({_s for _s, a in _acts if _SELL_RE.search(a)}))
     return sorted(merged.values(), key=lambda r: -r["score"])
 
 
