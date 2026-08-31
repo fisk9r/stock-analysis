@@ -10,6 +10,16 @@
 纯提炼不改判定逻辑——判定单一真源仍是 zones.py。
 """
 import os
+
+
+def _emoji(act):
+    """买卖动作 → 红绿 emoji（A股惯例：红=买/涨，绿=卖/跌）。推送 Markdown 无法着色文字，用圆形 emoji 区分。"""
+    a = act or ""
+    if a.startswith("卖出") or "卖出" in a or a in ("离场换强", "减仓", "止损", "割肉"):
+        return "🟢"
+    if a in ("建议买入", "回踩买入", "加仓") or "买入" in a:
+        return "🔴"
+    return "⚪"
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -102,7 +112,7 @@ def lines(wr, n=6, compact=False):
             seg += " %.2f" % it["close"]
         if it.get("pnl_pct") is not None:
             seg += " 浮盈%+.1f%%" % it["pnl_pct"]
-        seg += " → **%s**" % it["action"]
+        seg += " → %s **%s**" % (_emoji(it["action"]), it["action"])
         note = it.get("rotate_reason") or it.get("reason") or ""
         if it.get("action") in ("建议买入", "回踩买入", "加仓") and it.get("buy_zone", [None])[0]:
             seg += " ｜ 买区%.2f~%.2f" % (it["buy_zone"][0], it["buy_zone"][1])

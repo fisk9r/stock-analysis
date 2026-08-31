@@ -3412,7 +3412,8 @@
       'N字回调': 't-min', '缺口不补': 't-min',
       '放量上涨': 't-main', '均线多头': 't-main', '海龟突破': 't-main',
       '停机坪': 't-sub', '高窄旗形': 't-sub', '稳健上行': 't-sub',
-      '回踩长线': 't-min', '低ATR慢牛': 't-min', '放量跌停': 't-min'
+      '回踩长线': 't-min', '低ATR慢牛': 't-min', '放量跌停': 't-min',
+      '主升加速': 't-main', '趋势多头': 't-sub'
     };
     return '<span class="bd ' + (m[s] || 't-min') + '">' + E(s) + '</span>';
   }
@@ -4240,12 +4241,85 @@
     }
     var views = { overview: viewOverview, watch: viewWatch, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings, buypoint: viewBuypoint, sim: viewSim };
     function viewBuypoint() {
-      /* 买点候选是每日构建产出的独立零依赖单文件报告（trend_buy_points.html），
-         用 iframe 隔离渲染，避免与 SPA 自身 CSS/JS 冲突；缺失时给直链兜底。 */
-      return '<div class="bp-wrap">' +
-        '<div class="bp-bar"><span>🎯 买点候选 · 上升趋势中的介入机会（每日构建生成）</span>' +
-        '<a class="bp-link" href="trend_buy_points.html" target="_blank" rel="noopener">↗ 新窗口打开</a></div>' +
-        '<iframe class="bp-frame" src="trend_buy_points.html" title="买点候选" loading="lazy"></iframe></div>';
+      /* 买点候选为每日构建注入 data["buy_points"] 的结构化数据（趋势加速优先），
+         原生 SPA 渲染（替代 iframe），红=买入/优先、绿=卖出/回避，与全站配色一致。
+         保留「↗ 打开完整报告」直链到 trend_buy_points.html 作全屏兜底。 */
+      var bp = D.buy_points || null;
+      var total = bp ? (bp.accel.length + bp.others.length + bp.chanlun.length) : 0;
+      var h = '';
+      h += '<div class="bp-bar"><span>🎯 买点候选 · 上升趋势中的介入机会（每日构建生成）</span>' +
+           '<a class="bp-link" href="trend_buy_points.html" target="_blank" rel="noopener">↗ 打开完整报告</a></div>';
+      if (!bp || !total) {
+        h += card('🎯 买点候选',
+          '<div class="empty">今日无明确买点信号（上升结构中的介入机会缺失，建议控仓等待）</div>',
+          '买点由 bull / strategies / chanlun 引擎产出，趋势加速维度交叉引用 recommend.trend。');
+        return h;
+      }
+      h += '<div class="grid g4" style="margin-bottom:16px">' +
+        kpi('趋势加速优先', n2(bp.accel.length), '🚀 主升加速中的买点', bp.accel.length ? 'up' : '') +
+        kpi('其他买点', n2(bp.others.length), '回踩后再起 / 多头突破', '') +
+        kpi('缠论买点', n2(bp.chanlun.length), '一/二/三买结构', '') +
+        kpi('合计', n2(total), '当日买点候选总数', '') +
+        '</div>';
+
+      function bpRow(r) {
+        var sig = (r.signals || []).map(function (s) { return sigBadge(s); }).join(' ');
+        var badge;
+        if (r.accel_flag) {
+          badge = '<span class="sig-bar buy">🚀 ' + E(r.trend_state || '加速上行') +
+            (r.accel != null ? ' ×' + f(r.accel, 2) : '') + '</span>';
+        } else if (r.trend_state === '增速放缓') {
+          badge = '<span class="sig-bar warn">增速放缓</span>';
+        } else if (r.trend_state) {
+          badge = '<span class="sig-bar hold">' + E(r.trend_state) + '</span>';
+        } else {
+          badge = '<span class="sig-bar hold">—</span>';
+        }
+        return '<tr>' +
+          '<td>' + stk(r.code, r.name) + '</td>' +
+          '<td>' + sig + '</td>' +
+          '<td class="num">' + (r.price != null ? f(r.price) : '—') + '</td>' +
+          '<td class="num ' + ((r.pct || 0) >= 0 ? 'up' : 'down') + '">' + (r.pct != null ? sign(r.pct) : '—') + '</td>' +
+          '<td class="num">' + (r.vol_ratio ? f(r.vol_ratio, 1) : '—') + '</td>' +
+          '<td>' + E(r.ind || '') + '</td>' +
+          '<td class="num">' + (r.dd60 != null ? pct(r.dd60) : '—') + '</td>' +
+          '<td class="num">' + f(r.score) + '</td>' +
+          '<td>' + badge + '</td>' +
+          '<td class="muted">' + E((r.tags || '').slice(0, 56)) + '</td>' +
+          '</tr>';
+      }
+      var cols = [
+        { t: '个股' }, { t: '信号' }, { t: '现价', a: 'num' }, { t: '涨跌幅', a: 'num' },
+        { t: '量比', a: 'num' }, { t: '行业' }, { t: '距60高', a: 'num' },
+        { t: '评分', a: 'num' }, { t: '趋势状态' }, { t: '说明' }
+      ];
+      if (bp.accel.length) {
+        h += '<div class="bp-sec accel">① 趋势加速优先 · 主升加速中的买点（共 ' + bp.accel.length + ' 只 🚀）</div>';
+        h += card('🚀 加速优先买点', table(cols, bp.accel.map(bpRow).join('')),
+          '已处于「加速上行」的买点候选，优先推荐；买入=红。介入仍需次日竞价（高开≥2%才跟进、低开≤-2%放弃）确认。');
+      }
+      if (bp.others.length) {
+        h += '<div class="bp-sec other">② 其他买点（回踩后再起 / 多头突破，共 ' + bp.others.length + ' 只）</div>';
+        h += card('🎯 其他买点', table(cols, bp.others.map(bpRow).join('')),
+          '上升结构中的回踩企稳 / 多头刚突破买点，按评分降序；买入=红。');
+      }
+      if (bp.chanlun.length) {
+        var crows = bp.chanlun.map(function (c) {
+          var zs = c.zhongshu;
+          return '<tr>' +
+            '<td>' + stk(c.code, c.name) + '</td>' +
+            '<td>' + sigBadge(c.signal) + '</td>' +
+            '<td class="num">' + (zs ? '[' + f(zs[0]) + ', ' + f(zs[1]) + ']' : '—') + '</td>' +
+            '<td class="num">' + (c.last_close != null ? f(c.last_close) : '—') + '</td>' +
+            '<td class="muted">' + E((c.reason || '').slice(0, 50)) + '</td>' +
+            '</tr>';
+        }).join('');
+        h += '<div class="bp-sec chan">③ 缠论结构买点（一/二/三买，共 ' + bp.chanlun.length + ' 只）</div>';
+        h += card('📐 缠论买点',
+          table([{ t: '个股' }, { t: '买点' }, { t: '中枢区间', a: 'num' }, { t: '现价', a: 'num' }, { t: '说明' }], crows),
+          '缠论一/二/三买结构，下跌末端底背驰介入；买入=红。');
+      }
+      return h;
     }
     var done = {};
     function show(k) {

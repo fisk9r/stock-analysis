@@ -1665,6 +1665,18 @@ def run(date_override=None, dedup_close=False):
     except Exception as e:
         log("  多源交叉校验跳过：%r" % e)
 
+    # 买点候选结构化数据（趋势加速优先）：注入 data 后自动进加密 bin + 本地 data.js，
+    # 供前端原生渲染 viewBuypoint 与推送复用。失败不影响主流程（已兜底）。
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import gen_buypoint_report as _gbp
+        data["buy_points"] = _gbp.build_data(data)
+        log("  买点结构化数据：加速优先 %d 只 / 其他 %d 只 / 缠论 %d 只"
+            % (len(data["buy_points"]["accel"]), len(data["buy_points"]["others"]),
+               len(data["buy_points"]["chanlun"])))
+    except Exception as e:
+        log("  买点结构化数据生成跳过：%r" % e)
+
     os.makedirs(DIST, exist_ok=True)
     out = os.path.join(DIST, "data.js")
     with open(out, "w", encoding="utf-8") as f:

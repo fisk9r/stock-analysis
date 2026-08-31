@@ -144,14 +144,21 @@ section.view.on{display:block}
 @keyframes viewIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion:reduce){.view-in{animation:none}}
 
-/* 买点候选视图：iframe 隔离承载独立报告页 */
+/* 买点候选视图：原生 SPA 渲染（趋势加速优先）+ 完整报告 iframe 兜底 */
 .bp-wrap{padding-top:4px}
 .bp-bar{display:flex;justify-content:space-between;align-items:center;
-  color:#9fb3c8;font-size:13px;margin-bottom:10px}
-.bp-link{color:#39d0ff;text-decoration:none;font-size:12px;white-space:nowrap;margin-left:12px}
+  padding:10px 14px;background:var(--card);border:1px solid var(--border);
+  border-radius:var(--r);font-size:13px;font-weight:700;color:var(--fg);margin-bottom:14px}
+.bp-link{color:var(--up);text-decoration:none;font-size:12px;white-space:nowrap;margin-left:12px}
 .bp-link:hover{text-decoration:underline}
 .bp-frame{width:100%;height:calc(100vh - 158px);border:0;border-radius:10px;
   background:#0a0e1a;display:block}
+/* 买点分组标题：红=加速优先(买入) / 金=其他买点 / 青=缠论买点 */
+.bp-sec{font-size:15px;font-weight:700;margin:18px 0 8px;padding-left:9px;
+  border-left:3px solid var(--accent)}
+.bp-sec.accel{color:var(--up);border-left-color:var(--up)}
+.bp-sec.other{color:var(--gold);border-left-color:var(--gold)}
+.bp-sec.chan{color:var(--accent);border-left-color:var(--accent)}
 
 /* ---------------- 卡片 ---------------- */
 .card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);

@@ -1385,7 +1385,7 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
                 bz, sz, sp = _pl.get("buy_zone") or [0, 0], _pl.get("sell_zone") or [0, 0], _pl.get("stop")
                 plan_sfx = " ｜ 🎯%s 买%.2f~%.2f 卖%.2f 止损%.2f" % (
                     _pl.get("expected_top", ""), bz[0], bz[1], sz[0], sp or 0)
-            L.append("- %s**%d. %s**(%s) · 价值 **%.0f分** · 晋级 **%.0f%%**%s%s%s"
+            L.append("- 🔴 %s**%d. %s**(%s) · 价值 **%.0f分** · 晋级 **%.0f%%**%s%s%s"
                      % (okmark, i, it.get("name", "?"), _board(it),
                         it.get("worth_score", 0), it.get("p_continue", 0), extra,
                         warnmark, plan_sfx))
@@ -1432,12 +1432,12 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         sfx = ""
         if act:
             if vd.get("suggested_hold_days"):
-                sfx = " → **%s·持有%d天**" % (act, vd["suggested_hold_days"])
+                sfx = " → %s **%s·持有%d天**" % (_act_emoji(act), act, vd["suggested_hold_days"])
             elif act.startswith("持有"):
                 rest = max(0, (vd.get("hold_limit_days") or 20) - (vd.get("days_held") or 0))
-                sfx = " → **持有·剩%d个交易日**" % rest
+                sfx = " → %s **持有·剩%d个交易日**" % (_act_emoji(act), rest)
             else:
-                sfx = " → **%s**" % act
+                sfx = " → %s **%s**" % (_act_emoji(act), act)
         zone_s = (" ｜ 买%s~%s 卖%s~%s" % (
             t.get("buy_zone", ["", ""])[0], t.get("buy_zone", ["", ""])[1],
             t.get("sell_zone", ["", ""])[0], t.get("sell_zone", ["", ""])[1])
@@ -1491,6 +1491,17 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
             _sec("📈 趋势 · 稳健上行", [_trend_line(t) for t in _steady])
         if _slow:
             _sec("🐢 趋势 · 缓坡慢牛", [_trend_line(t) for t in _slow])
+    # ---- 买点候选（趋势加速优先）：从 data.buy_points 取加速组，红=买/优先；避免与牛股雷达/经典策略重复 ----
+    _bp = data.get("buy_points") or {}
+    _acc_bp = (_bp.get("accel") or [])[:5]
+    if _acc_bp:
+        _sec("🎯 买点候选 · 加速优先", [
+            "🔴 **%s**(%s) %.2f ｜ %s%s ｜ 评分%.0f"
+            % (b.get("name", "?"), b.get("ind") or "—", b.get("price") or 0,
+               b.get("btype") or "",
+               (" ×%.2f" % b["accel"] if b.get("accel") is not None else ""),
+               b.get("score") or 0)
+            for b in _acc_bp])
     # ---- 自选/持仓操作结论（P1/P4：跟着做）----
     _wr = rec.get("watch_reco")
     if _wr and _wr.get("items") and _on("rec"):
@@ -1838,7 +1849,7 @@ def _discipline_line(data, rec):
         pos_s = "控仓为主"
     wr = rec.get("watch_reco") or {}
     n_sell = wr.get("sell_n") or 0
-    sell_s = ("关注票 %d 只触发卖出 → 先处理卖" % n_sell) if n_sell else "无强制卖出信号"
+    sell_s = ("🟢 关注票 %d 只触发卖出 → 先处理卖" % n_sell) if n_sell else "无强制卖出信号"
     return "> 📌 纪律：%s ｜ %s ｜ 买点只认买区、低开< -0.1%%弃 ｜ 破止损无条件走" % (pos_s, sell_s)
 
 
@@ -1939,6 +1950,19 @@ def _watch_action_by_sector(act, dirn):
     return "持有（板块震荡 → 按买卖区执行）"
 
 
+def _act_emoji(act):
+    """买卖动作 → 红绿 emoji 标记（A股惯例：红=买/涨/推荐，绿=卖/跌/回避）。
+
+    推送为 Markdown，无法着色文字，用 🔴/🟢/⚪ 圆形 emoji 作视觉区分。
+    """
+    a = act or ""
+    if a.startswith("卖出") or "卖出" in a or a in ("离场换强", "减仓", "止损", "跌破警示"):
+        return "🟢"
+    if a in ("建议买入", "回踩买入", "加仓") or "买入" in a:
+        return "🔴"
+    return "⚪"
+
+
 def watch_forecast_lines(data, n=8):
     """盘前「关注票操作说明」行：每只关注票 = 板块当日预判 + 明确动作。"""
     rec = data.get("recommend") or {}
@@ -1966,7 +1990,7 @@ def watch_forecast_lines(data, n=8):
         seg += " ｜ %s%s 预判%s" % (ind if ind != "—" else "无板块", icon, dirn)
         if f.get("score") is not None:
             seg += "(%d)" % f["score"]
-        seg += " → **%s**" % _watch_action_by_sector(x.get("action"), dirn)
+        seg += " → %s **%s**" % (_act_emoji(x.get("action")), _watch_action_by_sector(x.get("action"), dirn))
         bz = x.get("buy_zone") or [None, None]
         if bz[0] and (x.get("action") or "") in ("建议买入", "回踩买入", "加仓"):
             seg += " ｜ 买区%.2f~%.2f" % (bz[0], bz[1])
