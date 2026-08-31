@@ -1508,6 +1508,21 @@ def run(date_override=None, dedup_close=False):
             log("  备用模型叙事失败，保留模板叙事：%r" % e)
     data["meta"]["build_seconds"] = round(time.time() - t0, 1)
 
+    # 买点候选结构化数据（趋势加速优先）：注入 data 后自动进加密 bin + 本地 data.js，
+    # 供前端原生渲染 viewBuypoint 与【推送】复用。失败不影响主流程（已兜底）。
+    # 2026-08-31 修复：本块原在推送渲染（下方 format_stock_summary）之后才执行，
+    # 导致渲染时 data["buy_points"] 恒为空 → 收盘/复盘推送永远看不到买点段。
+    # 依赖（recommend.trend / bull / strategies / chanlun / zones / watch_reco）均已在此之前就绪。
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import gen_buypoint_report as _gbp
+        data["buy_points"] = _gbp.build_data(data)
+        log("  买点结构化数据：加速优先 %d 只 / 其他 %d 只 / 缠论 %d 只"
+            % (len(data["buy_points"]["accel"]), len(data["buy_points"]["others"]),
+               len(data["buy_points"]["chanlun"])))
+    except Exception as e:
+        log("  买点结构化数据生成跳过：%r" % e)
+
     # ---- 信息推送（微信/Telegram/邮件），失败不影响主流程 ----
     # 设 SUPPRESS_PUSH=1 可仅重建数据、不重复推送（用于部署前重算）
     if os.environ.get("SUPPRESS_PUSH"):
@@ -1664,18 +1679,6 @@ def run(date_override=None, dedup_close=False):
             % (dq.get("checked", 0), dq.get("flagged_count", 0)))
     except Exception as e:
         log("  多源交叉校验跳过：%r" % e)
-
-    # 买点候选结构化数据（趋势加速优先）：注入 data 后自动进加密 bin + 本地 data.js，
-    # 供前端原生渲染 viewBuypoint 与推送复用。失败不影响主流程（已兜底）。
-    try:
-        sys.path.insert(0, os.path.join(ROOT, "tools"))
-        import gen_buypoint_report as _gbp
-        data["buy_points"] = _gbp.build_data(data)
-        log("  买点结构化数据：加速优先 %d 只 / 其他 %d 只 / 缠论 %d 只"
-            % (len(data["buy_points"]["accel"]), len(data["buy_points"]["others"]),
-               len(data["buy_points"]["chanlun"])))
-    except Exception as e:
-        log("  买点结构化数据生成跳过：%r" % e)
 
     os.makedirs(DIST, exist_ok=True)
     out = os.path.join(DIST, "data.js")
