@@ -61,6 +61,13 @@ concurrency:
 env:
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   NOTIFY_JSON: ${{ secrets.NOTIFY_JSON }}
+  # 2026-08-31 修复（致命根因）：此前缺失此 Secret，executor 在 CI 里 account 凭据
+  # 全空（config.json 的 account 留空走 Secret 注入、config.local.json 已 gitignore 不上库）
+  # → run_once/run_scan 入口「未配置 account，退出」→ now/scan/tail 全部静默跳过，
+  # 这才是今天模拟盘 0 操作的最直接原因（cron 延迟+任务错配只是放大它）。
+  # load_cfg 优先读 EXEC_ACCOUNT_JSON，其次回退 ALLOWED_USERS_JSON(owner.pass)。
+  EXEC_ACCOUNT_JSON: ${{ secrets.EXEC_ACCOUNT_JSON }}
+  ALLOWED_USERS_JSON: ${{ secrets.ALLOWED_USERS_JSON }}
   # runner 全部用 time.strftime 记日期（sim_review date/交易日判定），
   # CI 容器默认 UTC——北京时间 0-8 点手动 dispatch 会把日期写成前一天，必须固定时区
   TZ: Asia/Shanghai
