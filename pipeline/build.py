@@ -1808,6 +1808,35 @@ def push_anomaly():
                          mode="anomaly", codes=new_codes)
 
 
+def _anomaly_basis_once():
+    """盘中异动的『判断依据/介入纪律』只在今日首条推送里完整说一次；
+    后续每 15 分钟的推送改用一行简注代替，避免同一段说明反复刷屏（用户反馈：复盘美观、盘中杂乱）。
+    依赖 notifier 的去重账本（push_ledger.jsonl）按日判定，与异常冷却去重同源、零新增状态。"""
+    try:
+        logp = notifier._ledger_path()
+        today = notifier._bj_now().strftime("%Y-%m-%d")
+        if os.path.exists(logp):
+            with open(logp, encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        p = json.loads(line)
+                    except Exception:
+                        continue
+                    if p.get("mode") == "anomaly_basis" and str(p.get("ts", "")).startswith(today):
+                        return "（判断依据见今日首条盘中异动，不重复）"
+        # 今日首条：输出完整判断依据，并记账（后续推送即走简注分支）
+        basis = ("> 📌 判断依据：新封板=封板强度信号；急拉=主力资金净流入；妖股潜力=实时资金维度打分≥55；"
+                 "题材联动=同板块≥3只涨停即板块爆发。介入纪律：高开≥2%%才跟进、低开≤-2%%直接放弃，"
+                 "炸板≥3次不追。以下仅列本轮**新出现**标的，已报过的不重复。")
+        notifier._append_ledger({"ts": notifier._bj_now().strftime("%Y-%m-%d %H:%M:%S"),
+                                  "mode": "anomaly_basis", "title": "anomaly-basis"})
+        return basis
+    except Exception:
+        # 异常时退化为每次都给（不静默丢失说明，仅丧失去重收益）
+        return ("> 📌 判断依据：新封板=封板强度；急拉=主力资金净流入；妖股潜力=实时资金维度打分≥55；"
+                "题材联动=同板块≥3只涨停即板块爆发。介入纪律：高开≥2%%才跟进、低开≤-2%%直接放弃。")
+
+
 def _anomaly_focused(s, new_codes, url, demon_map=None):
     """把本轮『新增』异动标的提炼成一条聚焦消息（已报过的不重复列出）。
     demon_map：妖股基因观察池 {code: demon}（来自最近一次分析结果），用于盘中双确认高亮。"""
@@ -1818,7 +1847,7 @@ def _anomaly_focused(s, new_codes, url, demon_map=None):
     L = []
     L.append("## 🆕 A股盘中新增异动 · %s（%d 只）" % (now, len(new_codes)))
     L.append("")
-    L.append("> 实时行情来自东方财富公开接口；以下为本次巡查**新出现**的异动标的（已报过的不重复）。")
+    L.append(_anomaly_basis_once())
     L.append("")
     if n_zt:
         L.append("### 🔥 新封板（%d）" % len(n_zt))
