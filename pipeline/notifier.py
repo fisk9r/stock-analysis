@@ -1787,6 +1787,11 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         sa = ig.get("scale_anomalies") or []
         if sa:
             L.append("- 量纲错乱交易日：%s" % ",".join(b.get("date", "?") for b in sa[:8]))
+        aa = ig.get("amount_anomalies") or []
+        if aa:
+            L.append("- 成交额跳变交易日：%s"
+                     % ",".join("%s(%.1fx)" % (b.get("date", "?"), b.get("amount_ratio") or 0)
+                                for b in aa[:8]))
         L.append("- 样本 %s 天，最新 %s 覆盖 %s 只"
                  % (ig.get("trade_days"), ig.get("last_date"), ig.get("last_day_rows")))
 

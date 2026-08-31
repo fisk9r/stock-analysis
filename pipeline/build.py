@@ -302,6 +302,12 @@ def run(date_override=None, dedup_close=False):
             log("  数据修复：修正 %d 处量纲异常" % nfix)
     except Exception as e:
         log("  数据修复跳过（不影响主流程）：%r" % e)
+    # vol+amount ×100 配对错乱逐格修复（2026-08-31：583 只股票全年 日/额 单位粘性
+    # 错乱，日总额 5~27 倍爆表；绝对锚=流通股本，幂等）。
+    try:
+        data_guard.repair_pair_units(con, apply=True, verbose=True)
+    except Exception as e:
+        log("  配对单位修复跳过（不影响主流程）：%r" % e)
     # 全零 K 线自愈清洗（2026-08-29：停牌股 o/h/l/c 全 0 曾致 maglue 除零/
     # trendsword 越界/完整性告警；upsert_bars 源头已拒收，这里清历史存量）
     try:

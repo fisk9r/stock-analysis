@@ -102,6 +102,93 @@ def repair(con, apply=True, verbose=True):
     return done
 
 
+# 全市场日成交额的绝对合理区间（元）。
+# 上限：A 股历史峰值约 3.5 万亿（2024-10-08），留一倍余量取 8 万亿；
+# 下限：5500+ 只个股的地量也不该低于 8000 亿。
+# 为什么不用「邻日中位数比值」：2026-08 实测 07-27~08-21 连续 20 个交易日
+# 总额被放大 ~17 倍——脏日占多数时中位数本身就是脏的，会把正常日误报成
+# 「异常低」、脏日漏报。绝对阈值不受污染面影响。
+AMOUNT_HIGH = 8e12
+AMOUNT_LOW = 0.8e12
+
+
+def amount_jump_scan(con, limit_dates=260):
+    """逐日全市场成交额合计越界检测——抓「总额跳变/量纲错乱」型脏数据。
+
+    scan() 按个股 vol 邻近比值中位判定，amount 单独错乱（vol 正常）会漏网：
+    2026-08 实测 07-27~08-21 与 08-27 全市场总额被放大 ~17 倍（≈17% 个股
+    amount×100，疑似备用源以「分」计价）。真实市场总额不可能越出绝对区间。"""
+    rows = con.execute(
+        "SELECT date, SUM(amount) FROM bars GROUP BY date HAVING COUNT(*)>500 ORDER BY date"
+    ).fetchall()[-limit_dates:]
+    out = []
+    for d, a in rows:
+        a = a or 0
+        if a >= AMOUNT_HIGH or (a > 0 and a <= AMOUNT_LOW):
+            out.append({"date": d, "type": "amount_jump",
+                        "amount_ratio": round(a / 2e12, 2),
+                        "amount_total": round(a, 2)})
+    return out
+
+
+def repair_pair_units(con, apply=True, verbose=True):
+    """逐格修复「vol=股 + amount=分」×100 配对错乱（2026-08-31 定性）。
+
+    病灶特征：同一 (股票, 交易日) 的 vol 与 amount 同时 ×100——备用源以
+    「股/分」计价而主流约定是「手/元」。两字段同倍放大 → amount/vol 恒定、
+    隐含股价恒正确、按股邻日比值也恒 1（错乱是连续多日的粘性模式），
+    任何相对检测全部失灵；只有日总额会爆表（2025-08~2026-08 期间 5~27x）。
+
+    绝对锚 = 流通股本 F（stocks.float_mv/close，日间稳定）：
+      健康格：vol(手) = F×turn%×1e-2 → q = vol/F ≈ turn×1e-4 ≤ 0.01（turn≤100%）
+      错乱格：vol(股) = F×turn%      → q = vol/F ≈ turn/100，turn≥1% 即 q>0.01
+    判据 q>0.01 等价于「按手解读意味着换手>100%」——不可能，误报率≈0。
+    修复：vol、amount 同 ÷100（幂等，修复后 q 缩小 100 倍不会再命中）。"""
+    # 每股流通股本 F = float_mv / 最新收盘价
+    F = {}
+    for code, fmv, close in con.execute(
+            "SELECT s.code, s.float_mv, b.close FROM stocks s "
+            "JOIN bars b ON b.code = s.code "
+            "WHERE s.float_mv>0 AND b.close>0 "
+            "AND b.date = (SELECT MAX(date) FROM bars WHERE code=s.code)"):
+        F[code] = fmv / close
+    # 兜底：stocks 表没有的，用有 turn 的日反推 F 的中位数
+    missing = [c for c, in con.execute(
+        "SELECT DISTINCT code FROM bars WHERE vol>0") if c not in F]
+    for code in missing:
+        vals = [v * 100.0 / (t / 100.0) for v, t in con.execute(
+            "SELECT vol, turn FROM bars WHERE code=? AND vol>0 AND turn>0", (code,))]
+        if vals:
+            F[code] = _median(vals)
+
+    ups = []
+    for code, date, v, a in con.execute(
+            "SELECT code, date, vol, amount FROM bars WHERE vol>0 AND amount>0"):
+        f = F.get(code)
+        if not f or f <= 0:
+            continue
+        q = v / f
+        if 0.01 < q < 100.0:
+            ups.append((v / 100.0, a / 100.0, code, date))
+    if not ups:
+        if verbose:
+            print("[data_guard] 配对单位体检通过（0 格错乱）")
+        return []
+    if verbose:
+        codes = len(set(u[2] for u in ups))
+        dates = len(set(u[3] for u in ups))
+        print("[data_guard] 发现 %d 格 vol+amount ×100 配对错乱（%d 只股票 / %d 个交易日）"
+              % (len(ups), codes, dates))
+    if apply:
+        con.executemany("UPDATE bars SET vol=?, amount=? WHERE code=? AND date=?", ups)
+        con.commit()
+        still = amount_jump_scan(con)
+        if verbose:
+            print("[data_guard] 修复 %d 格；复扫后总额越界日：%s"
+                  % (len(ups), ",".join(b["date"] for b in still) if still else "无"))
+    return ups
+
+
 def health_report(con):
     """轻量体检报告，供构建日志/站点展示。"""
     dates = [r[0] for r in con.execute(
@@ -121,6 +208,12 @@ def health_report(con):
     if bad:
         rep["issues"].append("量纲错乱交易日：" + ",".join(b["date"] for b in bad))
     rep["scale_anomalies"] = bad
+    # 总额跳变（amount 单独错乱、vol 正常时 scan 漏网）
+    aj = amount_jump_scan(con)
+    if aj:
+        rep["issues"].append("成交额跳变交易日：" +
+                             ",".join("%s(%.1fx)" % (b["date"], b["amount_ratio"]) for b in aj[:10]))
+    rep["amount_anomalies"] = aj
     # 价格异常
     nbad = con.execute(
         "SELECT COUNT(*) FROM bars WHERE date=? AND (close IS NULL OR close<=0 OR high<low)",
@@ -144,6 +237,7 @@ def integrity_report(con):
         "last_date": r.get("last_date"),
         "last_day_rows": r.get("last_day_rows"),
         "scale_anomalies": r.get("scale_anomalies") or [],
+        "amount_anomalies": r.get("amount_anomalies") or [],
     }
 
 
