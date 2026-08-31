@@ -101,7 +101,12 @@ def distill(zones_data, holding_codes=None, watch_names=None, topn=14):
 
 
 def lines(wr, n=6, compact=False):
-    """推送行：'- 持仓 **XX** 14.20 浮盈+8.2% → 加仓 ｜ 买区5.12~5.30 缩量企稳'"""
+    """推送行：'- 持仓 **XX** 14.20 浮盈+8.2% → 加仓 ｜ 买点5.12~5.30 ／ 卖点6.10~6.30'
+
+    2026-08-31 升级（用户要求：关注的股票操作必须提示买点和卖点）：
+    每只自选/持仓票都同时给出买点（买区）与卖点（卖区，无卖区时退化为止损位），
+    无论动作是买/卖/持有——持有票也要知道「在哪止盈、在哪止损」，买入票也要知道「目标在哪」。
+    """
     if not wr:
         return []
     out = []
@@ -113,12 +118,20 @@ def lines(wr, n=6, compact=False):
         if it.get("pnl_pct") is not None:
             seg += " 浮盈%+.1f%%" % it["pnl_pct"]
         seg += " → %s **%s**" % (_emoji(it["action"]), it["action"])
+        # 买卖点（用户 2026-08-31 要求：每只关注股都提示买点+卖点）
+        bz = it.get("buy_zone") or [None, None]
+        sz = it.get("sell_zone") or [None, None]
+        pts = []
+        if bz[0] is not None and bz[1] is not None:
+            pts.append("买点%.2f~%.2f" % (bz[0], bz[1]))
+        if sz[0] is not None and sz[1] is not None:
+            pts.append("卖点%.2f~%.2f" % (sz[0], sz[1]))
+        elif it.get("stop") is not None:
+            pts.append("止损%.2f" % it["stop"])
+        if pts:
+            seg += " ｜ " + " ／ ".join(pts)
         note = it.get("rotate_reason") or it.get("reason") or ""
-        if it.get("action") in ("建议买入", "回踩买入", "加仓") and it.get("buy_zone", [None])[0]:
-            seg += " ｜ 买区%.2f~%.2f" % (it["buy_zone"][0], it["buy_zone"][1])
-        elif it["action"].startswith("卖出") and it.get("stop"):
-            seg += " ｜ 止损位%.2f" % it["stop"]
         if note and not compact:
-            seg += " (%s)" % note[:30]
+            seg += "（%s）" % note[:28]
         out.append(seg)
     return out

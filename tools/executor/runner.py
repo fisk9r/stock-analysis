@@ -917,7 +917,10 @@ def _run_once_inner(cfg, force=False):
             _log(broker_sim.SimBroker().summary())
         except Exception as e:
             _log("战绩汇总失败：%r" % e)
-    _notify(cfg, "执行器回报（卖%d 买%d）" % (n_sold, n_buy), "\n".join(all_lines), defer=True)
+    # 2026-08-31 修复（用户要求：杜绝「模拟盘未操作且未推送」）：汇总回报改为立即推送，
+    # 不再 defer 到进程退出 atexit 才 flush——CI 中途被杀（超时/OOM）会导致账本已记但
+    # 推送未发，表现为「跑了却啥也没收到」。即便当日 0 成交也照发（卖0 买0 也是状态）。
+    _notify(cfg, "执行器回报（卖%d 买%d）" % (n_sold, n_buy), "\n".join(all_lines))
 
 
 def _tail_buys(broker, cfg, sigs, mkt):
@@ -1198,7 +1201,8 @@ def _run_tail_inner(cfg, force=False):
            ["", "## 尾盘入场（%d 笔）" % n_buy] + (buy_lines or ["- 无"]))
     for ln in out:
         _log(ln)
-    _notify(cfg, "尾盘确认回报（买%d）" % n_buy, "\n".join(out), defer=True)
+    # 2026-08-31 修复：尾盘回报立即推送（同 run_once 汇总，避免 atexit 未触发而丢失）。
+    _notify(cfg, "尾盘确认回报（买%d）" % n_buy, "\n".join(out))
     exec_state_save()
 
 

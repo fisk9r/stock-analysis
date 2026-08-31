@@ -476,6 +476,56 @@ def _already_pushed_today(mode, analysis_date=None):
         return False
 
 
+def _last_push_ts(mode, analysis_date=None):
+    """返回该 mode 今日（按分析日）最近一次推送的时间戳字符串，无则 None。
+
+    供 close_again 安全网判断「距上次补发是否已超过冷却」——超过阈值则放行重推，
+    避免 once-per-day 去重把 20:00 兜底补发静默吞掉。
+    """
+    try:
+        logp = _ledger_path()
+        if not os.path.exists(logp):
+            return None
+        today = _bj_now().strftime("%Y-%m-%d")
+        last = None
+        with open(logp, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    p = json.loads(line)
+                except Exception:
+                    continue
+                if p.get("mode") != mode:
+                    continue
+                if mode in ("close", "close_again"):
+                    if analysis_date:
+                        if p.get("adate") != analysis_date:
+                            continue
+                    elif not str(p.get("ts", "")).startswith(today):
+                        continue
+                else:
+                    if not str(p.get("ts", "")).startswith(today):
+                        continue
+                ts = p.get("ts")
+                if ts and (last is None or ts > last):
+                    last = ts
+        return last
+    except Exception:
+        return None
+
+
+def _minutes_since(ts):
+    """时间戳字符串距现在的分钟数；无时间戳返回极大值（视为「很久以前」）。"""
+    if not ts:
+        return 10 ** 9
+    try:
+        then = time.strptime(ts, "%Y-%m-%d %H:%M:%S")
+        now = time.strptime(_bj_now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "%Y-%m-%d %H:%M:%S")
+        return (time.mktime(now) - time.mktime(then)) / 60.0
+    except Exception:
+        return 10 ** 9
+
+
 def _anomaly_recently_pushed(cooldown_min=12):
     """盘中异动(anomaly)允许日内多次推送，但外部定时器(cron-job.org)与 GitHub 主调度
     会在同一时点各自触发 → 重复轰炸。用『最近 N 分钟内已推送过则跳过』去重。
@@ -867,8 +917,16 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
     # （GitHub 自带 schedule 常被丢弃，故叠加了看门狗/备份订阅/外部定时器多重触发，
     #  这里统一兜底：先到先发，后到静默）。
     if not dry_run and _already_pushed_today(mode, analysis_date):
-        print("[notifier][%s] 今日已推送，跳过通道发送（防重复触发）" % mode)
-        return ["skipped:dup"]
+        # close_again 复盘补发安全网：距上次推送 >2 小时放行重推——
+        # 主推(16:36)与兜底(20:00+)拉开时差，避免「已发过就静默」致安全网失效
+        # （已复现：20:00 兜底被 once-per-day 吞掉，用户收不到补发）。
+        # SA_FORCE_PUSH=1 显式强制绕过（手工补发/测试）。
+        _force = os.environ.get("SA_FORCE_PUSH") == "1"
+        _gap_ok = (mode == "close_again"
+                   and _minutes_since(_last_push_ts(mode, analysis_date)) > 120)
+        if not (_force or _gap_ok):
+            print("[notifier][%s] 今日已推送，跳过通道发送（防重复触发）" % mode)
+            return ["skipped:dup"]
     # 交易时段闸：盘中异动(anomaly)只有在 09:15–15:00 北京时间（且为交易日）才允许推送。
     # 外部定时器 / 看门狗误在休市时段（如凌晨 4 点）点火时，绝不推送『盘中异动』，
     # 从根上根治「中国时间 4 点误推盘中异动」的事故。
