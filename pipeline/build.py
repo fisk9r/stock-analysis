@@ -489,10 +489,13 @@ def run(date_override=None, dedup_close=False):
     # 口径：u.bars = 本地全市场日K库（5550 只股票，最新交易日 5544 只有行情）；
     # 趋势通道 screen_uptrend 遍历 u.bars 全量（for code in u.bars.items()）后取 TopN；
     # 连板体系扫当日涨停池 + 近期涨停基因池。这里把覆盖度落进 data，供推送/看板显式展示。
+    # 注意：此处 data 尚未初始化（data = {} 在下方），故先存局部量，
+    # 待 data 建好后再挂上（2026-09-01：CI 实测此处直接写 data 会 UnboundLocalError）。
+    SCAN_COVERAGE = {}
     try:
         _uni = len(u.bars or {})
         _zt = len(u.zt.get(date) or set()) if hasattr(u, "zt") else 0
-        data["scan_coverage"] = {
+        SCAN_COVERAGE = {
             "universe": _uni,                 # 全市场参与计算的股票数
             "limit_up_today": _zt,            # 当日涨停家数（连板体系的候选源）
             "date": date,
@@ -777,6 +780,9 @@ def run(date_override=None, dedup_close=False):
         log("  妖股潜力榜生成失败（不影响主流程）：%r" % e)
 
     data = {
+        # 2026-09-01：扫描覆盖度（全市场 X 只全量过一遍后的结论，非抽样）——
+        # 上方已算好存入 SCAN_COVERAGE，此处随 data 一起落库供推送/看板展示
+        "scan_coverage": SCAN_COVERAGE,
         "meta": {
             "date": date, "prev_date": prev,
             "generated_at": _bj_now().strftime("%Y-%m-%d %H:%M:%S"),
