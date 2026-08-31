@@ -861,6 +861,10 @@ def _daily_loss_check(broker, cfg, gate=None, label=""):
 
 def _run_once_inner(cfg, force=False):
     broker, mode = pick_broker(cfg)
+    # 2026-08-31 修复（致命）：此前 L894 直接引用 acc["user_id"]，但本函数无 acc
+    # 变量/参数（acc 只在 run_once 作用域）→ 恒抛 NameError → fetch 失败降级 0 成交，
+    # 即便 account Secret 注入成功也白搭。此处从 cfg 补取，与 run_once 入口一致。
+    acc = cfg.get("account") or {}
 
     # 明日竞价关注清单提醒（2026-08-31 升级）：昨日复盘标记的高度票今日再审视。
     # 只提醒不自动买——最终仍由竞价决策线 + 分级 + 风控裁决。

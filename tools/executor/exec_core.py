@@ -40,12 +40,43 @@ def decrypt_blob(blob: bytes, passwd: str) -> bytes:
     return bytes(a ^ b for a, b in zip(ct, _keystream(key, len(ct))))
 
 
+_RETRY = 3
+
+
+def _fetch_bytes(url, timeout=30, retries=_RETRY):
+    """带重试的线上拉取。403/5xx/网络抖动均重试（CF Pages 偶发 bot 拦截返回 403，
+    记忆踩坑：curl 必须 -4 -k、通道优先 gh_api > raw；urllib 间歇性 403 需重试）。
+    用完整浏览器 UA 降低被 CF 识别为 bot 的概率。"""
+    last = None
+    for i in range(retries):
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/120.0 Safari/537.36 stock-executor"),
+                "Accept": "*/*",
+            })
+            with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code in (403, 429, 500, 502, 503, 504) and i < retries - 1:
+                time.sleep(1.5 * (i + 1))   # 退避重试
+                continue
+            raise
+        except Exception as e:
+            last = e
+            if i < retries - 1:
+                time.sleep(1.5 * (i + 1))
+                continue
+            raise
+    raise last if last else RuntimeError("fetch failed")
+
+
 def fetch_user_data(user_id: str, passwd: str, timeout: int = 30) -> dict:
-    """拉线上 data/<id>.bin 并解密为 data dict。失败抛异常。"""
+    """拉线上 data/<id>.bin 并解密为 data dict。失败抛异常（带 403/5xx 重试）。"""
     url = "%s/data/%s.bin" % (SITE, user_id)
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 executor"})
-    with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as r:
-        blob = r.read()
+    blob = _fetch_bytes(url, timeout=timeout)
     plain = decrypt_blob(blob, passwd)
     txt = plain.decode("utf-8")
     if txt.startswith("window.__STOCK_DATA__ = "):
@@ -54,11 +85,10 @@ def fetch_user_data(user_id: str, passwd: str, timeout: int = 30) -> dict:
 
 
 def fetch_json(path: str, timeout: int = 30):
-    """拉线上任意静态 json（如 users.json）。"""
+    """拉线上任意静态 json（如 users.json）。带 403/5xx 重试。"""
     url = "%s/%s" % (SITE, path)
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 executor"})
-    with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as r:
-        return json.loads(r.read().decode("utf-8"))
+    body = _fetch_bytes(url, timeout=timeout)
+    return json.loads(body.decode("utf-8"))
 
 
 def extract_signals(data: dict) -> list:
