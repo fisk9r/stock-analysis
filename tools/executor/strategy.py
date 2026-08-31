@@ -280,6 +280,14 @@ def strategy_filter(sig: dict, quote: dict,流通市值亿: float = None) -> dic
         return {"grade": "C", "weight": 0.5,
                 "reason": "C级：gap%.1f%%+市值%s 半仓（55.5%%/+1.53%%）"
                           % (gap, ("%.0f亿" % mc) if mc else "?")}
+    # 2026-09-01 T级（用户要求：模拟盘什么票都可以买，不只连板票）：
+    # st=0 趋势/动量票走趋势专用决策线（平开微红或尾盘微红横盘确认），一律半仓——
+    # 趋势票套用涨停竞价纪律会追在高开溢价最贵处（实证 920087 st=0 高开 2.2%
+    # 跟进次日 -6.03%），故降仓位。
+    if sig.get("market_type") == "trend" and mc_ok:
+        return {"grade": "T", "weight": 0.5,
+                "reason": "T级：趋势票半仓（开盘%+.1f%%／平开微红或尾盘确认，非涨停竞价体系）"
+                          % gap}
     return {"grade": "X", "weight": 0.0,
             "reason": "不满足最优变体（gap%.1f%%/st%d/市值%s），全样本口径仅48.7%%/+0.37%%"
                       % (gap, st, ("%.0f亿" % mc) if mc else "未知")}

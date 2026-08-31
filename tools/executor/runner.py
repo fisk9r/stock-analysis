@@ -177,6 +177,48 @@ def _serverchan_key(ncfg):
     return ""
 
 
+def _md2html(title, text):
+    """推送文本 → PushPlus html 模板（2026-09-01 用户需求：买入/卖出/持有三色
+    标注 + 分区排版，美观易读、不再是一大段纯文本）。
+
+    配色遵循 A 股习惯：买入=红（涨）／卖出=绿（跌）／持有=蓝／观望=灰。
+    """
+    def _esc(s):
+        return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+    def _color(line):
+        out = line
+        for kw, css in (("买入", "#e02020"), ("加仓", "#e02020"), ("建仓", "#e02020"),
+                        ("买点", "#e02020"), ("BUY", "#e02020"),
+                        ("卖出", "#0a8f3c"), ("止损", "#0a8f3c"), ("清仓", "#0a8f3c"),
+                        ("减仓", "#0a8f3c"), ("SELL", "#0a8f3c"),
+                        ("持有", "#2f6fed"), ("HOLD", "#2f6fed"),
+                        ("观望", "#6b7280"), ("WATCH", "#6b7280")):
+            if kw in out:
+                out = out.replace(
+                    kw, '<span style="color:%s;font-weight:600">%s</span>' % (css, kw))
+        return out
+
+    parts = []
+    for ln in (text or "").splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if s.startswith("## "):
+            parts.append(
+                '<div style="margin:12px 0 6px;padding:5px 9px;border-left:4px solid #2f6fed;'
+                'background:#f4f7ff;font-weight:700;font-size:15px">%s</div>' % _esc(s[3:]))
+        elif s.startswith("- ") or s.startswith("* "):
+            parts.append(
+                '<div style="margin:4px 0;line-height:1.65">• %s</div>' % _color(_esc(s[2:])))
+        else:
+            parts.append(
+                '<div style="margin:4px 0;line-height:1.65;color:#333">%s</div>'
+                % _color(_esc(s)))
+    return ('<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif;'
+            'font-size:14px;color:#222">%s</div>' % "".join(parts))
+
+
 def _notify_now(cfg, title, text):
     """实际执行推送（原 _notify 主体）。
     2026-09-01 推送加固（用户底线：不允许「跑了却没收到」）：
@@ -229,8 +271,10 @@ def _notify_now(cfg, title, text):
                 # 2026-09-01：单 token 3 次尝试 + 退避（此前单次失败即丢推送）
                 for attempt in range(3):
                     try:
-                        payload = json.dumps({"token": tk, "title": title, "content": text,
-                                              "template": "markdown"}).encode()
+                        # 2026-09-01：PushPlus 改 html 模板（三色标注 + 分区排版）
+                        _content = _md2html(title, text)
+                        payload = json.dumps({"token": tk, "title": title, "content": _content,
+                                              "template": "html"}).encode()
                         req = urllib.request.Request(
                             "https://www.pushplus.plus/send", data=payload,
                             headers={"Content-Type": "application/json"})

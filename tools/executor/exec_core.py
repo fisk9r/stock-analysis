@@ -97,13 +97,8 @@ def extract_signals(data: dict) -> list:
     来源优先级：recommend.core > recommend.relay > recommend.fused。
     每条信号：{code, name, streak, action, auction_rule, close, tag}
 
-    2026-09-01 数据驱动过滤（选股成功率升级）：跳过 st=0 信号（趋势/动量引擎票，
-    昨日未涨停）。依据 rec_picks 实测：st=0 共 22 样本胜率仅 22.7%/均值 -4.37%
-    （08-28 趋势·/动量· 全军覆没 -2.6%~-10%）；执行器的竞价决策线（高开≥2% 跟进）
-    与 A/B/C 分级全部建立在涨停体系 118 万 K 线回测上，对该类票不适用——
-    实证 920087 st=0 高开 2.2% 跟进次日 -6.03%。涨停体系票在 gap≥2 条件下
-    胜率 66.7%~86.7%（核心龙头最高），模拟盘只做回测验证过的高胜率体系。
-    趋势票仍进网站推荐池与买点结构化展示（信息价值保留），仅不进模拟盘交易。
+    2026-09-01：st=0（趋势/动量引擎票）与 st≥1（涨停体系）均可交易，
+    但走各自的决策线（market_type 字段区分），详见下方 _add 注释。
     """
     rec = data.get("recommend") or {}
     out, seen = [], set()
@@ -112,10 +107,15 @@ def extract_signals(data: dict) -> list:
         code = it.get("code")
         if not code or code in seen:
             return
-        if not (it.get("streak") or 0):
-            return          # st=0：趋势/动量票，竞价纪律体系不适用，跳过
         ar = it.get("auction_rule") or {}
-        # action 由决策线规则 + 高度决定；执行器 9:25 竞价后按实时开盘价最终裁决
+        # 2026-09-01 用户拍板：模拟盘什么票都能买，不只连板票。
+        # 区分市场类型（market_type）走各自的决策线，而不是一刀切过滤：
+        #   limitup（st≥1，昨日涨停/连板体系）→ 竞价纪律（高开≥2% 跟进，118 万
+        #     K 线回测，gap≥2 条件下核心龙头 86.7%/+7.16%、st=1 72.2%/+4.21%）
+        #   trend（st=0，趋势/动量引擎票）→ 趋势专用纪律（不追高开、尾盘确认优先），
+        #     半仓 + 止损收紧。原因：竞价纪律建立在涨停体系回测上，趋势票套用会
+        #     追在高开溢价最贵处（实证 920087 st=0 高开 2.2% 跟进次日 -6.03%）。
+        mt = "limitup" if (it.get("streak") or 0) else "trend"
         out.append({
             "code": code, "name": it.get("name") or "",
             "streak": it.get("streak") or 0,
@@ -123,6 +123,7 @@ def extract_signals(data: dict) -> list:
             "tag": it.get("tag") or src,
             "auction_rule": ar.get("rule") or "",
             "source": src,
+            "market_type": mt,
         })
         seen.add(code)
 
@@ -267,6 +268,23 @@ def auction_gate(sig: dict, quote: dict) -> dict:
     if not prev_close or not cur_open:
         return dict(sig, verdict="ABORT", open_gap=None, reason="无有效行情")
     gap = (cur_open / prev_close - 1) * 100
+    # 2026-09-01 趋势票专用纪律（st=0，非涨停体系，用户要求「什么票都可以买」）：
+    # 不套用高开≥2% 跟进（该规则建立在涨停体系回测上，趋势票追高开溢价最贵——
+    # 实证 920087 st=0 高开 2.2% 跟进次日 -6.03%）。趋势票只在「平开微红 0~2%」
+    # 或「尾盘微红横盘确认（late_gate）」介入，且一律半仓（T 级）。
+    if sig.get("market_type") == "trend":
+        if gap <= -2:
+            return dict(sig, verdict="ABORT", open_gap=round(gap, 2),
+                        reason="趋势票低开%.2f%%≤-2%%，趋势走弱，回避" % gap)
+        if 0 <= gap <= 2:
+            return dict(sig, verdict="BUY", open_gap=round(gap, 2),
+                        reason="趋势票平开微红%.2f%%（0~2%%）：趋势延续的合理买点，"
+                               "T级半仓（不追高开溢价：实证 st=0 高开2.2%%跟进次日-6.03%%）" % gap)
+        if gap > 2:
+            return dict(sig, verdict="WATCH", open_gap=round(gap, 2),
+                        reason="趋势票高开%.2f%%>2%%：溢价偏贵，等 14:45 尾盘微红横盘确认再入" % gap)
+        return dict(sig, verdict="WATCH", open_gap=round(gap, 2),
+                    reason="趋势票微低开%.2f%%（-2~0），等盘中/尾盘确认方向" % gap)
     if (sig.get("streak") or 0) == 2:
         # 二板接力只认强确认（2-5% 弱高开是派发陷阱）
         if gap >= 5:
@@ -312,6 +330,18 @@ def late_gate(sig: dict, quote: dict) -> dict:
     gap = (opn / prev_close - 1) * 100
     fade = (cur / opn - 1) * 100
     base = dict(sig, open_gap=round(gap, 2), day_fade=round(fade, 2))
+    # 2026-09-01 趋势票：尾盘通道是主要入场口——不要求开盘溢价≥2%（趋势票不涨停），
+    # 只要求「当日微红横盘、不回补」（形态确认），半仓。
+    if sig.get("market_type") == "trend":
+        if fade is None or fade <= -3:
+            return dict(base, verdict="ABORT",
+                        reason="趋势票尾盘较开盘%.2f%%走弱，不接（等趋势重新走平）" % fade)
+        if 0 <= fade <= 2:
+            return dict(base, verdict="BUY",
+                        reason="趋势票尾盘微红%.2f%%横盘（不回补）：趋势延续确认，"
+                               "T级半仓介入（趋势票专用纪律）" % fade)
+        return dict(base, verdict="WATCH",
+                    reason="趋势票尾盘较开盘%+.2f%%，形态未确认，观望" % fade)
     min_gap = 5 if (sig.get("streak") or 0) == 2 else 2
     if gap < min_gap:
         return dict(base, verdict="ABORT",
