@@ -4265,7 +4265,9 @@
       function bpRow(r) {
         var sig = (r.signals || []).map(function (s) { return sigBadge(s); }).join(' ');
         var badge;
-        if (r.accel_flag) {
+        if (r.warn_sell) {
+          badge = '<span class="sig-bar warn">⚠ 已临卖点 ' + E(r.live_action || '卖出') + '</span>';
+        } else if (r.accel_flag) {
           badge = '<span class="sig-bar buy">🚀 ' + E(r.trend_state || '加速上行') +
             (r.accel != null ? ' ×' + f(r.accel, 2) : '') + '</span>';
         } else if (r.trend_state === '增速放缓') {
@@ -4294,9 +4296,12 @@
         { t: '评分', a: 'num' }, { t: '趋势状态' }, { t: '说明' }
       ];
       if (bp.accel.length) {
+        var cwarn = bp.accel.filter(function (x) { return x.warn_sell; }).length;
         h += '<div class="bp-sec accel">① 趋势加速优先 · 主升加速中的买点（共 ' + bp.accel.length + ' 只 🚀）</div>';
         h += card('🚀 加速优先买点', table(cols, bp.accel.map(bpRow).join('')),
-          '已处于「加速上行」的买点候选，优先推荐；买入=红。介入仍需次日竞价（高开≥2%才跟进、低开≤-2%放弃）确认。');
+          '已处于「加速上行」的买点候选，优先推荐；买入=红。' +
+          (cwarn ? ('⚠ ' + cwarn + ' 只已临卖点（引擎判「卖出/止盈」），已用黄标区分、不参与推送，勿当买点。') : '') +
+          '介入仍需次日竞价（高开≥2%才跟进、低开≤-2%放弃）确认。');
       }
       if (bp.others.length) {
         h += '<div class="bp-sec other">② 其他买点（回踩后再起 / 多头突破，共 ' + bp.others.length + ' 只）</div>';

@@ -1493,7 +1493,8 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
             _sec("🐢 趋势 · 缓坡慢牛", [_trend_line(t) for t in _slow])
     # ---- 买点候选（趋势加速优先）：从 data.buy_points 取加速组，红=买/优先；避免与牛股雷达/经典策略重复 ----
     _bp = data.get("buy_points") or {}
-    _acc_bp = (_bp.get("accel") or [])[:5]
+    # 剔除「已临卖点」矛盾票（warn_sell）：不把引擎判卖出的票当买点推荐
+    _acc_bp = [b for b in (_bp.get("accel") or []) if not b.get("warn_sell")][:5]
     if _acc_bp:
         _sec("🎯 买点候选 · 加速优先", [
             "🔴 **%s**(%s) %.2f ｜ %s%s ｜ 评分%.0f"

@@ -21,6 +21,9 @@
 """
 import json
 import os
+import re
+
+_SELL_RE = re.compile(r"卖出|止盈|离场|减仓|清仓")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SNAP = os.path.join(ROOT, "tmp_verify", "live_dump.json")
@@ -49,6 +52,16 @@ def _merge(data):
     已处于「加速上行」的票直接作为买点候选并优先推荐（用户 2026-08-31 需求）。
     """
     merged = {}
+    # 交叉引用 recommend.trend 的逐票 verdict.action：买点候选若被趋势引擎判为
+    # 「卖出/止盈/离场/减仓」，属「技术加速但已临卖点」矛盾票——保留可见但打 warn_sell，
+    # 前端用黄标⚠区分、推送中剔除（不把卖出票当买点推荐）。
+    _trend_list = (data.get("recommend") or {}).get("trend") or []
+    _action_map = {}
+    for _t in _trend_list:
+        _v = _t.get("verdict")
+        _act = _v.get("action") if isinstance(_v, dict) else None
+        if _act:
+            _action_map[_t.get("code")] = _act
     # 来源1/2：bull（回踩后再起） + strategies（多头突破）
     for src in ("bull", "strategies"):
         for x in (data.get(src) or []):
@@ -116,6 +129,11 @@ def _merge(data):
             rec["accel_flag"] = flag
             rec["signals"] = list(set(rec["signals"] + [bt]))
             rec["tags"] = rec["tags"] or "；".join((x.get("reasons") or [])[:3])
+    # 标记「已临卖点」矛盾票（其趋势 verdict 实为卖出/止盈）
+    for _rec in merged.values():
+        _act = _action_map.get(_rec["code"])
+        _rec["live_action"] = _act or ""
+        _rec["warn_sell"] = bool(_act and _SELL_RE.search(_act))
     return sorted(merged.values(), key=lambda r: -r["score"])
 
 
@@ -126,8 +144,11 @@ def build_data(data):
     """
     date = (data.get("meta") or {}).get("date", "") or ""
     merged = _merge(data)
-    accel = [r for r in merged if r.get("accel_flag")]
-    others = [r for r in merged if not r.get("accel_flag")]
+    # warn_sell（已临卖点）矛盾票沉到各组末尾，纯买点排最前
+    accel = sorted([r for r in merged if r.get("accel_flag")],
+                   key=lambda r: (1 if r.get("warn_sell") else 0, -(r.get("score") or 0)))
+    others = sorted([r for r in merged if not r.get("accel_flag")],
+                    key=lambda r: (1 if r.get("warn_sell") else 0, -(r.get("score") or 0)))
     chan = [c for c in ((data.get("chanlun") or {}).get("buys") or []) if c.get("signal")]
     return {
         "date": date,
@@ -147,22 +168,28 @@ def _row_a(r):
     dd = r["dd60"]
     dd_s = ("%.1f%%" % dd) if dd is not None else "—"
     # 趋势加速徽标
-    if r.get("accel_flag"):
+    if r.get("warn_sell"):
+        badge = "<span class='badge warn'>⚠ 已临卖点 %s</span>" % esc(r.get("live_action") or "卖出")
+        row_cls = " warn-row"
+    elif r.get("accel_flag"):
         ts = r.get("trend_state") or "加速上行"
         ac = r.get("accel")
         ac_s = ("%.2f" % ac) if ac is not None else ""
         badge = "<span class='badge accel'>🚀 %s%s</span>" % (esc(ts), (" ×%s" % ac_s) if ac_s else "")
+        row_cls = ""
     elif r.get("trend_state"):
         badge = "<span class='badge tstate'>%s</span>" % esc(r["trend_state"])
+        row_cls = ""
     else:
         badge = "<span class='badge none'>—</span>"
+        row_cls = ""
     return (
-        "<tr><td class='nm'>%s</td><td class='cd'>%s</td>"
+        "<tr class='%s'><td class='nm'>%s</td><td class='cd'>%s</td>"
         "<td><span class='bt'>%s</span></td>"
         "<td>%.2f</td><td class='%s'>%s</td><td>%.2f</td>"
         "<td>%s</td><td>%s</td><td class='sc'>%.1f</td>"
         "<td>%s</td><td class='feat'>%s</td></tr>"
-        % (esc(r["name"]), esc(r["code"]), esc(r["btype"]),
+        % (row_cls, esc(r["name"]), esc(r["code"]), esc(r["btype"]),
            r["price"] or 0, pcls, pct_s, r["vol_ratio"] or 0,
            esc(r["ind"]), dd_s, r["score"],
            badge, esc((r["tags"] or "")[:90]))
@@ -223,8 +250,10 @@ td { padding:7px 8px; border-bottom:1px solid #13203a; vertical-align:top; }
 .badge { font-size:11px; padding:1px 7px; border-radius:10px; white-space:nowrap; }
 .badge.accel { background:#3a1c10; color:#ff7a45; border:1px solid #5a2a16; font-weight:700; }
 .badge.tstate { background:#10203a; color:#9fb3c8; }
+.badge.warn { background:#3a2e0a; color:#ffcf5c; border:1px solid #5a4a16; font-weight:700; }
 .badge.none { color:#5b6b82; }
 tr.accel-row { background:rgba(255,122,69,0.06); }
+tr.warn-row { background:rgba(255,207,92,0.07); }
 </style></head><body>
 <h1>◈ 买点候选 · 上升趋势中的介入机会</h1>
 <div class="sub">数据日期 %s · 来源 stock-analysis 站点收盘快照 · 量化信号筛选</div>
