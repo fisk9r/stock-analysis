@@ -45,6 +45,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from exec_core import (fetch_user_data, extract_signals, realtime_quote,
                        auction_gate, late_gate, market_gate, SITE,
+                       apply_seat_avoid, apply_ladder_avoid, refine_buy_zone,
+                       position_cap, late_session_maps,
                        assert_data_fresh, data_date)
 from risk_gate import RiskGate
 import broker_sim
@@ -722,8 +724,12 @@ def _notify_mark_sent(key):
         pass
 
 
-def run_sells(broker, mode, cfg):
-    """对全部持仓跑卖出策略。返回 (lines, n_sold)。"""
+def run_sells(broker, mode, cfg, data=None):
+    """对全部持仓跑卖出策略。返回 (lines, n_sold)。
+
+    data（可选，Batch3 #13）：提供时叠加区间止损/止盈第二道闸——
+    策略引擎判 HOLD 但现价触及 zone.stop 或进入卖出区 → 升级为 SELL。
+    """
     lines, n_sold = [], 0
     try:
         poss = broker.positions(open_only=True)
@@ -754,6 +760,15 @@ def run_sells(broker, mode, cfg):
         except Exception as e:
             _log("策略异常 %s：%r" % (p["code"], e))
             dec = {"verdict": "HOLD", "price": 0, "reason": "策略异常，顺延"}
+        # Batch3 #13：区间止损/止盈第二道闸（策略引擎判 HOLD 时再补一刀）
+        if data is not None and dec.get("verdict") not in ("SELL",):
+            try:
+                _zv, _zp, _zr = refine_sell_zone(p, q, data)
+                if _zv == "SELL":
+                    dec = {"verdict": "SELL", "price": _zp, "reason": _zr}
+                    _log("区间增强卖出 %s：%s" % (p["code"], _zr))
+            except Exception as e:
+                _log("区间增强异常 %s：%r" % (p["code"], e))
         pnl_pct = ((q.get("price") / p["avg_price"] - 1) * 100) if (q and q.get("price")) else None
         if dec["verdict"] == "SELL" and dec.get("price"):
             # 操作前推送：说明为什么卖（用户要求：每次操作前推送+理由）
@@ -805,7 +820,14 @@ def run_sells(broker, mode, cfg):
 
 # ---------------- Phase 2：开仓 ----------------
 
-def run_buys(broker, mode, cfg, sigs, mkt=None):
+def run_buys(broker, mode, cfg, sigs, mkt=None, data=None):
+    """开仓主流程（09:25 竞价通道）。返回 (lines, n_buy)。
+
+    data（可选，Batch3 #13）：提供时叠加
+      · 席位回避（seat_avoid）+ 连板梯队回避（ladder gate=avoid）
+      · 买入区间精修（refine_buy_zone：价在买区内才买，并带回止损位）
+      · 总仓位系数（position_cap：热度/情绪退潮时压减新仓金额）
+    """
     lines, n_buy = [], 0
     mkt = mkt or {"mode": "NORMAL", "reason": ""}
     # 大盘环境闸门（2026-08-29）：不是每天都该交易——环境偏弱直接不开新仓，
@@ -871,6 +893,24 @@ def run_buys(broker, mode, cfg, sigs, mkt=None):
                          % (verdict["name"], verdict["code"], verdict["verdict"],
                             verdict["open_gap"] or 0, verdict["reason"]))
             continue
+        # Batch3 #13：席位回避 + 连板梯队回避（在分级之前，便宜跳过）
+        if data is not None:
+            _sk, _sw = apply_seat_avoid(verdict, data)
+            if _sk:
+                gate.record(verdict, "SKIP", 0, _sw)
+                _track(verdict["code"], verdict.get("name"), "SKIP",
+                       "席位回避：" + _sw)
+                lines.append("- %s(%s) 席位回避：%s"
+                             % (verdict["name"], verdict["code"], _sw))
+                continue
+            _lk, _lw = apply_ladder_avoid(verdict, data)
+            if _lk:
+                gate.record(verdict, "SKIP", 0, _lw)
+                _track(verdict["code"], verdict.get("name"), "SKIP",
+                       "梯队回避：" + _lw)
+                lines.append("- %s(%s) 梯队回避：%s"
+                             % (verdict["name"], verdict["code"], _lw))
+                continue
         # 决策线通过 → 最优变体分级
         q = quote.get(verdict["code"]) or {}
         mc = q.get("float_mv") or None
@@ -912,9 +952,27 @@ def run_buys(broker, mode, cfg, sigs, mkt=None):
             lines.append("- %s(%s) 已持仓，跳过重复建仓" % (verdict["name"], verdict["code"]))
             _log("买入跳过 %s：%s" % (verdict["code"], reason))
             continue
+        # Batch3 #13：买入区间精修（价在买区内才买，并带回止损位供 broker 记录）
+        if data is not None:
+            _v, _why, _stop = refine_buy_zone(verdict, quote, data)
+            if _v != "BUY":
+                gate.record(verdict, "WATCH", 0, _why)
+                _track(verdict["code"], verdict.get("name"), "WATCH",
+                       "区间精修：" + _why)
+                lines.append("- %s(%s) 等回踩：%s"
+                             % (verdict["name"], verdict["code"], _why))
+                continue
+            if _stop:
+                verdict = dict(verdict, stop=_stop)
         amount = int((gate.cfg["max_trade_amount"]) * sf["weight"] * caution_cut)
         if total:
             amount = int(min(amount, total * gate.cfg["max_position_pct"]))
+        # Batch3 #13：总仓位系数（热度/情绪退潮时压减新仓金额，与 market_gate 互补）
+        if data is not None:
+            _pc = position_cap(data)
+            if _pc < 1.0:
+                amount = int(amount * _pc)
+                _log("总仓位系数 %.2f → 新仓金额 %d" % (_pc, amount))
         chk = gate.check(verdict, total)
         if not chk["ok"]:
             gate.record(verdict, "REJECT", 0, chk["reason"])
@@ -1119,31 +1177,41 @@ def _run_once_inner(cfg, force=False):
     except Exception as e:
         _log("竞价关注清单提醒失败（不阻断）：%r" % e)
 
-    # Phase 1：平仓（不依赖线上数据，行情+K线就够）
+    # Phase 0：提前取线上数据（sell 端也用区间止损增强；失败不阻断卖出，区间增强跳过）
+    _log("=" * 30 + " 拉取线上数据 " + "=" * 30)
+    data = None
+    data_ok = False
+    mkt = {"mode": "NORMAL", "reason": "线上数据未取到，环境闸门放行（个股决策线仍生效）"}
+    sigs = []
+    if acc.get("user_id") and acc.get("passwd"):
+        try:
+            data = fetch_user_data(acc["user_id"], acc["passwd"])
+            # 2026-09-01 云端托管加固：数据新鲜度闸门——build 失败或 CF 部署失败时
+            # 线上数据会停留在旧日期，没有这道闸门就会拿过期信号在今天开盘下单。
+            assert_data_fresh(data, force=force)
+            _log("线上数据日期：%s（新鲜度校验通过）" % (data_date(data) or "未知"))
+            sigs = extract_signals(data)
+            mkt = market_gate(data)
+            data_ok = True
+            _log("大盘环境闸门：%s｜%s" % (mkt["mode"], mkt["reason"]))
+            _log("信号 %d 条（core+relay+fused 去重）" % len(sigs))
+        except Exception as e:
+            _log("✗ 数据拉取/解密失败（卖出端照常，区间增强跳过）：%r" % e)
+            data = None
+    else:
+        _log("未配置 account，跳过线上数据拉取（无信号来源）")
+
+    # Phase 1：平仓（区间止损增强在 data 可用时生效）
     _log("=" * 30 + " Phase1 平仓 " + "=" * 30)
-    sell_lines, n_sold = run_sells(broker, mode, cfg)
+    sell_lines, n_sold = run_sells(broker, mode, cfg, data)
 
     # Phase 2：开仓（需要线上信号；先裁大盘环境，再裁个股）
     _log("=" * 30 + " Phase2 开仓 " + "=" * 30)
     buy_lines, n_buy = [], 0
-    mkt = {"mode": "NORMAL", "reason": "线上数据未取到，环境闸门放行（个股决策线仍生效）"}
-    _log("拉取线上数据 %s ..." % SITE)
-    data_ok = False
-    try:
-        data = fetch_user_data(acc["user_id"], acc["passwd"])
-        # 2026-09-01 云端托管加固：数据新鲜度闸门——build 失败或 CF 部署失败时
-        # 线上数据会停留在旧日期，没有这道闸门就会拿过期信号在今天开盘下单。
-        assert_data_fresh(data, force=force)
-        _log("线上数据日期：%s（新鲜度校验通过）" % (data_date(data) or "未知"))
-        sigs = extract_signals(data)
-        mkt = market_gate(data)
-        _log("大盘环境闸门：%s｜%s" % (mkt["mode"], mkt["reason"]))
-        _log("信号 %d 条（core+relay+fused 去重）" % len(sigs))
-        buy_lines, n_buy = run_buys(broker, mode, cfg, sigs, mkt)
-        data_ok = True
-    except Exception as e:
-        _log("✗ 数据拉取/解密失败：%r" % e)
-        buy_lines = ["- 数据拉取失败：%r" % e]
+    if data_ok:
+        buy_lines, n_buy = run_buys(broker, mode, cfg, sigs, mkt, data)
+    else:
+        buy_lines = ["- 数据拉取失败，开仓顺延"]
 
     # 当日亏损熔断（开仓后复查：若本轮买入后组合回撤越线，立即熔断，
     # 尾盘通道与后续轮次的开仓全部拦截）
@@ -1175,7 +1243,7 @@ def _run_once_inner(cfg, force=False):
     return data_ok
 
 
-def _tail_buys(broker, cfg, sigs, mkt):
+def _tail_buys(broker, cfg, sigs, mkt, data=None):
     """尾盘入场通道：late_gate（微红横盘）确认买入，半仓。
 
     依据（exec_core.late_gate 文档，309 交易日全市场涨停票，前提开盘≥2%）：
@@ -1183,6 +1251,10 @@ def _tail_buys(broker, cfg, sigs, mkt):
       （1623 样本，14 个月逐月全正）——14:45 买入价≈收盘价，口径一致。
       深亏/强拉桶分别 -0.31%/+0.62%，全部放弃。
     早盘已委托的票由 RiskGate 幂等拒绝，天然防重复。
+
+    Batch3 #13/#14（data 可选）：叠加席位/梯队回避、买入区间精修、总仓位系数；
+    趋势票额外读 late_session——命中 exit_warn（尾盘走弱警示）则不接（避免接飞刀），
+    命中 watch_tomorrow（次日关注确认）则优先保留。
     """
     lines, n_buy = [], 0
     if not sigs:
@@ -1202,6 +1274,8 @@ def _tail_buys(broker, cfg, sigs, mkt):
     if mkt.get("mode") == "FREEZE":
         _log("尾盘入场：大盘环境 FREEZE，不开新仓")
         return ["- 🧊 尾盘 FREEZE：%s" % mkt.get("reason", "")], 0
+    # Batch3 #14：尾盘确认读 late_session（趋势票次日确认）
+    _ls_watch, _ls_warn = (late_session_maps(data) if data is not None else (set(), set()))
 
     def _track(code, name, action, reason):
         if hasattr(broker, "record_decision"):
@@ -1212,6 +1286,24 @@ def _tail_buys(broker, cfg, sigs, mkt):
         if v["verdict"] != "BUY":
             _track(v["code"], v.get("name"), "WATCH", "尾盘确认:%s" % v["reason"])
             continue
+        # Batch3 #14：趋势票尾盘确认——命中 exit_warn 不接（尾盘走弱，次日谨慎）
+        if data is not None and v.get("market_type") == "trend" and str(v["code"]) in _ls_warn:
+            _track(v["code"], v.get("name"), "WATCH",
+                   "尾盘确认:趋势票命中 late_session 走弱警示，不接")
+            _log("尾盘买入跳过 %s：late_session 走弱警示" % v["code"])
+            continue
+        # Batch3 #13：席位回避 + 连板梯队回避
+        if data is not None:
+            _sk, _sw = apply_seat_avoid(v, data)
+            if _sk:
+                gate.record(v, "TAIL_SKIP", 0, "尾盘席位回避:" + _sw)
+                _track(v["code"], v.get("name"), "SKIP", "尾盘席位回避:%s" % _sw)
+                continue
+            _lk, _lw = apply_ladder_avoid(v, data)
+            if _lk:
+                gate.record(v, "TAIL_SKIP", 0, "尾盘梯队回避:" + _lw)
+                _track(v["code"], v.get("name"), "SKIP", "尾盘梯队回避:%s" % _lw)
+                continue
         q = quote.get(v["code"]) or {}
         sf = strategy.strategy_filter(v, q, q.get("float_mv") or None)
         if sf["grade"] == "X":
@@ -1234,9 +1326,23 @@ def _tail_buys(broker, cfg, sigs, mkt):
                    "持仓幂等：已持有未平仓，尾盘不重复建仓")
             _log("尾盘买入跳过 %s：已持仓" % v["code"])
             continue
+        # Batch3 #13：买入区间精修（趋势票尤其需要，避免追在买区上沿）
+        if data is not None:
+            _zv, _zw, _zstop = refine_buy_zone(v, quote, data)
+            if _zv != "BUY":
+                gate.record(v, "WATCH", 0, "尾盘区间精修:" + _zw)
+                _track(v["code"], v.get("name"), "WATCH", "尾盘区间精修:" + _zw)
+                continue
+            if _zstop:
+                v = dict(v, stop=_zstop)
         amount = int(gate.cfg["max_trade_amount"] * 0.5 * cut)
         if total:
             amount = int(min(amount, total * gate.cfg["max_position_pct"]))
+        # Batch3 #13：总仓位系数（热度/情绪退潮时压减新仓金额）
+        if data is not None:
+            _pc = position_cap(data)
+            if _pc < 1.0:
+                amount = int(amount * _pc)
         chk = gate.check(v, total)
         if not chk["ok"]:
             if "幂等" in chk["reason"]:
@@ -1459,7 +1565,7 @@ def _run_tail_inner(cfg, force=False):
         _log("线上数据日期：%s（新鲜度校验通过）" % (data_date(data) or "未知"))
         sigs = extract_signals(data)
         mkt = market_gate(data)
-        buy_lines, n_buy = _tail_buys(broker, cfg, sigs, mkt)
+        buy_lines, n_buy = _tail_buys(broker, cfg, sigs, mkt, data)
         data_ok = True
     except Exception as e:
         _log("✗ 尾盘入场数据拉取失败：%r" % e)

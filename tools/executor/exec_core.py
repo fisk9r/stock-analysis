@@ -429,3 +429,158 @@ def late_gate(sig: dict, quote: dict) -> dict:
                     reason="尾盘强拉+%.2f%% · 溢价透支，不追" % fade)
     return dict(base, verdict="WATCH",
                 reason="尾盘较开盘%+.2f%% · 中性观望" % fade)
+
+
+# ============================================================================
+# Batch 3（#426）：买入区间 / 止损位 / 席位回避 / 连板梯队 / 总仓位 / 尾盘确认
+# 集成助手——纯函数、不依赖网络，便于离线单测；由 runner.py 在开仓/平仓通道调用。
+# ============================================================================
+
+def seat_avoid_codes(data):
+    """返回应回避的股票代码集合（低胜率席位上榜信号，data['seat_avoid']）。"""
+    out = set()
+    sa = (data or {}).get("seat_avoid") or {}
+    for it in (sa.get("items") or []):
+        for h in (it.get("reps") or []):
+            if not isinstance(h, dict):
+                continue
+            c = h.get("code")
+            if c:
+                out.add(str(c))
+            for cc in (h.get("codes") or []):
+                out.add(str(cc))
+    return out
+
+
+def zone_lookup(data):
+    """返回 {code: zone_item}；zone_item 含 buy_zone/sell_zone/stop/action 等。"""
+    out = {}
+    z = (data or {}).get("zones") or {}
+    for it in (z.get("items") or []):
+        c = it.get("code")
+        if c:
+            out[str(c)] = it
+    return out
+
+
+def zone_stop(code, data):
+    """返回该票的区间止损位（无则 None）。"""
+    it = zone_lookup(data).get(str(code))
+    return it.get("stop") if it else None
+
+
+def ladder_lookup(data):
+    """返回 {code: ladder_plan_item}；连板梯队计划（含 gate 字段）。"""
+    out = {}
+    for it in (data or {}).get("ladder_plans") or []:
+        c = it.get("code")
+        if c:
+            out[str(c)] = it
+    return out
+
+
+def apply_seat_avoid(sig, data):
+    """返回 (skip:bool, reason:str)。命中席位回避信号直接放弃买入。"""
+    av = seat_avoid_codes(data)
+    if str(sig.get("code")) in av:
+        return True, "席位回避信号（低胜率席位上榜，跟随为负期望）"
+    return False, ""
+
+
+def apply_ladder_avoid(sig, data):
+    """对连板票（streak>=2）应用连板梯队 gate='avoid' 回避。
+
+    返回 (skip:bool, reason:str)。非连板票或梯队未判 avoid 则放行。
+    """
+    if (sig.get("streak") or 0) < 2:
+        return False, ""
+    lp = ladder_lookup(data).get(str(sig.get("code")))
+    if lp and lp.get("gate") == "avoid":
+        return True, "连板梯队已判低开放弃（gate=avoid）"
+    return False, ""
+
+
+def refine_buy_zone(sig, quote, data):
+    """对通过竞价决策线的 BUY 信号做区间精修。
+
+    返回 (verdict, reason, stop)：
+      - zones 无该票 → 沿用决策线（BUY, stop=None）；
+      - 当前价 < 买入区间下沿 → 降为 WATCH（等回踩，不追飞刀）；
+      - 当前价 > 买入区间上沿 → 降为 WATCH（追高不买）；
+      - 在区间内 → BUY，并返回 zone.stop 作为止损位（供 broker 记录/风控）。
+    """
+    it = zone_lookup(data).get(str(sig.get("code")))
+    if not it:
+        return ("BUY", "无区间数据，沿用竞价决策线", None)
+    bz = it.get("buy_zone") or [None, None]
+    sz = it.get("sell_zone") or [None, None]
+    stop = it.get("stop")
+    q = quote.get(str(sig.get("code"))) or {}
+    price = q.get("price") or 0
+    if bz and bz[0] and price:
+        if price < bz[0] * 0.995:
+            return ("WATCH", "当前价%.2f 低于买入区间下沿%.2f，等回踩"
+                    % (price, bz[0]), None)
+        if price > bz[1] * 1.005:
+            return ("WATCH", "当前价%.2f 高于买入区间上沿%.2f，追高不买"
+                    % (price, bz[1]), None)
+    return ("BUY", "区间确认：买%.2f~%.2f 卖%.2f~%.2f 止损%.2f"
+            % (bz[0] or 0, bz[1] or 0, sz[0] or 0, sz[1] or 0, stop or 0), stop)
+
+
+def refine_sell_zone(p, q, data):
+    """对持仓做区间止损/止盈增强（strategy.sell_decision 之外的第二道闸）。
+
+    返回 (verdict, price, reason) 或 (None, None, "")（交给原策略）：
+      - 现价 <= zone.stop → 区间止损 SELL；
+      - 现价 >= sell_zone[0] 且 action 为逼近卖出/突破持有 → 区间止盈 SELL。
+    """
+    it = zone_lookup(data).get(str(p.get("code")))
+    if not it:
+        return (None, None, "")
+    price = q.get("price") if q else None
+    if not price:
+        return (None, None, "")
+    stop = it.get("stop")
+    sz = it.get("sell_zone") or [None, None]
+    act = it.get("action") or ""
+    if stop and price <= stop * 1.005:
+        return ("SELL", price, "区间止损：现价%.2f 触及止损位%.2f" % (price, stop))
+    if sz and sz[0] and price >= sz[0] and act in ("逼近卖出", "突破持有"):
+        return ("SELL", price, "区间止盈：现价%.2f 进入卖出区[%.2f,%.2f]"
+                % (price, sz[0], sz[1] or 0))
+    return (None, None, "")
+
+
+def position_cap(data):
+    """据总仓位建议（data['position_advice']）返回新仓金额系数。
+
+    与 market_gate 互补：market_gate 看大盘方向（FREEZE/CAUTION），
+    position_advice 看热度+情绪给出的具体仓位成数。
+      suggest_pct < 40 → 0.5x（防守）；< 60 → 0.75x（谨慎）；否则 1.0x。
+    缺数据时返回 1.0（不额外限制）。
+    """
+    pa = (data or {}).get("position_advice") or {}
+    pct = pa.get("suggest_pct")
+    if pct is None:
+        return 1.0
+    if pct < 40:
+        return 0.5
+    if pct < 60:
+        return 0.75
+    return 1.0
+
+
+def late_session_maps(data):
+    """返回 (watch_codes:set, warn_codes:set) 来自 data['late_session']。
+
+    供尾盘入场通道对趋势票做「次日确认」：
+      warn_codes（exit_warn）→ 尾盘走弱警示，趋势票不接（避免接飞刀）；
+      watch_codes（watch_tomorrow）→ 次日关注确认，趋势票优先。
+    """
+    ls = (data or {}).get("late_session") or {}
+    watch = set(str(x.get("code")) for x in (ls.get("watch_tomorrow") or [])
+                if x.get("code"))
+    warn = set(str(x.get("code")) for x in (ls.get("exit_warn") or [])
+               if x.get("code"))
+    return watch, warn

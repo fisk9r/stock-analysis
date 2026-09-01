@@ -8,7 +8,9 @@ GitHub Actions 交易时段 workflow 中运行（本地 market.db 仅盘后，�
   1. 取关注池 + 持仓池代码；
   2. 拉实时快照（现价/昨收/涨跌幅/成交额）；
   3. 识别异动：涨停附近 / 大涨 / 大跌 / 急速拉升 / 放量；
-  4. 命中即经 PushPlus 推送（复用 notifier.push）。
+  4. 命中即经 PushPlus 推送（复用 notifier.push）；
+  5. 落库（cache/market.db）+ 上墙片段（data/intraday_latest.json）+ 喂 T+1
+     （次日 build 读取该片段嵌入 data['intraday']，作为「昨日盘中异动」呈现）。
 
 注意：本模块是「触发脚手架」——逻辑完整，但依赖外网实时数据，
 本地 unittest 无法验证（无实时行情）。上线需用户在仓库开启
@@ -17,6 +19,7 @@ workflows/intraday.yml 并配置 PUSHPLUS_TOKEN 密钥。
 import os
 import sys
 import json
+import time
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -88,14 +91,58 @@ def detect(codes, snap, baseline=None):
     return alerts
 
 
+def persist(alerts, date=None, root=None):
+    """落库 + 上墙 + 喂 T+1。返回写入的片段 dict 或 None（无 alerts）。
+
+    - 落库：cache/market.db intraday_alerts 表（best-effort，表缺失不影响主流程）
+    - 上墙：data/intraday_latest.json（供 build 嵌入 data['intraday']，站点展示）
+    - 喂T+1：data/intraday_latest.json 次日被 build 读取，作为「昨日盘中异动」呈现
+    """
+    if not alerts:
+        return None
+    root = root or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    date = date or time.strftime("%Y-%m-%d")
+    frag = {"date": date, "n": len(alerts), "alerts": alerts}
+    # 上墙片段
+    try:
+        os.makedirs(os.path.join(root, "data"), exist_ok=True)
+        with open(os.path.join(root, "data", "intraday_latest.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump(frag, f, ensure_ascii=False)
+    except Exception as e:
+        sys.stderr.write("intraday persist(上墙) failed: %r\n" % e)
+    # 落库
+    try:
+        db = os.path.join(root, "cache", "market.db")
+        if os.path.exists(db):
+            import sqlite3 as _sq
+            c = _sq.connect(db)
+            c.execute("""create table if not exists intraday_alerts(
+                id integer primary key autoincrement, date text, ts text,
+                code text, name text, pct real, price real, type text)""")
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            for a in alerts:
+                c.execute(
+                    "insert into intraday_alerts(date,ts,code,name,pct,price,type)"
+                    " values(?,?,?,?,?,?,?)",
+                    (date, ts, a.get("code"), a.get("name"),
+                     a.get("pct"), a.get("price"), a.get("type")))
+            c.commit()
+            c.close()
+    except Exception as e:
+        sys.stderr.write("intraday persist(落库) failed: %r\n" % e)
+    return frag
+
+
 def run():
-    """CLI 入口：扫描关注+持仓，推送异动。返回 alert 条数。"""
+    """CLI 入口：扫描关注+持仓，推送异动并落库。返回 alert 条数。"""
     codes, names, _ = watchlist.load_watch_codes()
     snap = fetch_realtime(codes)
     alerts = detect(codes, snap)
     if not alerts:
         print("intraday: 无盘中异动")
         return 0
+    frag = persist(alerts)
     lines = ["盘中异动扫描（%d 条）：" % len(alerts)]
     for a in alerts:
         lines.append("- %s（%s）%s @ %.2f" % (a["name"], a["code"], a["type"], a["price"]))

@@ -1857,6 +1857,30 @@ def run(date_override=None, dedup_close=False):
     except Exception as e:
         log("  多源交叉校验跳过：%r" % e)
 
+    # ---- Batch3 #12：盘中异动上墙（嵌入 data['intraday']；片段由 intraday.py 落库时产出）----
+    try:
+        _intra_path = os.path.join(ROOT, "data", "intraday_latest.json")
+        if os.path.exists(_intra_path):
+            with open(_intra_path, encoding="utf-8") as f:
+                _intra = json.load(f)
+            if _intra and _intra.get("alerts"):
+                data["intraday"] = _intra
+                log("  盘中异动上墙：%d 条（%s）" % (_intra.get("n", 0), _intra.get("date")))
+    except Exception as e:
+        log("  盘中异动上墙失败（不影响主流程）：%r" % e)
+
+    # ---- Batch3 #11：自动生成推荐质量月度归因报告（reports/rec_attr_<月>.html）----
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import gen_attr_report
+        _rep = gen_attr_report.generate(root=ROOT)
+        if _rep:
+            log("  归因报告已生成：%s" % _rep)
+        else:
+            log("  归因报告跳过（rec_picks 数据不足）")
+    except Exception as e:
+        log("  归因报告生成失败（不影响主流程）：%r" % e)
+
     os.makedirs(DIST, exist_ok=True)
     out = os.path.join(DIST, "data.js")
     with open(out, "w", encoding="utf-8") as f:

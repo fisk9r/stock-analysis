@@ -2189,6 +2189,20 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     except Exception:
         pass
 
+    try:
+        # Batch3 #12：盘中异动上墙（仅当日有异动时提示）
+        _intra = data.get("intraday") or {}
+        _ial = _intra.get("alerts") or []
+        if _ial:
+            _intra_rows = []
+            for _a in _ial[:8]:
+                _intra_rows.append("%s（%s）%s @ %.2f"
+                                   % (_a.get("name") or _a.get("code"), _a.get("code"),
+                                      _a.get("type"), _a.get("price") or 0))
+            _sec("📡 盘中异动（%d 条）" % len(_ial), _intra_rows)
+    except Exception:
+        pass
+
     # 数据完整性体检（仅异常时告警，健康时静默，避免刷屏）
     ig = data.get("integrity")
     if ig and not ig.get("ok") and (ig.get("warnings") or ig.get("scale_anomalies")):

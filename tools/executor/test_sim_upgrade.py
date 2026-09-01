@@ -5,6 +5,7 @@ import os
 import sys
 import shutil
 import time
+import tempfile as _tf
 
 BASE = r"C:\Users\Basshunter-j\WorkBuddy\2026-08-04-11-06-17\stock-analysis"
 EXE = os.path.join(BASE, "tools", "executor")
@@ -184,6 +185,128 @@ sf = strategy.strategy_filter({"open_gap": 6, "streak": 4}, {}, 100)
 ck("A级通过", sf["grade"] == "A")
 sf = strategy.strategy_filter({"open_gap": 3, "streak": 1}, {}, 100)
 ck("X级放弃", sf["grade"] == "X")
+
+# ============ 5. Batch3 #13/#14：executor 接入区间/回避/仓位/尾盘确认 ============
+print("\n[5] Batch3 执行器集成助手（exec_core）")
+import exec_core
+
+_b3 = {
+    "seat_avoid": {"n": 1, "items": [{"label": "拉萨", "win_rate": 30, "n": 25,
+                   "avg_pct": -3.5, "reps": [{"code": "600666", "name": "奥瑞德"}]}]},
+    "zones": {"n": 2, "items": [
+        {"code": "600111", "name": "包钢", "buy_zone": [9.5, 10.2],
+         "sell_zone": [11.0, 11.8], "stop": 9.3, "action": "正常持有"},
+        {"code": "600222", "name": "某票", "buy_zone": [5.0, 5.6],
+         "sell_zone": [6.2, 6.9], "stop": 4.9, "action": "逼近卖出"},
+    ]},
+    "ladder_plans": [{"code": "002594", "entry_streak": 2, "gate": "avoid"}],
+    "position_advice": {"heat": "温", "sentiment": "均衡", "suggest_pct": 55,
+                        "level": "中性偏谨慎", "reason": "x"},
+    "late_session": {"watch_tomorrow": [{"code": "300750"}],
+                     "exit_warn": [{"code": "600519"}]},
+}
+
+ck("席位回避集合", exec_core.seat_avoid_codes(_b3) == {"600666"},
+   str(exec_core.seat_avoid_codes(_b3)))
+ck("区间查表止损位", exec_core.zone_stop("600111", _b3) == 9.3)
+_sa1, _ = exec_core.apply_seat_avoid({"code": "600666"}, _b3)
+ck("席位回避命中", _sa1 is True)
+_sa2, _ = exec_core.apply_seat_avoid({"code": "600111"}, _b3)
+ck("席位回避放行", _sa2 is False)
+_la1, _ = exec_core.apply_ladder_avoid({"code": "002594", "streak": 2}, _b3)
+ck("梯队回避命中", _la1 is True)
+_la2, _ = exec_core.apply_ladder_avoid({"code": "002594", "streak": 1}, _b3)
+ck("梯队回避仅连板", _la2 is False)
+_v, _why, _stop = exec_core.refine_buy_zone(
+    {"code": "600111"}, {"600111": {"price": 10.0}}, _b3)
+ck("买区内→BUY带回止损", _v == "BUY" and _stop == 9.3, "%s/%s" % (_v, _stop))
+_v2, _, _ = exec_core.refine_buy_zone(
+    {"code": "600111"}, {"600111": {"price": 9.0}}, _b3)
+ck("低于买区→WATCH", _v2 == "WATCH", _v2)
+_v3, _, _ = exec_core.refine_buy_zone(
+    {"code": "600111"}, {"600111": {"price": 11.0}}, _b3)
+ck("高于买区→WATCH", _v3 == "WATCH", _v3)
+_v4, _, _s4 = exec_core.refine_buy_zone(
+    {"code": "999999"}, {"999999": {"price": 5.0}}, _b3)
+ck("无区间数据→BUY不拦", _v4 == "BUY" and _s4 is None, "%s" % _v4)
+_zs1, _zp1, _ = exec_core.refine_sell_zone(
+    {"code": "600111"}, {"price": 9.2}, _b3)
+ck("区间止损触发", _zs1 == "SELL" and _zp1 == 9.2, "%s" % _zs1)
+_zs2, _, _ = exec_core.refine_sell_zone(
+    {"code": "600222"}, {"price": 11.2}, _b3)   # 600222 action=逼近卖出 现≥卖区
+ck("区间止盈触发", _zs2 == "SELL", "%s" % _zs2)
+_zs3, _, _ = exec_core.refine_sell_zone(
+    {"code": "600111"}, {"price": 10.5}, _b3)
+ck("无触发→交还原策略", _zs3 is None, "%s" % _zs3)
+ck("总仓位系数(退潮)", abs(exec_core.position_cap(_b3) - 0.75) < 1e-9)
+ck("总仓位系数(防守)", exec_core.position_cap({"position_advice": {"suggest_pct": 30}}) == 0.5)
+ck("总仓位系数(缺省)", exec_core.position_cap({}) == 1.0)
+_w, _warn = exec_core.late_session_maps(_b3)
+ck("尾盘确认映射", _w == {"300750"} and _warn == {"600519"},
+   "watch=%s warn=%s" % (_w, _warn))
+
+# ============ 6. Batch3 #11：归因报告自动生成（临时库注入） ============
+print("\n[6] Batch3 归因报告生成（gen_attr_report）")
+import sqlite3 as _sq
+import tempfile as _tf
+_tmp = _tf.mkdtemp(prefix="attr_", dir=EXE)
+os.makedirs(os.path.join(_tmp, "cache"), exist_ok=True)
+os.makedirs(os.path.join(_tmp, "reports"), exist_ok=True)
+_db = os.path.join(_tmp, "cache", "market.db")
+_c = _sq.connect(_db)
+_c.execute("""create table rec_picks(
+    code text, name text, streak int, tag text, date text,
+    p_break real, open_gap real, next_open_gap real, next_pct real)""")
+for i in range(40):
+    _c.execute("insert into rec_picks(code,name,streak,tag,date,p_break,open_gap,next_open_gap,next_pct)"
+               " values(?,?,?,?,?,?,?,?,?)",
+               ("600%03d" % i, "票%d" % i, 1 + i % 4, "核心龙头", "2026-09-%02d" % (1 + i % 20),
+                70.0, 3.0, 3.0, 4.0))
+_c.commit(); _c.close()
+sys.path.insert(0, os.path.join(BASE, "tools"))
+import gen_attr_report
+_rep = gen_attr_report.generate(root=_tmp, month="2026-09")
+ck("归因报告生成返回路径", bool(_rep) and os.path.exists(_rep), str(_rep))
+if _rep:
+    _sz = os.path.getsize(_rep)
+    ck("归因报告非空", _sz > 2000, "%d bytes" % _sz)
+# 空库返回 None
+_c2 = _sq.connect(os.path.join(_tmp, "cache", "market2.db"))
+os.remove(_db)  # 重建为空库
+_c3 = _sq.connect(_db); _c3.execute("create table rec_picks(code text)"); _c3.commit(); _c3.close()
+_rep2 = gen_attr_report.generate(root=_tmp, month="2026-09", db_path=_db)
+ck("空库返回 None", _rep2 is None, str(_rep2))
+shutil.rmtree(_tmp, ignore_errors=True)
+
+# ============ 7. Batch3 #12：盘中异动 detect + 落库/上墙 ============
+print("\n[7] Batch3 盘中异动落库与上墙（intraday）")
+try:
+    sys.path.insert(0, os.path.join(BASE, "pipeline"))
+    import intraday as intraday_mod
+    _ok_intra = True
+except Exception as e:
+    _ok_intra = False
+    print("  (warn) intraday 导入跳过：%r" % e)
+if _ok_intra:
+    _al = intraday_mod.detect(
+        ["600000"], {"600000": {"name": "测试", "price": 11.0, "prev_close": 10.0, "pct": 10.0}})
+    ck("异动检测涨停附近", len(_al) == 1 and "涨停" in (_al[0]["type"] or ""), str(_al))
+    _tmp2 = _tf.mkdtemp(prefix="intra_", dir=EXE)
+    os.makedirs(os.path.join(_tmp2, "cache"), exist_ok=True)
+    os.makedirs(os.path.join(_tmp2, "data"), exist_ok=True)
+    open(os.path.join(_tmp2, "cache", "market.db"), "w").close()  # 空库，触发建表
+    _frag = intraday_mod.persist(_al, date="2026-09-01", root=_tmp2)
+    ck("上墙片段返回", _frag is not None and _frag["n"] == 1, str(_frag))
+    _fpath = os.path.join(_tmp2, "data", "intraday_latest.json")
+    ck("上墙片段文件落盘", os.path.exists(_fpath))
+    if os.path.exists(_fpath):
+        _fj = json.load(open(_fpath, encoding="utf-8"))
+        ck("上墙片段结构", _fj.get("date") == "2026-09-01" and len(_fj["alerts"]) == 1)
+    _ic = _sq.connect(os.path.join(_tmp2, "cache", "market.db"))
+    _nrow = _ic.execute("select count(*) from intraday_alerts").fetchone()[0]
+    _ic.close()
+    ck("落库写入 intraday_alerts", _nrow == 1, "rows=%d" % _nrow)
+    shutil.rmtree(_tmp2, ignore_errors=True)
 
 print("\n" + "=" * 50)
 print("PASS=%d FAIL=%d" % (len(PASS), len(FAIL)))
