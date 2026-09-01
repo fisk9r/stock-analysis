@@ -624,6 +624,23 @@
       });
       wch += table([{ t: '标的' }, { t: '现价', a: 'r' }, { t: '涨幅', a: 'r' }, { t: '量比', a: 'r' }, { t: '信号' }], wRows);
       h += card('⭐ 关注股雷达', wch, '自选（notify.json watch）与持仓关注股（holdings.json watch=true）的每日信号：涨停/跌停/炸板/破位为急讯，置顶展示');
+    } else if (window.__SA_USER__ !== 'owner') {
+      /* 2026-09-01 用户需求：其他用户也能添加自选股——云端自选是站长专属，
+         普通用户回退渲染「本机自选池」（localStorage，免密钥，立即生效）。
+         信号/止损/告警在「我的自选」页浏览器直连行情实时计算。 */
+      var _loc = [];
+      try { _loc = (window.WLX ? WLX.list() : []); } catch (_e0) {}
+      var _lr = _loc.map(function (_x) {
+        return '<tr><td><b>' + E(_x.name || '') + '</b> <span class="muted">' + E(_x.code) + '</span></td>' +
+          '<td class="r">' + (_x.cost != null ? f(_x.cost, 2) : '—') + '</td>' +
+          '<td>' + E(_x.at || '') + '</td></tr>';
+      });
+      var _lbody = _lr.length
+        ? '<div class="chips" style="margin-bottom:8px"><span class="chip">本机关注 <b>' + _loc.length + '</b> 只</span></div>' +
+          table([{ t: '标的' }, { t: '成本价', a: 'r' }, { t: '加入日' }], _lr) +
+          '<div class="note" style="margin-top:8px">实时信号、止损提醒请在「⭐ 我的自选」页查看（浏览器直连行情实时计算）；点推荐卡上的 ☆ 关注可一键加删。</div>'
+        : '<div class="empty">还没有关注任何股票。在「⭐ 我的自选」页添加，或点任意推荐卡上的 ☆ 关注——立即生效、仅保存在你自己的设备上。</div>';
+      h += card('⭐ 我的关注池', _lbody, '本机自选池（免密钥）：你关注的票每天出现在这里，「我的自选」页提供三时相操作台与破位告警');
     }
 
     /* 买卖区间与操作提示 */
@@ -671,8 +688,16 @@
           if (rps.length) {
             rotHtml += '<div style="font-size:10px;margin-top:1px;color:' + C.muted + '">↳ 可换：' +
               rps.map(function (s) {
-                return '<span class="bd" style="border-color:' + C.up + ';color:' + C.up + ';margin:1px 3px 1px 0;display:inline-block;padding:0 4px">' +
-                  E(s.name) + '(' + (s.score || 0) + '分)</span>';
+                /* 2026-09-01：候选带板块/连板高度/买卖区间（同板块优先） */
+                var _mt = s.market_type || ((s.streak || 0) >= 1 ? '连板' : '趋势');
+                var _lb = ' · ' + _mt + ((s.streak || 0) >= 1 ? (s.streak + '板') : '');
+                if (s.industry && s.industry !== '—') _lb += ' · ' + s.industry;
+                var _zn = '';
+                if (s.buy_zone && s.buy_zone[0] != null) _zn += ' 买' + f(s.buy_zone[0], 2) + '~' + f(s.buy_zone[1], 2);
+                if (s.sell_zone && s.sell_zone[0] != null) _zn += ' 卖' + f(s.sell_zone[0], 2) + '~' + f(s.sell_zone[1], 2);
+                else if (s.stop != null) _zn += ' 止损' + f(s.stop, 2);
+                return '<span class="bd" style="border-color:' + C.up + ';color:' + C.up + ';margin:1px 3px 1px 0;display:inline-block;padding:0 4px" title="买区/卖区为该候选的波段区间">' +
+                  E(s.name) + '(' + (s.score || 0) + '分' + E(_lb) + (_zn ? '；' + E(_zn) : '') + ')</span>';
               }).join('') + '</div>';
           }
         }
@@ -3635,11 +3660,35 @@
         (plus ? '<div style="margin:6px 0"><b style="color:var(--muted);font-size:12px">亮点</b> ' + plus + '</div>' : '') +
         ((d.signals && d.signals.length) ? '<div style="margin:6px 0"><b style="color:var(--muted);font-size:12px">信号</b> ' + d.signals.map(sigBadge).join(' ') + '</div>' : '') +
         '<div class="note" style="margin-top:6px">动作：<b class="' + (actCls(d.action) || '') + '">' + E(d.action) + '</b> · ' + E(d.why || '') + '</div>' +
+        /* 2026-09-01 用户需求：需要卖出的持仓 → 结合板块给更换标的 + 购买/卖出区间 */
+        ((d.action === '止损离场' || d.action === '止盈减仓' || d.action === '减仓观察') && d.replace && d.replace.length
+          ? '<div style="margin:8px 0 2px;padding-top:6px;border-top:1px dashed var(--border)">' +
+            '<b style="color:var(--muted);font-size:12px">🔄 换仓建议' + (d.replace_sector && d.replace_sector !== '—' ? '（同「' + E(d.replace_sector) + '」板块优先）' : '') + '</b>' +
+            d.replace.map(function (rp) {
+              var _mt = rp.market_type || ((rp.streak || 0) >= 1 ? '连板' : '趋势');
+              var _col = _mt === '连板' ? C.gold : C.up;
+              var _zn = '';
+              if (rp.buy_zone && rp.buy_zone[0] != null) _zn += '买 ' + f(rp.buy_zone[0]) + '~' + f(rp.buy_zone[1]);
+              if (rp.sell_zone && rp.sell_zone[0] != null) _zn += (_zn ? ' / ' : '') + '卖 ' + f(rp.sell_zone[0]) + '~' + f(rp.sell_zone[1]);
+              else if (rp.stop != null) _zn += (_zn ? ' / ' : '') + '止损 ' + f(rp.stop);
+              return '<div style="font-size:12px;margin-top:4px"><span class="bd" style="border-color:' + _col + ';color:' + _col + ';padding:0 4px">' +
+                (_mt === '连板' ? _mt + (rp.streak || '') + '板' : _mt) + '</span> ' +
+                stk(rp.code, rp.name) + (rp.industry && rp.industry !== '—' ? ' <span class="muted">' + E(rp.industry) + (rp.same_sector ? ' · 同板块' : '') + '</span>' : '') +
+                (_zn ? '<div class="muted" style="margin-top:1px">' + _zn + ' · ' + E(rp.discipline || '') + '</div>' : '') +
+                '</div>';
+            }).join('') + '</div>'
+          : '') +
         '</div></div>';
     }).join('');
     h += cards;
-    h += '<div class="sa-mgmt-actions" style="margin-top:12px"><button class="mbtn mbtn-p he-edit-btn">✎ 编辑持仓</button>' +
-      '<span class="muted">次日上涨概率来自历史同状态实测，非预测承诺</span></div>';
+    /* 2026-09-01：持仓清单是站长级配置（写回 HOLDINGS_JSON 全局密钥）——
+       仅 owner 显示编辑入口，避免其他用户误改/覆盖站长持仓。 */
+    if (window.__SA_USER__ === 'owner') {
+      h += '<div class="sa-mgmt-actions" style="margin-top:12px"><button class="mbtn mbtn-p he-edit-btn">✎ 编辑持仓</button>' +
+        '<span class="muted">次日上涨概率来自历史同状态实测，非预测承诺</span></div>';
+    } else {
+      h += '<div class="sa-mgmt-actions" style="margin-top:12px"><span class="muted">持仓清单由站长统一配置；你的自选股请用「⭐ 我的自选」页或推荐卡的 ☆ 关注（本机保存、立即生效）</span></div>';
+    }
     return h;
   }
 

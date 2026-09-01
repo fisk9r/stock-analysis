@@ -279,7 +279,7 @@ def band_levels(bars, cost=None, vol_ratio=None):
 
 
 def analyze_one(code, name, bars, cost=None, horizon=None, elapsed=None,
-                replace_pool=None, exclude=None):
+                replace_pool=None, exclude=None, industries=None):
     """bars: [{d,o,h,l,c,v,...}] 升序；cost: 持仓成本价（可选）；
     horizon: 显式周期（"短线"/"中线"/"长线"，可选，缺省自动建议）；
     elapsed: 建仓锚点起已持有交易日数（可选，用于时间到期预警）。
@@ -452,16 +452,27 @@ def analyze_one(code, name, bars, cost=None, horizon=None, elapsed=None,
             rotate = "割肉"
             rotate_reason = ("中长线趋势已向下（MA20<MA60 或 斜率%.0f%%），"
                              "应止损割肉控制回撤，待重新走平再加回" % ((slope60 or 0) * 100))
-    # 更换建议：仅当发出离场/止损/割肉时，从强势备选池挑 Top3（排除自身与关注池）
+    # 更换建议：仅当发出离场/止损/割肉时，从强势备选池挑 Top3（排除自身与关注池）。
+    # 2026-09-01 用户需求：卖出建议要结合板块给更换标的（可连板可趋势）——
+    # 候选排序改为「同板块优先，再按强度分」；候选票的行业/连板高度一并带上，
+    # 买卖区间由 scan() 统一用 band_levels 补齐（此处无 u.bars 访问权）。
     if rotate in ("止损", "更换", "割肉") and replace_pool:
         ex = set(exclude or [])
         ex.add(code)
+        # 本票所属板块：优先 industries 映射（code2boards），候选池兜底
+        _my_ind = (industries or {}).get(code) or \
+            next((x.get("industry") for x in (replace_pool or [])
+                  if x.get("code") == code), None)
         cands = [x for x in (replace_pool or [])
                  if x.get("code") and x["code"] not in ex
                  and (x.get("worth_score") or 0) > 0]
-        cands.sort(key=lambda x: (x.get("worth_score") or 0), reverse=True)
+        # 同板块优先（二级排序：worth_score 降序）
+        cands.sort(key=lambda x: (1 if (_my_ind and x.get("industry") == _my_ind) else 0,
+                                  x.get("worth_score") or 0), reverse=True)
         replace = [{"code": c["code"], "name": c.get("name") or "",
                     "score": c.get("worth_score"),
+                    "industry": c.get("industry"),
+                    "streak": c.get("streak") or 0,
                     "p_continue": c.get("p_continue")} for c in cands[:3]]
 
     # ---- 追板回落检测：触板后炸板回落 → 短线/超短线当日离场 ----
@@ -511,13 +522,17 @@ def analyze_one(code, name, bars, cost=None, horizon=None, elapsed=None,
 
 def scan(u, date, codes=None, extra_names=None, costs=None,
          horizons=None, elapsed_map=None, top_n=30,
-         replace_pool=None, exclude_codes=None):
+         replace_pool=None, exclude_codes=None, code2boards=None):
     """对给定代码（默认=关注池）跑区间分析。u 需提供 .bars 与 .stocks。
     costs: {code: 成本价}，可选；有成本者输出盈亏提示，且**永不截断丢弃**。
     horizons: {code: "短线"/"中线"/"长线"} 显式周期（可选）。
     elapsed_map: {code: int} 建仓锚点起已持有交易日数（可选，用于时间到期预警）。
-    replace_pool: [{code,name,worth_score,p_continue}] 强势备选池，用于离场/止损/割肉时
-        给出「更换建议」；exclude_codes: 不参与更换建议的代码集合（关注池自身）。"""
+    replace_pool: [{code,name,worth_score,p_continue,industry,streak}] 强势备选池，
+        用于离场/止损/割肉时给出「更换建议」（2026-09-01 起同板块优先，
+        且每只候选票补齐 buy_zone/sell_zone/stop——用户需求：卖出建议给更换标的
+        的购买区间与卖出区间，可连板可趋势）；
+    code2boards: {code: [(板块名, 名, kind), ...]} 行业映射（可选）。
+    exclude_codes: 不参与更换建议的代码集合（关注池自身）。"""
     if codes is None:
         import watchlist
         codes, extra_names, _added = watchlist.load_watch_codes()
@@ -526,6 +541,17 @@ def scan(u, date, codes=None, extra_names=None, costs=None,
     horizons = horizons or {}
     elapsed_map = elapsed_map or {}
     exclude_codes = set(exclude_codes or [])
+    # 行业映射：code2boards → {code: 行业名}，供更换建议「同板块优先」
+    _c2b = code2boards or {}
+    industries = {}
+    for c in codes:
+        industries[c] = next(
+            (n for _, n, k in (_c2b.get(c) or []) if k == "industry"), None)
+    # 候选池连板高度兜底映射（池条目 streak 缺失时用 u.streak 补）
+    _pool_streak = {}
+    for x in (replace_pool or []):
+        if x.get("code") and x.get("streak") is not None:
+            _pool_streak[x["code"]] = x["streak"]
     items = []
     for c in codes:
         bs = [b for b in (u.bars.get(c) or []) if b["d"] <= date]
@@ -533,10 +559,30 @@ def scan(u, date, codes=None, extra_names=None, costs=None,
         try:
             r = analyze_one(c, name, bs, cost=costs.get(c),
                             horizon=horizons.get(c), elapsed=elapsed_map.get(c),
-                            replace_pool=replace_pool, exclude=exclude_codes)
+                            replace_pool=replace_pool, exclude=exclude_codes,
+                            industries=industries)
         except Exception:
             r = None
         if r:
+            # 更换建议候选票补齐买卖区间 + 连板/趋势标签（band_levels 轻量、可批量）
+            for rep in (r.get("replace") or []):
+                rc = rep.get("code")
+                if not rc:
+                    continue
+                cb = [b for b in (u.bars.get(rc) or []) if b["d"] <= date]
+                try:
+                    bd = band_levels(cb)
+                except Exception:
+                    bd = None
+                if bd:
+                    rep["buy_zone"] = bd.get("buy_zone")
+                    rep["sell_zone"] = bd.get("sell_zone")
+                    rep["stop"] = bd.get("stop")
+                    rep["band_action"] = bd.get("band_action")
+                rep["streak"] = rep.get("streak") or \
+                    (((getattr(u, "streak", None) or {}).get(rc) or {}).get(date, 0)) or \
+                    _pool_streak.get(rc, 0)
+                rep["market_type"] = "连板" if (rep.get("streak") or 0) >= 1 else "趋势"
             items.append(r)
     order = {"破位卖出": 0, "加仓提示": 1, "回踩买入区": 2,
              "跌破警示": 3, "逼近卖出": 4, "突破持有": 5, "正常持有": 6}

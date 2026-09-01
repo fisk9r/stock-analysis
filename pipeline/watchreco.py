@@ -143,4 +143,26 @@ def lines(wr, n=6, compact=False):
         if note and not compact:
             seg += "（%s）" % note[:28]
         out.append(seg)
+        # 2026-09-01 用户需求：需要卖出的票 → 结合板块给更换标的 + 购买/卖出区间
+        # （zones.replace 候选已带 industry/market_type/buy_zone/sell_zone）
+        if (it.get("action") or "") in ("卖出", "止损离场", "止盈减仓", "减仓观察",
+                                        "离场换强") or it.get("rotate"):
+            for rp in (it.get("replace") or [])[:2]:
+                rseg = "  ↳ 换仓：%s%s %s" % (
+                    "同板块 " if rp.get("industry") and
+                    rp.get("industry") == it.get("industry") else "",
+                    "%s(%s)" % (rp.get("name") or rp.get("code"),
+                                rp.get("industry") or "—"),
+                    rp.get("market_type") or
+                    ("连板" if (rp.get("streak") or 0) >= 1 else "趋势"))
+                if rp.get("streak"):
+                    rseg += "%d板" % rp["streak"]
+                bz2, sz2 = rp.get("buy_zone"), rp.get("sell_zone")
+                if bz2 and bz2[0]:
+                    rseg += " 买%.2f~%.2f" % (bz2[0], bz2[1])
+                if sz2 and sz2[0]:
+                    rseg += " 卖%.2f~%.2f" % (sz2[0], sz2[1])
+                elif rp.get("stop"):
+                    rseg += " 止损%.2f" % rp["stop"]
+                out.append(rseg)
     return out

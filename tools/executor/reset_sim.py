@@ -107,10 +107,14 @@ def main():
         json.dump({}, f)
 
     # 6. 重置 risk_state.json（清熔断）与 loss_streak.json（清连亏）
+    # 2026-09-01 修复（致命）：此前写空 {}，RiskGate._load_state 只在文件不存在时
+    # 才补默认键 → self.state["trades"] KeyError → 当天所有 BUY 崩溃（推送报
+    # 「开仓数据拉取失败」）。必须写完整默认结构（与 risk_gate._default_state 一致）。
     rs = os.path.join(tmp_root, "risk_state.json")
     if os.path.exists(rs):
         with open(rs, "w", encoding="utf-8") as f:
-            json.dump({}, f)
+            json.dump({"trades": [], "circuit_break": None, "day": "",
+                       "orders_today": 0}, f, ensure_ascii=False, indent=1)
     ls = os.path.join(tmp_root, "state", "loss_streak.json")
     if os.path.exists(ls):
         with open(ls, "w", encoding="utf-8") as f:

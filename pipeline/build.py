@@ -1211,13 +1211,39 @@ def run(date_override=None, dedup_close=False):
         w_codes, w_names, w_added = _wl.load_watch_codes()
         rec_codes_z = [it.get("code") for it in (data.get("recommend", {}).get("all") or [])]
         z_codes = list(dict.fromkeys((w_codes or []) + (rec_codes_z or [])))[:40]
-        # 强势备选池（用于破位/停滞/割肉时的「更换建议」）：取推荐池全量，含价值分与续板概率
+        # 强势备选池（用于破位/停滞/割肉时的「更换建议」）：取推荐池全量，含价值分与续板概率。
+        # 2026-09-01 用户需求：更换标的可以是连板票也可以是趋势票，且要「同板块优先」——
+        # 池条目补 industry/streak（行业来自 code2boards，连板高度来自 u.streak）。
         z_replace = []
         try:
+            _seen_rp = set()
             for it in (data.get("recommend", {}).get("all") or []):
-                z_replace.append({"code": it.get("code"), "name": it.get("name"),
+                _c = it.get("code")
+                if not _c or _c in _seen_rp:
+                    continue
+                _seen_rp.add(_c)
+                z_replace.append({"code": _c, "name": it.get("name"),
                                   "worth_score": it.get("worth_score"),
-                                  "p_continue": it.get("p_continue")})
+                                  "p_continue": it.get("p_continue"),
+                                  "industry": next(
+                                      (n for _, n, k in (code2boards.get(_c) or [])
+                                       if k == "industry"), None),
+                                  "streak": it.get("streak")
+                                  or ((getattr(u, "streak", None) or {}).get(_c) or {}).get(date, 0)})
+            # 趋势/动量票入池（streak=0 → market_type=趋势）
+            for _key in ("trend", "momentum"):
+                for it in (rec.get(_key) or []):
+                    _c = it.get("code")
+                    if not _c or _c in _seen_rp:
+                        continue
+                    _seen_rp.add(_c)
+                    z_replace.append({"code": _c, "name": it.get("name"),
+                                      "worth_score": it.get("worth_score"),
+                                      "p_continue": None,
+                                      "industry": it.get("industry") or next(
+                                          (n for _, n, k in (code2boards.get(_c) or [])
+                                           if k == "industry"), None),
+                                      "streak": 0})
         except Exception:
             pass
         # 持仓配置：成本映射 + 周期标注 + 建仓锚点（用于时间到期预警）
@@ -1260,6 +1286,7 @@ def run(date_override=None, dedup_close=False):
                                     costs=z_costs, horizons=z_horizons,
                                     elapsed_map=z_elapsed,
                                     replace_pool=z_replace or None,
+                                    code2boards=code2boards,
                                     exclude_codes=set(z_codes)) if z_codes else None)
         if data["zones"]:
             log("  买卖区间：覆盖 %d 只，破位 %d / 加仓 %d / 逼近卖点 %d / 优化提示 %d"
@@ -1307,6 +1334,14 @@ def run(date_override=None, dedup_close=False):
         data["holdings"] = holdings.monitor(u, date, con, code2boards=code2boards)
         hrep = data["holdings"]
         if hrep and hrep.get("items"):
+            # 2026-09-01 用户需求：需要卖出的持仓 → 结合板块给更换建议（可连板可趋势）
+            # + 每只候选的购买区间/卖出区间。候选池=z_replace（连板+趋势全量）。
+            try:
+                holdings.attach_replace(u, date, hrep,
+                                        (z_replace if 'z_replace' in locals() else []),
+                                        code2boards=code2boards)
+            except Exception as _he:
+                log("  持仓更换建议失败（不影响主流程）：%r" % _he)
             log("  持股监测 %d 只，预警 %d 条" % (len(hrep["items"]), len(hrep.get("alerts") or [])))
     except Exception as e:
         log("  持股监测失败（不影响主流程）：%r" % e)

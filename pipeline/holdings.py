@@ -435,6 +435,70 @@ def monitor(u, date, con, positions=None, code2boards=None, persist=True):
     }
 
 
+def attach_replace(u, date, rep, pool, code2boards=None):
+    """给「需要卖出」的持仓票补板块化更换建议（2026-09-01 用户需求）。
+
+    对评级 C/D（止损离场/止盈减仓/减仓观察）的持仓：
+      · 候选优先同板块（industry 来自 code2boards），再按 worth_score 全市场排序；
+      · 候选可连板可趋势（streak≥1 → 连板，否则趋势）；
+      · 每只候选补 buy_zone/sell_zone/stop（zones.band_levels 轻量波段区间，
+        连板票追加竞价纪律提示）。
+    pool: [{code,name,worth_score,industry,streak,p_continue}]（build.py 的 z_replace）。
+    直接原地写 item["replace"]。失败静默（不影响主流程）。
+    """
+    if not rep or not rep.get("enabled"):
+        return
+    try:
+        import zones as _z
+    except Exception:
+        try:
+            from pipeline import zones as _z
+        except Exception:
+            return
+    hold_codes = {(it.get("code") or "") for it in (rep.get("items") or [])}
+    sell_actions = ("止损离场", "止盈减仓", "减仓观察", "清仓")
+    pool = [x for x in (pool or []) if x.get("code") and x["code"] not in hold_codes
+            and (x.get("worth_score") or 0) > 0]
+    if not pool:
+        return
+    for it in (rep.get("items") or []):
+        if not it.get("ok") or it.get("action") not in sell_actions:
+            continue
+        my_ind = next((n for _, n, k in ((code2boards or {}).get(it["code"]) or [])
+                       if k == "industry"), None)
+        cands = list(pool)
+        cands.sort(key=lambda x: (1 if (my_ind and x.get("industry") == my_ind) else 0,
+                                  x.get("worth_score") or 0), reverse=True)
+        out = []
+        for c in cands[:3]:
+            rc = c["code"]
+            bs = [b for b in (u.bars.get(rc) or []) if b["d"] <= date]
+            bd = None
+            try:
+                bd = _z.band_levels(bs)
+            except Exception:
+                bd = None
+            entry = {"code": rc, "name": c.get("name") or "",
+                     "industry": c.get("industry") or "—",
+                     "score": c.get("worth_score"),
+                     "streak": c.get("streak") or
+                     (((getattr(u, "streak", None) or {}).get(rc) or {}).get(date, 0)),
+                     "same_sector": bool(my_ind and c.get("industry") == my_ind)}
+            entry["market_type"] = "连板" if (entry["streak"] or 0) >= 1 else "趋势"
+            if bd:
+                entry["buy_zone"] = bd.get("buy_zone")
+                entry["sell_zone"] = bd.get("sell_zone")
+                entry["stop"] = bd.get("stop")
+            if entry["market_type"] == "连板":
+                entry["discipline"] = "次日竞价高开≥2%跟进、低开弃"
+            else:
+                entry["discipline"] = "平开微红介入、不追高开>2%"
+            out.append(entry)
+        if out:
+            it["replace"] = out
+            it["replace_sector"] = my_ind or "—"
+
+
 def summary_lines(rep, limit=8):
     """推送用紧凑摘要"""
     if not rep or not rep.get("enabled"):
@@ -475,6 +539,24 @@ def summary_lines(rep, limit=8):
             detail.append("操作：%s" % d["sell_advice"])
         if detail:
             out.append("   " + "；".join(detail))
+        # 2026-09-01 用户需求：需要卖出的持仓 → 结合板块给更换标的 + 购买/卖出区间
+        for rp in (d.get("replace") or [])[:2]:
+            rseg = "   ↳ 换仓：%s %s（%s" % (
+                "同板块" if rp.get("same_sector") else "全市场",
+                "%s %s" % (rp.get("name") or rp.get("code"), rp.get("industry") or ""),
+                rp.get("market_type") or "趋势")
+            if rp.get("streak"):
+                rseg += "%d板" % rp["streak"]
+            rseg += " · %s" % (rp.get("discipline") or "")
+            bz, sz = rp.get("buy_zone"), rp.get("sell_zone")
+            if bz and bz[0]:
+                rseg += " ｜ 买%.2f~%.2f" % (bz[0], bz[1])
+            if sz and sz[0]:
+                rseg += " 卖%.2f~%.2f" % (sz[0], sz[1])
+            elif rp.get("stop"):
+                rseg += " 止损%.2f" % rp["stop"]
+            rseg += "）"
+            out.append(rseg)
     if rep.get("alerts"):
         out.append("⚠ 评级变化：" + "；".join(rep["alerts"][:4]))
     return out

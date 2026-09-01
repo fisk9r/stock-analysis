@@ -26,8 +26,10 @@
 
 const GITHUB_API = 'https://api.github.com';
 
-// 只允许写这两个 Secret——其余一概拒绝（仓库里还有 SC 密钥、GH_PAT 等，绝不能被覆盖）
-const SECRET_WHITELIST = new Set(['ALLOWED_USERS_JSON', 'HOLDINGS_JSON']);
+// 只允许写这三个 Secret——其余一概拒绝（仓库里还有 SC 密钥、GH_PAT 等，绝不能被覆盖）
+// 2026-09-01 补 WATCH_JSON：站点「⭐ 管理关注股」云端同步写的就是它，
+// 此前不在白名单 → 走 Worker 的用户一律 403 "secret not allowed"（表现为无法添加自选股）。
+const SECRET_WHITELIST = new Set(['ALLOWED_USERS_JSON', 'HOLDINGS_JSON', 'WATCH_JSON']);
 
 // —— 内存限速（实例重启即清零，但足够挡住脚本小子和误操作）——
 const buckets = new Map(); // ip -> {n, t}     每 60s 一个窗口，窗口内 >20 次则拒

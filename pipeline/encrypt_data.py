@@ -47,6 +47,57 @@ def _load_payload():
     return js.encode("utf-8")
 
 
+# ================= 按用户脱敏（2026-09-01 用户需求） =================
+# 此前所有用户加密的是同一份 data.js：owner 的持仓明细（成本/浮盈亏）、owner 的
+# 云端自选清单、自选操作结论里的持仓条目全部泄露给其他用户（实测 mmmmmm 能看到
+# 600500 中化国际 cost=7.18 -20.89%）。修复：非 owner 用户的密文按下述规则裁剪。
+_OWNER_HOLDING_FILE = os.path.join(CONFIG, "holdings.json")
+
+
+def _owner_holding_codes():
+    """owner 持仓代码集合（用于裁剪自选结论/买卖区间里的持仓条目）。"""
+    codes = set()
+    try:
+        arr = json.load(open(_OWNER_HOLDING_FILE, encoding="utf-8"))
+        if isinstance(arr, dict):
+            arr = arr.get("positions") or arr.get("items") or []
+        for p in arr if isinstance(arr, list) else []:
+            if isinstance(p, dict) and p.get("code"):
+                codes.add(str(p["code"]).strip())
+            elif isinstance(p, str) and p.strip().isdigit():
+                codes.add(p.strip())
+    except Exception:
+        pass
+    return codes
+
+
+def _personalize(obj, uid):
+    """非 owner 用户裁剪 owner 专属数据。返回新 dict（不改原对象）。owner 原样返回。"""
+    import copy
+    if uid == "owner":
+        return obj
+    d = copy.deepcopy(obj)
+    hold_codes = _owner_holding_codes()
+    # ① 持仓明细（成本/股数/浮盈亏/评级）——owner 专属
+    d.pop("holdings", None)
+    # ② owner 云端自选清单（notify.json watch + holdings watch）
+    d.pop("watch", None)
+    # ③ 自选/持仓操作结论：剔除 owner 持仓条目（is_holding 或命中持仓代码）
+    rec = d.get("recommend")
+    if isinstance(rec, dict) and isinstance(rec.get("watch_reco"), dict):
+        wr = rec["watch_reco"]
+        wr["items"] = [x for x in (wr.get("items") or [])
+                       if not (x.get("is_holding") or x.get("code") in hold_codes)]
+        wr["n"] = len(wr["items"])
+    # ④ 买卖区间：剔除持仓票条目（其 buy/sell zone 含 owner 成本语境）
+    if isinstance(d.get("zones"), dict):
+        zn = d["zones"]
+        zn["items"] = [x for x in (zn.get("items") or [])
+                       if x.get("code") not in hold_codes]
+        zn["n"] = len(zn["items"])
+    return d
+
+
 def _key(passwd, salt):
     return hashlib.pbkdf2_hmac("sha256", passwd.encode("utf-8"), salt, ITER, dklen=32)
 
@@ -91,6 +142,13 @@ def main():
         sys.stderr.write("[encrypt] %s\n" % e)
         return 0
 
+    # 2026-09-01 按用户脱敏：owner 用原始负载；其他用户裁剪 owner 专属数据后加密
+    try:
+        _obj = json.loads(payload.decode("utf-8"))
+    except Exception as e:
+        sys.stderr.write("[encrypt] data.js JSON 解析失败（跳过脱敏，全量加密）：%r\n" % e)
+        _obj = None
+
     out_dir = os.path.join(DIST, "data")
     os.makedirs(out_dir, exist_ok=True)
     meta = []
@@ -107,11 +165,20 @@ def main():
         if uid == ADMIN_BLOB:
             sys.stderr.write("[encrypt] id %r 为保留名，已跳过。\n" % ADMIN_BLOB)
             continue
-        blob = encrypt_user(payload, pw)
+        upayload = payload
+        if _obj is not None and uid != "owner":
+            try:
+                upayload = json.dumps(_personalize(_obj, uid),
+                                      ensure_ascii=False).encode("utf-8")
+            except Exception as e:
+                sys.stderr.write("[encrypt] 用户 %s 脱敏失败（回退全量）：%r\n" % (uid, e))
+                upayload = payload
+        blob = encrypt_user(upayload, pw)
         with open(os.path.join(out_dir, uid + ".bin"), "wb") as f:
             f.write(blob)
         meta.append({"id": uid, "name": name})
-        print("[encrypt] 已加密用户 %s（%s）→ data/%s.bin" % (name, uid, uid))
+        print("[encrypt] 已加密用户 %s（%s）→ data/%s.bin%s"
+              % (name, uid, uid, "（已脱敏）" if upayload is not payload else ""))
 
     if not meta:
         sys.stderr.write("[encrypt] 没有有效用户，未生成任何密文。\n")

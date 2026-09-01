@@ -24,13 +24,33 @@ DEFAULTS = {
 }
 
 
+def _default_state():
+    return {"trades": [], "circuit_break": None, "day": "", "orders_today": 0}
+
+
 def _load_state():
+    """2026-09-01 修复（致命）：旧实现只在「文件不存在」时才返回含 trades 的默认结构。
+    reset_sim.py 重置模拟盘时把 risk_state.json 写成空 {}，文件存在 → json.load 成功
+    → self.state["trades"] 直接 KeyError('trades') → 此后所有 BUY 路径（开仓/尾盘）
+    全部崩在风控闸门，推送报「开仓数据拉取失败」（2026-09-01 重置后当天实证）。
+    修复：无论来源，加载后强制补齐默认键并做类型校验。"""
+    st = _default_state()
     if os.path.exists(STATE_PATH):
         try:
-            return json.load(open(STATE_PATH, encoding="utf-8"))
+            loaded = json.load(open(STATE_PATH, encoding="utf-8"))
+            if isinstance(loaded, dict):
+                st.update(loaded)
         except Exception:
             pass
-    return {"trades": [], "circuit_break": None, "day": "", "orders_today": 0}
+    if not isinstance(st.get("trades"), list):
+        st["trades"] = []
+    if not isinstance(st.get("orders_today"), int):
+        st["orders_today"] = 0
+    if "circuit_break" not in st:
+        st["circuit_break"] = None
+    if not st.get("day"):
+        st["day"] = ""
+    return st
 
 
 def _save_state(st):
