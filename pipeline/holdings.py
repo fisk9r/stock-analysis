@@ -58,20 +58,31 @@ def _norm_pos(it):
 
 
 def load_positions():
-    """-> [{code,name,cost,shares,date,note,watch}]，容错：缺字段自动补全。"""
+    """-> [{code,name,cost,shares,date,note,watch}]，容错：缺字段自动补全。
+
+    2026-09-01 优先级修正（修复 CI holdings 恒空的真 BUG）：此前环境变量
+    HOLDINGS_JSON 优先于 config/holdings.json 文件——但 CI build 的「写出访问
+    人员配置」步骤已把同一 Secret 写入文件，且 GitHub Actions 对已排队/进行中
+    workflow 捕获的 Secret 值可能滞后于最近一次 PUT 更新 → env 与文件不一致时
+    会读到旧的 env 值（缺 600500），导致 holdings.monitor 返回空、而按文件读取
+    的 watchlist.load_watch_codes 却正常（线上实证：watch 有 5 只含中化国际、
+    holdings 却 enabled:false）。改为「文件优先、env 兜底」——CI 下文件即 Secret
+    落地结果，是权威来源；env 兜底保留给本地未落盘文件的场景。
+    """
     raw = None
-    env = os.environ.get("HOLDINGS_JSON", "").strip()
-    if env:
-        try:
-            raw = json.loads(env)
-        except Exception as e:
-            print("[holdings] 环境变量 HOLDINGS_JSON 解析失败：%r" % e)
-    if raw is None and os.path.exists(CONF):
+    if os.path.exists(CONF):
         try:
             with open(CONF, "r", encoding="utf-8") as f:
                 raw = json.load(f)
         except Exception as e:
             print("[holdings] 读取 %s 失败：%r" % (CONF, e))
+    if raw is None:
+        env = os.environ.get("HOLDINGS_JSON", "").strip()
+        if env:
+            try:
+                raw = json.loads(env)
+            except Exception as e:
+                print("[holdings] 环境变量 HOLDINGS_JSON 解析失败：%r" % e)
     if not raw:
         return []
     items = raw.get("positions") if isinstance(raw, dict) else raw
