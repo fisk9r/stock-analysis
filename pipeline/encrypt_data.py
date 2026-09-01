@@ -168,8 +168,9 @@ def main():
         upayload = payload
         if _obj is not None and uid != "owner":
             try:
-                upayload = json.dumps(_personalize(_obj, uid),
-                                      ensure_ascii=False).encode("utf-8")
+                # separators 紧凑序列化：默认 ", "/": " 会让脱敏后的负载反而比原版大几十 KB
+                upayload = json.dumps(_personalize(_obj, uid), ensure_ascii=False,
+                                      separators=(",", ":")).encode("utf-8")
             except Exception as e:
                 sys.stderr.write("[encrypt] 用户 %s 脱敏失败（回退全量）：%r\n" % (uid, e))
                 upayload = payload
