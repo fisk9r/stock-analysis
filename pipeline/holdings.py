@@ -302,6 +302,15 @@ def diagnose(u, date, pos, fwd, code2boards=None):
         grade, action = "B", "持有观察"
         why = "结构尚可，留意%s" % ("、".join(risks[:2]) if risks else "量能变化")
 
+    # ---- 卖出分类（用户 09-01 需求）：止盈（浮盈离场）/ 割肉（浮亏止损）----
+    SELL_ACTIONS = ("止损离场", "止盈减仓", "减仓观察", "清仓", "清仓离场")
+    sell_kind = None
+    if action in SELL_ACTIONS and cost is not None and pnl_pct is not None:
+        # 以持仓成本为准：现价仍高于成本=落袋为安（止盈），否则=止损割肉。
+        sell_kind = "止盈" if pnl_pct >= 0 else "割肉"
+        if sell_kind == "割肉" and "割肉" not in why and "止损" not in why:
+            why = why + "（浮亏%.1f%%，建议止损割肉）" % pnl_pct
+
     d = {
         "code": code, "name": name, "ok": True, "watch": pos.get("watch"),
         "cost": cost, "shares": shares, "entry": pos.get("date"), "note": pos.get("note"),
@@ -321,6 +330,7 @@ def diagnose(u, date, pos, fwd, code2boards=None):
         "target": target, "target_pct": tgt_pct, "stop": stop, "stop_pct": stop_pct,
         "risks": risks, "plus": plus,
         "grade": grade, "action": action, "why": why,
+        "sell_kind": sell_kind,
     }
 
     # ---- 波段操作建议（回踩买/反弹卖/止损）：持仓给卖出建议，关注给买卖价 ----
@@ -519,7 +529,8 @@ def summary_lines(rep, limit=8):
         seg = "· %s %s %.2f(%+.2f%%)" % (d["code"], d["name"], d["price"], d["pct"])
         if d.get("pnl_pct") is not None:
             seg += " 浮盈%+.1f%%" % d["pnl_pct"]
-        seg += " ｜%s级·%s" % (d["grade"], d["action"])
+        seg += " ｜%s级·%s%s" % (d["grade"], d["action"],
+                              ("·" + d["sell_kind"]) if d.get("sell_kind") else "")
         if d.get("p_up1") is not None:
             seg += " ｜次日上涨%.0f%%(均%+.2f%%)" % (d["p_up1"] * 100, d["r1"])
         out.append(seg)
@@ -539,15 +550,19 @@ def summary_lines(rep, limit=8):
             detail.append("操作：%s" % d["sell_advice"])
         if detail:
             out.append("   " + "；".join(detail))
-        # 2026-09-01 用户需求：需要卖出的持仓 → 结合板块给更换标的 + 购买/卖出区间
+        # 2026-09-01 用户需求：需要卖出的持仓 → 给出买入建议（可连板票/可趋势票）
+        # + 同板块优先 + 买入区间/卖出区间 + 竞价纪律。
         for rp in (d.get("replace") or [])[:2]:
-            rseg = "   ↳ 换仓：%s %s（%s" % (
+            mt = rp.get("market_type") or ("连板" if (rp.get("streak") or 0) >= 1 else "趋势")
+            if mt == "连板":
+                mtag = "连板" + ("%d板" % rp["streak"] if rp.get("streak") else "票")
+            else:
+                mtag = "趋势票"
+            rseg = "   ↳ 买入建议（%s·%s）：%s %s" % (
                 "同板块" if rp.get("same_sector") else "全市场",
-                "%s %s" % (rp.get("name") or rp.get("code"), rp.get("industry") or ""),
-                rp.get("market_type") or "趋势")
-            if rp.get("streak"):
-                rseg += "%d板" % rp["streak"]
-            rseg += " · %s" % (rp.get("discipline") or "")
+                mtag,
+                rp.get("name") or rp.get("code"),
+                rp.get("industry") or "—")
             bz, sz = rp.get("buy_zone"), rp.get("sell_zone")
             if bz and bz[0]:
                 rseg += " ｜ 买%.2f~%.2f" % (bz[0], bz[1])
@@ -555,7 +570,8 @@ def summary_lines(rep, limit=8):
                 rseg += " 卖%.2f~%.2f" % (sz[0], sz[1])
             elif rp.get("stop"):
                 rseg += " 止损%.2f" % rp["stop"]
-            rseg += "）"
+            if rp.get("discipline"):
+                rseg += " ｜ %s" % rp["discipline"]
             out.append(rseg)
     if rep.get("alerts"):
         out.append("⚠ 评级变化：" + "；".join(rep["alerts"][:4]))

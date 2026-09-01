@@ -659,9 +659,20 @@ def summary_lines(zr):
         for x in rotates[:3]:
             rp = x.get("replace") or []
             if rp:
-                out.append("   ↳ %s 可换：%s" % (
-                    x["name"], "、".join(
-                        "%s(%.0f分)" % (s["name"], s["score"] or 0) for s in rp)))
+                parts = []
+                for s in rp:
+                    mt = s.get("market_type") or ("连板" if (s.get("streak") or 0) >= 1 else "趋势")
+                    mtag = "连板" + ("%d板" % s["streak"] if s.get("streak") else "票") if mt == "连板" else "趋势票"
+                    seg = "%s(%s·%s)" % (s.get("name") or s.get("code"), mtag, s.get("industry") or "—")
+                    bz, sz = s.get("buy_zone"), s.get("sell_zone")
+                    if bz and bz[0]:
+                        seg += " 买%.2f~%.2f" % (bz[0], bz[1])
+                    if sz and sz[0]:
+                        seg += " 卖%.2f~%.2f" % (sz[0], sz[1])
+                    elif s.get("stop"):
+                        seg += " 止损%.2f" % s["stop"]
+                    parts.append(seg)
+                out.append("   ↳ %s 买入建议：%s" % (x["name"], "；".join(parts)))
     if sells:
         out.append("🛑 破位卖出：" + "；".join(
             "%s 破 %.2f，止损 %.2f" % (tag(x), x["buy_zone"][0], x["stop"])

@@ -686,11 +686,12 @@
             E(z1.rotate) + (z1.rotate_reason ? '：' + E(z1.rotate_reason) : '') + '</div>';
           var rps = z1.replace || [];
           if (rps.length) {
-            rotHtml += '<div style="font-size:10px;margin-top:1px;color:' + C.muted + '">↳ 可换：' +
+            rotHtml += '<div style="font-size:10px;margin-top:1px;color:' + C.muted + '">↳ 买入建议：' +
               rps.map(function (s) {
                 /* 2026-09-01：候选带板块/连板高度/买卖区间（同板块优先） */
                 var _mt = s.market_type || ((s.streak || 0) >= 1 ? '连板' : '趋势');
-                var _lb = ' · ' + _mt + ((s.streak || 0) >= 1 ? (s.streak + '板') : '');
+                var _mtLabel = _mt === '连板' ? ('连板' + ((s.streak || 0) >= 1 ? (s.streak + '板') : '票')) : '趋势票';
+                var _lb = ' · ' + _mtLabel;
                 if (s.industry && s.industry !== '—') _lb += ' · ' + s.industry;
                 var _zn = '';
                 if (s.buy_zone && s.buy_zone[0] != null) _zn += ' 买' + f(s.buy_zone[0], 2) + '~' + f(s.buy_zone[1], 2);
@@ -3659,20 +3660,23 @@
         '<div style="margin:6px 0"><b style="color:var(--muted);font-size:12px">风险</b> ' + risks + '</div>' +
         (plus ? '<div style="margin:6px 0"><b style="color:var(--muted);font-size:12px">亮点</b> ' + plus + '</div>' : '') +
         ((d.signals && d.signals.length) ? '<div style="margin:6px 0"><b style="color:var(--muted);font-size:12px">信号</b> ' + d.signals.map(sigBadge).join(' ') + '</div>' : '') +
-        '<div class="note" style="margin-top:6px">动作：<b class="' + (actCls(d.action) || '') + '">' + E(d.action) + '</b> · ' + E(d.why || '') + '</div>' +
+        '<div class="note" style="margin-top:6px">动作：<b class="' + (actCls(d.action) || '') + '">' + E(d.action) + '</b>' +
+        (d.sell_kind ? ' <span class="bd" style="border-color:' + (d.sell_kind === '止盈' ? C.gold : C.down) + ';color:' + (d.sell_kind === '止盈' ? C.gold : C.down) + '">' + E(d.sell_kind) + '</span>' : '') +
+        ' · ' + E(d.why || '') + '</div>' +
         /* 2026-09-01 用户需求：需要卖出的持仓 → 结合板块给更换标的 + 购买/卖出区间 */
         ((d.action === '止损离场' || d.action === '止盈减仓' || d.action === '减仓观察') && d.replace && d.replace.length
           ? '<div style="margin:8px 0 2px;padding-top:6px;border-top:1px dashed var(--border)">' +
-            '<b style="color:var(--muted);font-size:12px">🔄 换仓建议' + (d.replace_sector && d.replace_sector !== '—' ? '（同「' + E(d.replace_sector) + '」板块优先）' : '') + '</b>' +
+            '<b style="color:var(--muted);font-size:12px">💡 买入建议（换仓）' + (d.replace_sector && d.replace_sector !== '—' ? '（同「' + E(d.replace_sector) + '」板块优先）' : '') + '</b>' +
             d.replace.map(function (rp) {
               var _mt = rp.market_type || ((rp.streak || 0) >= 1 ? '连板' : '趋势');
+              var _mtLabel = _mt === '连板' ? ('连板' + (rp.streak || '') + '板') : '趋势票';
               var _col = _mt === '连板' ? C.gold : C.up;
               var _zn = '';
               if (rp.buy_zone && rp.buy_zone[0] != null) _zn += '买 ' + f(rp.buy_zone[0]) + '~' + f(rp.buy_zone[1]);
               if (rp.sell_zone && rp.sell_zone[0] != null) _zn += (_zn ? ' / ' : '') + '卖 ' + f(rp.sell_zone[0]) + '~' + f(rp.sell_zone[1]);
               else if (rp.stop != null) _zn += (_zn ? ' / ' : '') + '止损 ' + f(rp.stop);
               return '<div style="font-size:12px;margin-top:4px"><span class="bd" style="border-color:' + _col + ';color:' + _col + ';padding:0 4px">' +
-                (_mt === '连板' ? _mt + (rp.streak || '') + '板' : _mt) + '</span> ' +
+                _mtLabel + '</span> ' +
                 stk(rp.code, rp.name) + (rp.industry && rp.industry !== '—' ? ' <span class="muted">' + E(rp.industry) + (rp.same_sector ? ' · 同板块' : '') + '</span>' : '') +
                 (_zn ? '<div class="muted" style="margin-top:1px">' + _zn + ' · ' + E(rp.discipline || '') + '</div>' : '') +
                 '</div>';
