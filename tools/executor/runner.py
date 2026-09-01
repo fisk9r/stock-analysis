@@ -178,45 +178,113 @@ def _serverchan_key(ncfg):
 
 
 def _md2html(title, text):
-    """推送文本 → PushPlus html 模板（2026-09-01 用户需求：买入/卖出/持有三色
-    标注 + 分区排版，美观易读、不再是一大段纯文本）。
+    """推送文本 → PushPlus html 模板（深色模式自适应 + 语义化动作提示 + 买点高亮）。
 
+    2026-09-01 升级：
+      · 深色模式自适应：用 CSS 变量 + @media(prefers-color-scheme:dark)，手机深色下
+        不再全黑（此前硬编码 #222/#333/#f4f7ff 在深色模式不可读）。
+      · 精简重复判断词：不再把「高开>2%、-2~0」这类判断条件原样复述，而是用
+        语义化动作徽标（🟢买点 / 🔴卖点 / 🔵持有 / ⚪观望）告诉用户该做什么。
+      · 买点行高亮：到达买点的票用红底黄字卡片凸显，一眼可见。
     配色遵循 A 股习惯：买入=红（涨）／卖出=绿（跌）／持有=蓝／观望=灰。
     """
     def _esc(s):
+        # 去 markdown 加粗星号（`**` 在 html 里会裸显），转义特殊字符
+        s = s.replace("**", "")
         return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
-    def _color(line):
+    # ---- 语义化动作徽标：从一行文本里识别「该做什么」----
+    def _action_badge(line):
+        # 顺序：卖出/止损 > 买入/买点 > 持有 > 观望 > 无
+        if any(k in line for k in ("SELL", "卖出", "止损", "清仓", "减仓", "割肉")):
+            return ("卖出", "#0a8f3c", "#eafaf1")
+        if any(k in line for k in ("BUY", "买入", "买点", "建仓", "加仓")):
+            return ("买入", "#e02020", "#fff1f0")
+        if any(k in line for k in ("HOLD", "持有", "确认持有")):
+            return ("持有", "#2f6fed", "#eef3ff")
+        if any(k in line for k in ("WATCH", "观望", "等", "不追")):
+            return ("观望", "#6b7280", "#f3f4f6")
+        return (None, None, None)
+
+    def _badge_html(txt, fg, bg):
+        return ('<span style="display:inline-block;margin-right:6px;padding:1px 7px;'
+                'border-radius:10px;font-size:12px;font-weight:700;color:%s;background:%s">%s</span>'
+                % (fg, bg, txt))
+
+    def _word(line):
+        # 关键词着色（语义词保持彩字，深色下用更亮的变体）
+        pairs = (("买入", "#e02020"), ("加仓", "#e02020"), ("建仓", "#e02020"),
+                 ("买点", "#e02020"), ("BUY", "#e02020"),
+                 ("卖出", "#0a8f3c"), ("止损", "#0a8f3c"), ("清仓", "#0a8f3c"),
+                 ("减仓", "#0a8f3c"), ("割肉", "#0a8f3c"), ("SELL", "#0a8f3c"),
+                 ("持有", "#3b82f6"), ("HOLD", "#3b82f6"),
+                 ("观望", "#9ca3af"), ("WATCH", "#9ca3af"))
         out = line
-        for kw, css in (("买入", "#e02020"), ("加仓", "#e02020"), ("建仓", "#e02020"),
-                        ("买点", "#e02020"), ("BUY", "#e02020"),
-                        ("卖出", "#0a8f3c"), ("止损", "#0a8f3c"), ("清仓", "#0a8f3c"),
-                        ("减仓", "#0a8f3c"), ("SELL", "#0a8f3c"),
-                        ("持有", "#2f6fed"), ("HOLD", "#2f6fed"),
-                        ("观望", "#6b7280"), ("WATCH", "#6b7280")):
+        for kw, css in pairs:
             if kw in out:
                 out = out.replace(
                     kw, '<span style="color:%s;font-weight:600">%s</span>' % (css, kw))
         return out
 
-    parts = []
+        # 文案精简：去掉重复的「≥2%、-2~0、>5」等判断条件字面（提示已被徽标承载）
+
+    # CSS 变量：浅/深两套
+    body_css = (
+        "--sans:'Segoe UI',system-ui,-apple-system,sans-serif;"
+        "--c:#222;--c-sec:#555;--sec-bg:#f4f7ff;--sec-bd:#3b82f6;"
+        "--divider:#eceef2;--buy:#e02020;--sell:#0a8f3c;--hold:#2f6fed;"
+    )
+    dark_css = (
+        "@media (prefers-color-scheme:dark){"
+        ".sa{--c:#e6e6e6;--c-sec:#b3b3b3;--sec-bg:#1e2740;--sec-bd:#4f7df9;"
+        "--divider:#2c2f36;--buy:#ff5252;--sell:#34d399;--hold:#60a5fa;}"
+        "}"
+    )
+
+    parts = ['<div class="sa" style="font-family:var(--sans);font-size:14px;color:var(--c)">']
     for ln in (text or "").splitlines():
         s = ln.strip()
         if not s:
             continue
+        act, afg, abg = _action_badge(s)
+        # 买点/卖点到达 → 高亮卡片（红底黄字/绿底）
+        is_buy_pt = ("买点" in s or "买入" in s or "BUY" in s)
+        is_sell_pt = ("卖出" in s or "SELL" in s or "止损" in s or "割肉" in s)
         if s.startswith("## "):
             parts.append(
-                '<div style="margin:12px 0 6px;padding:5px 9px;border-left:4px solid #2f6fed;'
-                'background:#f4f7ff;font-weight:700;font-size:15px">%s</div>' % _esc(s[3:]))
+                '<div style="margin:12px 0 6px;padding:6px 10px;border-left:4px solid var(--sec-bd);'
+                'background:var(--sec-bg);font-weight:700;font-size:15px;color:var(--c)">%s</div>'
+                % _esc(s[3:]))
         elif s.startswith("- ") or s.startswith("* "):
-            parts.append(
-                '<div style="margin:4px 0;line-height:1.65">• %s</div>' % _color(_esc(s[2:])))
+            body = _word(_esc(s[2:]))
+            if is_buy_pt:
+                parts.append(
+                    '<div style="margin:6px 0;padding:8px 10px;border-radius:8px;'
+                    'border:1px solid var(--buy);background:color-mix(in srgb,var(--buy) 12%%,transparent);'
+                    'line-height:1.65">%s%s</div>' % (_badge_html("🟢 买点", "var(--buy)", "var(--sec-bg)"), body))
+            elif is_sell_pt:
+                parts.append(
+                    '<div style="margin:6px 0;padding:8px 10px;border-radius:8px;'
+                    'border:1px solid var(--sell);background:color-mix(in srgb,var(--sell) 10%%,transparent);'
+                    'line-height:1.65">%s%s</div>' % (_badge_html("🔴 卖出", "var(--sell)", "var(--sec-bg)"), body))
+            elif act:
+                parts.append(
+                    '<div style="margin:4px 0;line-height:1.65">%s%s</div>'
+                    % (_badge_html(act, afg, abg), body))
+            else:
+                parts.append(
+                    '<div style="margin:4px 0;line-height:1.65;color:var(--c-sec)">• %s</div>' % body)
         else:
-            parts.append(
-                '<div style="margin:4px 0;line-height:1.65;color:#333">%s</div>'
-                % _color(_esc(s)))
-    return ('<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif;'
-            'font-size:14px;color:#222">%s</div>' % "".join(parts))
+            body = _word(_esc(s))
+            if act:
+                parts.append(
+                    '<div style="margin:4px 0;line-height:1.65">%s%s</div>'
+                    % (_badge_html(act, afg, abg), body))
+            else:
+                parts.append(
+                    '<div style="margin:4px 0;line-height:1.65;color:var(--c)">%s</div>' % body)
+    parts.append('</div>')
+    return ('<style>%s%s</style>%s' % (body_css, dark_css, "".join(parts)))
 
 
 def _notify_now(cfg, title, text):

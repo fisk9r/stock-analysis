@@ -275,34 +275,33 @@ def auction_gate(sig: dict, quote: dict) -> dict:
     if sig.get("market_type") == "trend":
         if gap <= -2:
             return dict(sig, verdict="ABORT", open_gap=round(gap, 2),
-                        reason="趋势票低开%.2f%%≤-2%%，趋势走弱，回避" % gap)
+                        reason="趋势走弱（低开%.2f%%），回避" % gap)
         if 0 <= gap <= 2:
             return dict(sig, verdict="BUY", open_gap=round(gap, 2),
-                        reason="趋势票平开微红%.2f%%（0~2%%）：趋势延续的合理买点，"
-                               "T级半仓（不追高开溢价：实证 st=0 高开2.2%%跟进次日-6.03%%）" % gap)
+                        reason="买点（平开微红%.2f%%）· 趋势延续，T级半仓" % gap)
         if gap > 2:
             return dict(sig, verdict="WATCH", open_gap=round(gap, 2),
-                        reason="趋势票高开%.2f%%>2%%：溢价偏贵，等 14:45 尾盘微红横盘确认再入" % gap)
+                        reason="高开%.2f%%偏贵 · 等 14:45 尾盘确认再入" % gap)
         return dict(sig, verdict="WATCH", open_gap=round(gap, 2),
-                    reason="趋势票微低开%.2f%%（-2~0），等盘中/尾盘确认方向" % gap)
+                    reason="微低开%.2f%% · 等方向确认" % gap)
     if (sig.get("streak") or 0) == 2:
         # 二板接力只认强确认（2-5% 弱高开是派发陷阱）
         if gap >= 5:
             return dict(sig, verdict="BUY", open_gap=round(gap, 2),
-                        reason="st=2强高开%.2f%%≥5%%（二板只认强确认：gap≥5%%胜率66.7%%/2-5%%仅14.3%%）" % gap)
+                        reason="买点（st=2强高开%.2f%%）· 二板强确认" % gap)
         if gap <= -2:
             return dict(sig, verdict="ABORT", open_gap=round(gap, 2),
-                        reason="st=2低开%.2f%%≤-2%%，弱势确认，回避" % gap)
+                        reason="st=2低开%.2f%%弱势，回避" % gap)
         return dict(sig, verdict="WATCH", open_gap=round(gap, 2),
-                    reason="st=2高开仅%.2f%%（<5%%），弱高开接二板历史胜率14%%，观望" % gap)
+                    reason="st=2弱高开%.2f%% · 接二板胜率低，观望" % gap)
     if gap >= 2:
         return dict(sig, verdict="BUY", open_gap=round(gap, 2),
-                    reason="高开%.2f%%≥2%%，强势确认（13个月回测胜率70%%+）" % gap)
+                    reason="买点（高开%.2f%%）· 强势确认" % gap)
     if gap <= -2:
         return dict(sig, verdict="ABORT", open_gap=round(gap, 2),
-                    reason="低开%.2f%%≤-2%%，弱势确认，回避（回测胜率仅26.5%%）" % gap)
+                    reason="低开%.2f%%弱势，回避" % gap)
     return dict(sig, verdict="WATCH", open_gap=round(gap, 2),
-                reason="平开%.2f%%，观望等方向" % gap)
+                reason="平开%.2f%% · 观望等方向" % gap)
 
 
 def late_gate(sig: dict, quote: dict) -> dict:
@@ -335,27 +334,24 @@ def late_gate(sig: dict, quote: dict) -> dict:
     if sig.get("market_type") == "trend":
         if fade is None or fade <= -3:
             return dict(base, verdict="ABORT",
-                        reason="趋势票尾盘较开盘%.2f%%走弱，不接（等趋势重新走平）" % fade)
+                        reason="尾盘走弱（较开盘%.2f%%），不接" % fade)
         if 0 <= fade <= 2:
             return dict(base, verdict="BUY",
-                        reason="趋势票尾盘微红%.2f%%横盘（不回补）：趋势延续确认，"
-                               "T级半仓介入（趋势票专用纪律）" % fade)
+                        reason="买点（尾盘微红%.2f%%横盘）· 趋势延续，T级半仓" % fade)
         return dict(base, verdict="WATCH",
-                    reason="趋势票尾盘较开盘%+.2f%%，形态未确认，观望" % fade)
+                    reason="尾盘较开盘%+.2f%% · 形态未确认，观望" % fade)
     min_gap = 5 if (sig.get("streak") or 0) == 2 else 2
     if gap < min_gap:
         return dict(base, verdict="ABORT",
-                    reason="开盘溢价%.2f%%<%d%%（st=%s门槛），尾盘通道只处理竞价纪律通过的票"
-                           % (gap, min_gap, sig.get("streak") or 0))
+                    reason="开盘溢价%.2f%%不足（st=%s需≥%d%%），非竞价纪律票" % (gap, sig.get("streak") or 0, min_gap))
     if fade <= -3:
         return dict(base, verdict="ABORT",
-                    reason="尾盘较开盘%.2f%%深亏，次日负期望（胜率44.9%%），不接飞刀" % fade)
+                    reason="尾盘深亏（较开盘%.2f%%）· 不接飞刀" % fade)
     if 0 <= fade <= 2:
         return dict(base, verdict="BUY",
-                    reason="高开%.2f%%+尾盘微红%.2f%%横盘不回补：最强过夜形态（62.9%%/+3.01%%，14个月全正）"
-                           % (gap, fade))
+                    reason="买点（高开%.2f%%+尾盘微红%.2f%%横盘）· 最强过夜形态" % (gap, fade))
     if fade > 5:
         return dict(base, verdict="WATCH",
-                    reason="尾盘较开盘+%.2f%%强拉，隔夜溢价透支（次日仅+0.62%%），不追" % fade)
+                    reason="尾盘强拉+%.2f%% · 溢价透支，不追" % fade)
     return dict(base, verdict="WATCH",
-                reason="尾盘较开盘%+.2f%%，形态中性观望" % fade)
+                reason="尾盘较开盘%+.2f%% · 中性观望" % fade)
