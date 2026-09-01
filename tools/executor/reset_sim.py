@@ -27,6 +27,16 @@ tok = gh_api._token()
 ctx = ssl._create_unverified_context()
 EXEC_STATE = "executor_state.tar.gz"
 
+# 与 runner.py 的 _EXEC_STATE_MEMBERS 保持一致（状态包成员清单）
+_EXEC_STATE_MEMBERS = [
+    "sim.db", "sim.db-wal", "sim.db-shm",
+    "risk_state.json",
+    "state/notify_dedup.json", "state/loss_streak.json",
+    "sim_review.json",
+    "state/auction_watch.json",
+    "state/task_ledger.json",
+]
+
 
 def _dl_asset(asset_id):
     req = urllib.request.Request(
@@ -106,21 +116,25 @@ def main():
         with open(ls, "w", encoding="utf-8") as f:
             json.dump({}, f)
 
-    # 7. 重新打包
+    # 7. 重新打包（2026-09-01 修复：此前第一个 for 已打包了 sim.db/sim_review/
+    #    task_ledger，第二个 for 又加一遍 → 同名成员重复。改为统一清单去重后一次打包）
+    want = set(_EXEC_STATE_MEMBERS)
     out = os.path.join(tmp_root, EXEC_STATE)
     with tarfile.open(out, "w:gz") as tf2:
+        added = set()
         for m in members:
-            if m.name in ("risk_state.json", "state/loss_streak.json"):
-                continue  # 已重建
+            if m.name not in want:
+                continue
             p = os.path.join(tmp_root, m.name)
-            if os.path.exists(p):
+            if os.path.exists(p) and m.name not in added:
                 tf2.add(p, arcname=m.name)
-        # 追加重建/新增的
-        for name in ("sim.db", "sim_review.json", "state/task_ledger.json",
-                     "risk_state.json", "state/loss_streak.json"):
+                added.add(m.name)
+        # 重建/新增的（可能不在原 members 里）
+        for name in sorted(want):
             p = os.path.join(tmp_root, name)
-            if os.path.exists(p):
+            if os.path.exists(p) and name not in added:
                 tf2.add(p, arcname=name)
+                added.add(name)
     print("重打包完成，新状态包成员:")
     with tarfile.open(out, "r:gz") as tv:
         for m in tv.getmembers():
