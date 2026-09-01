@@ -1300,7 +1300,11 @@ def run(date_override=None, dedup_close=False):
 
     # ---- 持股监测：预测未来 + 持续跟踪（无持仓配置则为空）----
     try:
-        data["holdings"] = holdings.monitor(u, date, con, code2boards)
+        # 2026-09-01 修复（致命）：此前 `holdings.monitor(u, date, con, code2boards)`
+        # 把 code2boards 当成第 4 个位置参数传给 positions → positions 变成 dict，
+        # _norm_pos 迭代 dict 得 code 字符串 → 全被过滤 → 恒返回空 → 持股监测永远
+        # enabled:false（600500 中化国际 7.18 购入价从不显示/推送）。改为关键字传参。
+        data["holdings"] = holdings.monitor(u, date, con, code2boards=code2boards)
         hrep = data["holdings"]
         if hrep and hrep.get("items"):
             log("  持股监测 %d 只，预警 %d 条" % (len(hrep["items"]), len(hrep.get("alerts") or [])))
