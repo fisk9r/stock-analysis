@@ -329,11 +329,16 @@ def send_wechat_serverchan(cfg, title, text):
 
 
 def md2html(title, text):
-    """推送文本 → HTML（2026-09-01 用户需求：买入/卖出/持有三色标注 + 分区排版）。
+    """推送文本 → HTML（2026-09-01 深色模式自适应 + 语义化动作徽标 + 买点高亮）。
 
-    此前 PushPlus 走 markdown 模板，纯文本一大段、关键动作不醒目。现在做真正的
-    markdown→HTML 转换后再用 html 模板：分区标题带色条、列表分行、动作关键字
+    此前 PushPlus 走 markdown 模板，纯文本一大段、关键动作不醒目。做真正的
+    markdown→HTML 转换后走 html 模板：分区标题带色条、列表分行、动作关键字
     上色（A 股习惯：买入=红／卖出=绿／持有=蓝／观望=灰），买点/重点行高亮。
+
+    2026-09-01 升级（用户反馈「黑乎乎看不见」）：
+      · 深色模式自适应：CSS 变量 + @media(prefers-color-scheme:dark)——此前硬编码
+        #222/#333/#f4f7ff/#fafafa 在手机深色模式下不可读。
+      · 语义化动作徽标：每行识别 🟢买点/🔴卖出/🔵持有/⚪观望，买点/卖点行用高亮卡片。
     """
     def _esc(s):
         return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
@@ -342,51 +347,118 @@ def md2html(title, text):
         import re as _re
         return _re.sub(r"\*\*(.+?)\*\*", r'<strong>\1</strong>', s)
 
+    def _action_badge(line):
+        if any(k in line for k in ("SELL", "卖出", "止损", "清仓", "减仓", "割肉")):
+            return ("卖出", "var(--sell)", "var(--sec-bg)")
+        if any(k in line for k in ("BUY", "买入", "买点", "建仓", "加仓")):
+            return ("买入", "var(--buy)", "var(--sec-bg)")
+        if any(k in line for k in ("HOLD", "持有", "确认持有")):
+            return ("持有", "var(--hold)", "var(--sec-bg)")
+        if any(k in line for k in ("WATCH", "观望", "等", "不追")):
+            return ("观望", "var(--mute)", "var(--sec-bg)")
+        return (None, None, None)
+
+    def _badge_html(txt, fg, bg):
+        return ('<span style="display:inline-block;margin-right:6px;padding:1px 7px;'
+                'border-radius:10px;font-size:12px;font-weight:700;color:%s;background:%s">%s</span>'
+                % (fg, bg, txt))
+
     def _color(line):
         out = line
-        for kw, css in (("买入", "#e02020"), ("加仓", "#e02020"), ("建仓", "#e02020"),
-                        ("买点", "#e02020"), ("BUY", "#e02020"),
-                        ("卖出", "#0a8f3c"), ("止损", "#0a8f3c"), ("清仓", "#0a8f3c"),
-                        ("减仓", "#0a8f3c"), ("SELL", "#0a8f3c"),
-                        ("持有", "#2f6fed"), ("HOLD", "#2f6fed"),
-                        ("观望", "#6b7280"), ("WATCH", "#6b7280")):
+        for kw, css in (("买入", "var(--buy)"), ("加仓", "var(--buy)"), ("建仓", "var(--buy)"),
+                        ("买点", "var(--buy)"), ("BUY", "var(--buy)"),
+                        ("卖出", "var(--sell)"), ("止损", "var(--sell)"), ("清仓", "var(--sell)"),
+                        ("减仓", "var(--sell)"), ("割肉", "var(--sell)"), ("SELL", "var(--sell)"),
+                        ("持有", "var(--hold)"), ("HOLD", "var(--hold)"),
+                        ("观望", "var(--mute)"), ("WATCH", "var(--mute)")):
             if kw in out:
                 out = out.replace(
                     kw, '<span style="color:%s;font-weight:600">%s</span>' % (css, kw))
         return out
+
+    body_css = (
+        "--sans:'Segoe UI',system-ui,-apple-system,sans-serif;"
+        "--c:#222;--c-sec:#555;--sec-bg:#f4f7ff;--sec-bd:#2f6fed;"
+        "--divider:#eceef2;--buy:#e02020;--sell:#0a8f3c;--hold:#2f6fed;--mute:#6b7280;"
+        "--hi-bg:#fff8e6;--quote-bg:#fafafa;--quote-bd:#d0d0d0;"
+    )
+    dark_css = (
+        "@media (prefers-color-scheme:dark){"
+        ".p{--c:#e6e6e6;--c-sec:#b3b3b3;--sec-bg:#1e2740;--sec-bd:#4f7df9;"
+        "--divider:#2c2f36;--buy:#ff5252;--sell:#34d399;--hold:#60a5fa;--mute:#9ca3af;"
+        "--hi-bg:#3a2f10;--quote-bg:#23262c;--quote-bd:#3a3f46;}"
+        "}")
 
     parts = []
     for ln in (text or "").splitlines():
         s = ln.strip()
         if not s:
             continue
+        act, afg, abg = _action_badge(s)
+        is_buy_pt = ("买点" in s or "买入" in s or "BUY" in s)
+        is_sell_pt = ("卖出" in s or "SELL" in s or "止损" in s or "割肉" in s)
+        hi = ("买点" in s or "重点" in s or "到价" in s)
         if s.startswith("## "):
             parts.append(
-                '<div style="margin:12px 0 6px;padding:5px 9px;border-left:4px solid #2f6fed;'
-                'background:#f4f7ff;font-weight:700;font-size:15px">%s</div>' % _esc(s[3:]))
+                '<div style="margin:12px 0 6px;padding:5px 9px;border-left:4px solid var(--sec-bd);'
+                'background:var(--sec-bg);font-weight:700;font-size:15px;color:var(--c)">%s</div>'
+                % _esc(s[3:]))
         elif s.startswith("> "):
             parts.append(
-                '<div style="margin:6px 0;padding:4px 8px;background:#fafafa;'
-                'border-left:3px solid #d0d0d0;color:#666">%s</div>'
+                '<div style="margin:6px 0;padding:4px 8px;background:var(--quote-bg);'
+                'border-left:3px solid var(--quote-bd);color:var(--c-sec)">%s</div>'
                 % _color(_bold(_esc(s[2:]))))
         elif s.startswith("- ") or s.startswith("* "):
-            hi = ("买点" in s or "重点" in s or "到价" in s)
-            bg = 'background:#fff8e6;' if hi else ''
-            parts.append(
-                '<div style="margin:3px 0;line-height:1.65;%s">• %s</div>'
-                % (bg, _color(_bold(_esc(s[2:])))))
+            body = _color(_bold(_esc(s[2:])))
+            if is_buy_pt:
+                parts.append(
+                    '<div style="margin:6px 0;padding:8px 10px;border-radius:8px;'
+                    'border:1px solid var(--buy);background:color-mix(in srgb,var(--buy) 12%%,transparent);'
+                    'line-height:1.65">%s%s</div>' % (_badge_html("🟢 买点", "var(--buy)", "var(--sec-bg)"), body))
+            elif is_sell_pt:
+                parts.append(
+                    '<div style="margin:6px 0;padding:8px 10px;border-radius:8px;'
+                    'border:1px solid var(--sell);background:color-mix(in srgb,var(--sell) 10%%,transparent);'
+                    'line-height:1.65">%s%s</div>' % (_badge_html("🔴 卖出", "var(--sell)", "var(--sec-bg)"), body))
+            elif hi:
+                parts.append(
+                    '<div style="margin:3px 0;line-height:1.65;background:var(--hi-bg);'
+                    'padding:3px 6px;border-radius:6px">• %s</div>' % body)
+            elif act:
+                parts.append(
+                    '<div style="margin:3px 0;line-height:1.65">%s%s</div>'
+                    % (_badge_html(act, afg, abg), body))
+            else:
+                parts.append(
+                    '<div style="margin:3px 0;line-height:1.65;color:var(--c)">• %s</div>' % body)
         elif s.startswith("|"):
             parts.append(
-                '<div style="font-family:monospace;font-size:12px;color:#444;'
+                '<div style="font-family:monospace;font-size:12px;color:var(--c-sec);'
                 'white-space:pre-wrap">%s</div>' % _esc(s))
         elif set(s) <= set("-—= "):
-            parts.append('<hr style="border:none;border-top:1px solid #eee;margin:10px 0">')
+            parts.append('<hr style="border:none;border-top:1px solid var(--divider);margin:10px 0">')
         else:
-            parts.append(
-                '<div style="margin:4px 0;line-height:1.65;color:#333">%s</div>'
-                % _color(_bold(_esc(s))))
-    return ('<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif;'
-            'font-size:14px;color:#222">%s</div>' % "".join(parts))
+            body = _color(_bold(_esc(s)))
+            if is_buy_pt:
+                parts.append(
+                    '<div style="margin:6px 0;padding:8px 10px;border-radius:8px;'
+                    'border:1px solid var(--buy);background:color-mix(in srgb,var(--buy) 12%%,transparent);'
+                    'line-height:1.65">%s%s</div>' % (_badge_html("🟢 买点", "var(--buy)", "var(--sec-bg)"), body))
+            elif is_sell_pt:
+                parts.append(
+                    '<div style="margin:6px 0;padding:8px 10px;border-radius:8px;'
+                    'border:1px solid var(--sell);background:color-mix(in srgb,var(--sell) 10%%,transparent);'
+                    'line-height:1.65">%s%s</div>' % (_badge_html("🔴 卖出", "var(--sell)", "var(--sec-bg)"), body))
+            elif act:
+                parts.append(
+                    '<div style="margin:4px 0;line-height:1.65">%s%s</div>'
+                    % (_badge_html(act, afg, abg), body))
+            else:
+                parts.append(
+                    '<div style="margin:4px 0;line-height:1.65;color:var(--c)">%s</div>' % body)
+    return ('<style>%s%s</style>'
+            '<div class="p" style="font-family:var(--sans);font-size:14px;color:var(--c)">%s</div>'
+            % (body_css, dark_css, "".join(parts)))
 
 
 def send_wechat_pushplus(cfg, title, text):
