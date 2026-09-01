@@ -2171,6 +2171,24 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     except Exception:
         pass
 
+    try:
+        # 7) 运维告警（2026-09-01 升级 #16）：仅异常时提示，避免刷屏
+        _ops = data.get("ops") or {}
+        _notes = _ops.get("notes") or []
+        if _notes:
+            _ops_rows = []
+            if _ops.get("data_age_days") is not None:
+                _ops_rows.append("行情库数据年龄 %d 日" % _ops["data_age_days"])
+            if _ops.get("fetch_success_rate") is not None:
+                _ops_rows.append("抓取成功率 %.0f%%（%d/%d 池）"
+                                 % (_ops["fetch_success_rate"], _ops["fetch_pool_ok"],
+                                    _ops["fetch_pool_total"]))
+            for _n in _notes:
+                _ops_rows.append("⚠ %s" % _n)
+            _sec("🛠 运维告警", _ops_rows)
+    except Exception:
+        pass
+
     # 数据完整性体检（仅异常时告警，健康时静默，避免刷屏）
     ig = data.get("integrity")
     if ig and not ig.get("ok") and (ig.get("warnings") or ig.get("scale_anomalies")):

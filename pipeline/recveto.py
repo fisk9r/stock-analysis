@@ -77,6 +77,77 @@ def is_warn(verdict):
     return bool(verdict) and str(verdict).startswith("WARN")
 
 
+# ---------------------------------------------------------------------------
+# 阈值滚动回测自校准（2026-09-01 升级 #10）
+# 原本 VETO_PB/HARD_VETO_PB/SHRINK_RATIO/LOW_OPEN 是 2026-08 一次性回测定值，
+# 市场风格漂移后易失真。新增「滚动回测自动建议」：用 rec_picks 近 N 笔实时统计，
+# 给出随数据漂移自适应的阈值建议；默认仅记录建议、不改行为，设环境变量
+# RECVETO_AUTO_CALIB=1 时才自动覆盖（兼顾「历史回测背书」与「数据漂移自适应」）。
+# ---------------------------------------------------------------------------
+def suggest_thresholds(con, recent_n=120):
+    """基于 rec_picks 滚动回测，自动建议四组阈值。
+
+    方法：按 p_break 每 5 分桶统计 T+1 收红率，找到胜率跌破 50% 的临界 p_break 作
+    VETO_PB，再下探到胜率跌破 35% 的临界作 HARD_VETO_PB；缩量比取「收红子集」中
+    day_vol_ratio 上界；低开门限取「亏损子集」中 open_pct 上界。
+    样本不足(<30)或不可用时返回 None（调用方维持硬编码默认值，行为不变）。"""
+    if con is None:
+        return None
+    try:
+        rows = con.execute(
+            "SELECT p_break, next_pct, day_vol_ratio, open_pct FROM rec_picks "
+            "WHERE next_pct IS NOT NULL "
+            # 与 historical_stats 同口径：排除趋势/动量通道，避免稀释连板池阈值
+            "AND (tag IS NULL OR (tag NOT LIKE '趋势%' AND tag NOT LIKE '动量%')) "
+            "ORDER BY date DESC LIMIT ?", (recent_n,)).fetchall()
+    except Exception:
+        return None
+    if len(rows) < 30:
+        return None
+    buckets = {}
+    for r in rows:
+        pb = r[0]
+        if pb is None:
+            continue
+        b = int(pb // 5) * 5
+        buckets.setdefault(b, []).append(r)
+    veto_pb = None
+    hard_pb = None
+    for b in sorted(buckets):
+        sub = buckets[b]
+        wr = sum(1 for x in sub if (x[1] or 0) > 0) / len(sub)
+        if veto_pb is None and wr < 0.50:
+            veto_pb = b
+        if hard_pb is None and wr < 0.35:
+            hard_pb = b
+    safe = [x[2] for x in rows if (x[1] or 0) > 0 and x[2] is not None and x[2] > 0]
+    shrink = round(max(safe), 2) if safe else SHRINK_RATIO
+    low = [x[3] for x in rows if (x[1] or 0) <= 0 and x[3] is not None]
+    low_open = round(max(low), 3) if low else LOW_OPEN
+    return {
+        "veto_pb": int(veto_pb) if veto_pb is not None else VETO_PB,
+        "hard_veto_pb": int(hard_pb) if hard_pb is not None else HARD_VETO_PB,
+        "shrink_ratio": shrink, "low_open": low_open, "n": len(rows),
+    }
+
+
+def auto_calibrate(con):
+    """用滚动回测建议值覆盖模块级阈值（仅当 RECVETO_AUTO_CALIB=1 由 build 调用）。
+    默认不调用 → 维持硬编码回测默认值，行为不变。返回应用后的建议或 None。"""
+    s = suggest_thresholds(con)
+    if not s:
+        return None
+    global VETO_PB, HARD_VETO_PB, SHRINK_RATIO, LOW_OPEN
+    VETO_PB, HARD_VETO_PB = s["veto_pb"], s["hard_veto_pb"]
+    SHRINK_RATIO, LOW_OPEN = s["shrink_ratio"], s["low_open"]
+    return s
+
+
+def current_thresholds():
+    return {"veto_pb": VETO_PB, "hard_veto_pb": HARD_VETO_PB,
+            "shrink_ratio": SHRINK_RATIO, "low_open": LOW_OPEN}
+
+
 def calibrate_score(score, pb):
     """打分校准 V2：p_break 高分位贡献已被证伪，压高分、抬低分位。
 

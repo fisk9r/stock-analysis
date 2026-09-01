@@ -249,8 +249,30 @@ def run(force_boards=False, skip_bars=False, skip_boards=False):
             refresh_boards(con, force=force_boards)
         except Exception as e:
             log("板块映射刷新失败（不影响主流程，将使用涨停池自带行业字段降级）：%r" % e)
-    save_archive(snapshot_today())
+    snap = snapshot_today()
+    # 抓取成功率统计（2026-09-01 升级 #16，运维告警数据源）：6 个核心行情池
+    # (zt/zb/qs/dt/index/fundflow) 成功抓取数 / 总数，写入 fetch_stats.json 供 build 读取。
     dates = store.trade_dates(con)
+    _today = _bj_now().strftime("%Y-%m-%d")
+    try:
+        _cal = trade_calendar()
+        _is_td = bool(_cal and _today in _cal)
+    except Exception:
+        _is_td = None
+    _pool_ok = sum(1 for k in ("zt", "zb", "qs", "dt", "index", "fundflow") if snap.get(k))
+    _pool_total = 6
+    _fs = {"date": _today,
+           "fetched_at": snap.get("fetched_at"),
+           "is_trading_day": _is_td,
+           "pool_ok": _pool_ok, "pool_total": _pool_total,
+           "stocks": len(stocks),
+           "bar_last": dates[-1] if dates else None}
+    try:
+        with open(os.path.join(ROOT, "fetch_stats.json"), "w", encoding="utf-8") as f:
+            json.dump(_fs, f, ensure_ascii=False)
+    except Exception:
+        pass
+    save_archive(snap)
     log("行情库：%d 只个股 / %d 个交易日（%s ~ %s）"
         % (con.execute("SELECT COUNT(DISTINCT code) FROM bars").fetchone()[0],
            len(dates), dates[0] if dates else "-", dates[-1] if dates else "-"))

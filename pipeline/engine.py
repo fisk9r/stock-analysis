@@ -2224,21 +2224,29 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
             relay.append(it)
         elif st == 1 and tier_ok(it):
             it["tag"] = "低位潜伏"
-            # ── 首板 p_break 校准（2026-08-29 回测确诊：540 条 rec_picks）──
+            # ── 首板 p_break 分桶降权（2026-08-29 回测确诊：540 条 rec_picks）──
             # 低位潜伏整体收红率仅 28.8%，细分后真凶是 p_break≥78 的首板：
-            #   p_break<70: 14条 胜率78.6% 均值+3.97%（真金）
-            #   70~78:      21条 57.1% +1.51%
-            #   ≥78:        103条 ~37% ≈0（大样本亏损源）
-            # 标注式处理（与 recveto V1 同思路）：不一刀切拦掉，降权 8% + 警示标，
-            # 排序自然靠后，仍保留挖掘首板次日买点的能力。
-            if pb >= 78 and not it.get("risk_flag"):
-                it["risk_flag"] = "⚠"
-                it.setdefault("risks", [])
-                _pb_risk = "首板断板概率 %.0f%% 偏高，历史胜率 ~37%%，仅轻仓试错" % pb
-                if _pb_risk not in it["risks"]:
-                    it["risks"] = ([_pb_risk] + it["risks"])[:3]
-                it["score"] = round(sc * 0.92, 1)
-                sc = it["score"]
+            #   p_break<70: 14条 胜率78.6% 均值+3.97%（真金，不降权）
+            #   70~78:      21条 57.1% +1.51%（中等，降权 5%）
+            #   ≥78:        103条 ~37% ≈0（大样本亏损源，降权 8% + 警示标）
+            # 按桶施加递减权重（与 recveto V1 标注式同思路）：不一刀切拦掉，排序自然
+            # 靠后，仍保留挖掘首板次日买点的能力；recveto 已标 WARN 的不再二次降权。
+            it.setdefault("risks", [])
+            if not it.get("risk_flag"):
+                if pb >= 78:
+                    it["risk_flag"] = "⚠"
+                    _pb_risk = "首板断板概率 %.0f%% 偏高，历史胜率 ~37%%，仅轻仓试错" % pb
+                    if _pb_risk not in it["risks"]:
+                        it["risks"] = ([_pb_risk] + it["risks"])[:3]
+                    it["score"] = round(sc * 0.88, 1)
+                    sc = it["score"]
+                elif pb >= 70:
+                    it["risk_flag"] = "⚠"
+                    _pb_risk = "首板断板概率 %.0f%% 中等，历史胜率 ~57%%，控制仓位" % pb
+                    if _pb_risk not in it["risks"]:
+                        it["risks"] = ([_pb_risk] + it["risks"])[:3]
+                    it["score"] = round(sc * 0.95, 1)
+                    sc = it["score"]
             ambush.append(it)
         elif sc >= 40:
             # 首板但无明确板块合力：仍纳入接力候选，避免推荐板块整体为空
@@ -3141,6 +3149,15 @@ def screen_momentum(u, date, code2boards=None, topn=12):
         vol_ratio = (last["v"] / vol20) if vol20 else 1
         recency = last_lu_back(code)  # 0=当日(已排除), 1=昨日...
         momentum_pct = (price / ma20 - 1) * 100
+        # ---- 量能门槛（2026-09-01 升级 #9）：余波/强动量须有真实量能承接 ----
+        # 量能枯竭(vol_ratio<0.5)说明资金已撤、参与度坍塌；爆量(vol_ratio>8)多为
+        # 见顶派发——二者均不接。此前仅用于打分加减分，本次升级为硬门槛。
+        if vol_ratio < 0.5 or vol_ratio > 8:
+            continue
+        # ---- 余波新鲜度门槛：连板基因须近期（近 12 日窗口内）----
+        # recency 由基因门槛已天然约束在 ≤11，此处仅作显式护栏，防止异常数据穿透。
+        if recency > 12:
+            continue
         # ---- 评分（连板基因权重最高，其次余波新鲜度与回撤控制）----
         sc = 0.0
         sc += min(lstreak, 4) / 4.0 * 30          # 最高连板数（连板基因核心）

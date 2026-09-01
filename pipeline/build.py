@@ -43,6 +43,7 @@ import signals
 import chanlun
 import signal_backtest
 import zones
+import recveto
 
 ROOT = store.ROOT
 DIST = os.path.join(ROOT, "dist")
@@ -102,6 +103,58 @@ def pick_date(u, override=None):
     if last == today and now < "1505":
         return u.dates[-2] if len(u.dates) >= 2 else last
     return last
+
+
+def data_freshness_guard(u, bj_now, is_trading_day=None):
+    """数据新鲜度护栏（2026-09-01 升级 #15）：构建前校验行情库最新日期是否落后。
+
+    逻辑：
+      · 今日是交易日且已过 15:10（收盘落定）→ 数据必须已更新到今日，否则疑似
+        fetch 失败，触发护栏终止构建，避免发布过期分析（过期推荐/归因会误导次日操作）。
+        is_trading_day 优先用 fetch.py 写入 fetch_stats.json 的权威日历判定；
+        缺失时回退到「今日 ∈ u.dates」启发式。
+      · 非交易日（含周末/节假日）→ 数据停留在上一交易日属正常，不拦。
+      · 数据落后于「不晚于今日的最近交易日」超过 1 日 → 异常，终止。
+    返回行情库最新日期（用于上层计算数据年龄）。"""
+    if not u.dates:
+        raise RuntimeError("行情库为空，请先运行 fetch.py")
+    today = bj_now.strftime("%Y-%m-%d")
+    last = u.dates[-1]
+    expected_list = [d for d in u.dates if d <= today]
+    expected = max(expected_list) if expected_list else None
+    if expected is None:
+        # 今日早于全部数据（极早或库过旧）→ 交 pick_date 处理，不在此拦
+        return last
+    hm = bj_now.strftime("%H%M")
+    if is_trading_day is None:
+        is_trading_day = today in u.dates
+    if is_trading_day and hm >= "1510":
+        if last != today:
+            raise RuntimeError(
+                "数据新鲜度护栏触发：今日(%s)为交易日且已过 15:10，但行情库最新日期=%s，"
+                "疑似 fetch 抓取失败/数据滞后，终止构建以避免发布过期分析" % (today, last))
+    elif last < expected:
+        try:
+            gap = (datetime.date(*map(int, expected.split("-")))
+                   - datetime.date(*map(int, last.split("-")))).days
+        except Exception:
+            gap = 1
+        if gap >= 1:
+            raise RuntimeError(
+                "数据新鲜度护栏触发：行情库最新=%s，落后期望最近交易日=%s（%d 日），"
+                "疑似 fetch 抓取失败" % (last, expected, gap))
+    return last
+
+
+def data_age_days(u, bj_now):
+    """行情库最新日期距今日历天数（运维告警用）。"""
+    if not u.dates:
+        return None
+    last = u.dates[-1]
+    try:
+        return (bj_now.date() - datetime.date(*map(int, last.split("-")))).days
+    except Exception:
+        return None
 
 
 def load_snapshot(date):
@@ -319,6 +372,34 @@ def run(date_override=None, dedup_close=False):
     log("载入行情库 ...")
     u = engine.Universe(con, days=270)
     log("覆盖 %d 只个股 / %d 个交易日" % (len(u.bars), len(u.dates)))
+    # 数据新鲜度护栏（#15）：交易日后数据仍陈旧 → 终止构建，避免发布过期分析
+    _bj = _bj_now()
+    _is_td = None
+    _fs_path = os.path.join(ROOT, "fetch_stats.json")
+    if os.path.exists(_fs_path):
+        try:
+            with open(_fs_path, encoding="utf-8") as f:
+                _is_td = json.load(f).get("is_trading_day")
+        except Exception:
+            _is_td = None
+    try:
+        data_freshness_guard(u, _bj, is_trading_day=_is_td)
+    except RuntimeError as e:
+        log("  ⛔ %s" % e)
+        raise
+    # 数据年龄（运维告警用，#16）
+    _data_age = data_age_days(u, _bj) or 0
+    # recveto 阈值滚动回测自校准（#10）：默认仅记录建议不改行为；
+    # 设环境变量 RECVETO_AUTO_CALIB=1 才自动覆盖
+    try:
+        _sugg = recveto.suggest_thresholds(con)
+        if _sugg:
+            log("  recveto 阈值自校准建议：%s（当前 %s）" % (_sugg, recveto.current_thresholds()))
+            if os.environ.get("RECVETO_AUTO_CALIB") == "1":
+                recveto.auto_calibrate(con)
+                log("  recveto 阈值已按滚动回测自动覆盖：%s" % recveto.current_thresholds())
+    except Exception as e:
+        log("  recveto 自校准跳过（不影响主流程）：%r" % e)
     date = pick_date(u, date_override)
     prev = u.prev_date(date)
     snap, same_day = load_snapshot(date)
@@ -1571,6 +1652,38 @@ def run(date_override=None, dedup_close=False):
         except Exception as e:
             log("  备用模型叙事失败，保留模板叙事：%r" % e)
     data["meta"]["build_seconds"] = round(time.time() - t0, 1)
+
+    # 运维告警数据（2026-09-01 升级 #16）：数据年龄 + 抓取成功率，供推送「运维告警」段。
+    try:
+        _ops = {"data_age_days": _data_age, "fresh": True,
+                "fetch_success_rate": None, "fetch_pool_ok": None,
+                "fetch_pool_total": None, "notes": []}
+        _fc = os.path.join(ROOT, "fetch_stats.json")
+        if os.path.exists(_fc):
+            try:
+                with open(_fc, encoding="utf-8") as f:
+                    _fs = json.load(f)
+                _ok, _tot = _fs.get("pool_ok"), _fs.get("pool_total")
+                if _ok is not None and _tot:
+                    _ops["fetch_pool_ok"] = _ok
+                    _ops["fetch_pool_total"] = _tot
+                    _ops["fetch_success_rate"] = round(_ok / _tot * 100, 1)
+            except Exception:
+                pass
+        if (_data_age and _data_age >= 1 and date in u.dates
+                and _bj.strftime("%H%M") >= "1510"):
+            _ops["fresh"] = False
+            _ops["notes"].append("行情库最新落后 %d 日（护栏放行=非交易时段或容差内）" % _data_age)
+        if _ops["fetch_success_rate"] is not None and _ops["fetch_success_rate"] < 80:
+            _ops["notes"].append("抓取成功率 %.0f%% 偏低（成功 %d/%d 池）"
+                                 % (_ops["fetch_success_rate"], _ops["fetch_pool_ok"],
+                                    _ops["fetch_pool_total"]))
+        if _ops["notes"]:
+            log("  ⚠ 运维告警：%s" % "；".join(_ops["notes"]))
+        data["ops"] = _ops
+        data["meta"]["data_age_days"] = _data_age
+    except Exception as e:
+        log("  运维告警数据生成跳过：%r" % e)
 
     # 买点候选结构化数据（趋势加速优先）：注入 data 后自动进加密 bin + 本地 data.js，
     # 供前端原生渲染 viewBuypoint 与【推送】复用。失败不影响主流程（已兜底）。
