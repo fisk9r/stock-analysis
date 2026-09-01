@@ -933,28 +933,17 @@ def run_tailgate(broker, mode, cfg):
                          % (p.get("name"), p["code"], dec["reason"]))
             continue
         if dec["verdict"] == "SELL":
-            cs = strategy.can_sell(q, p["code"])
-            if not cs["ok"]:
-                _log("尾盘止损被拒 %s：%s" % (p["code"], cs["reason"]))
-                if hasattr(broker, "record_decision"):
-                    broker.record_decision(p["code"], "HOLD",
-                                           "尾盘拟止损被拒顺延：%s" % cs["reason"],
-                                           p.get("name") or "", dec["price"] or 0)
-                lines.append("- ⛔ 尾盘止损被拒 %s(%s)：%s" % (p.get("name"), p["code"], cs["reason"]))
-                continue
-            _act_notify(cfg,
-                        "🔔 操作前确认：尾盘止损 %s(%s)" % (p.get("name"), p["code"]),
-                        "**止损理由**：%s\n\n- 现价 %.2f｜成本 %.2f\n- 纪律依据：尾盘确认通道回测（深亏过夜次日 -0.31%%/红盘率 45%%），先推送后执行"
-                        % (dec["reason"], dec["price"], p["avg_price"]))
-            r = broker.sell_limit(p["code"], dec["price"], sig={
-                "name": p.get("name"), "reason": dec["reason"], "source": "tailgate"})
-            if r.get("ok"):
-                n_act += 1
-                lines.append("- **尾盘止损 SELL %s**(%s) @%.2f %+.2f%%｜%s"
-                             % (p.get("name"), p["code"], r["price"], r["pnl_pct"], dec["reason"]))
-                _log("尾盘止损 %s：%s" % (p["code"], dec["reason"]))
-            else:
-                lines.append("- %s(%s) 尾盘止损失败：%s" % (p.get("name"), p["code"], r.get("reason")))
+            # 2026-09-01 T+1 修复：run_tailgate 只处理「今日买入」的持仓，而 A 股
+            # T+1 当日买不可卖——尾盘止损若执行就是 T+1 违规。改为锁 T+1 顺延，
+            # 明日开盘按 sell_decision 规则裁决（止损信号保留留痕）。
+            _log("尾盘 %s：%s（T+1 当日买不可卖，顺延明日）" % (p["code"], dec["reason"]))
+            if hasattr(broker, "record_decision"):
+                broker.record_decision(p["code"], "HOLD",
+                                       "尾盘止损被 T+1 锁定（今日买入不可卖），顺延明日：%s"
+                                       % dec["reason"], p.get("name") or "", dec["price"] or 0)
+            lines.append("- 🔒 %s(%s) T+1 锁定（今日买入），止损顺延明日｜%s"
+                         % (p.get("name"), p["code"], dec["reason"]))
+            continue
         elif dec["verdict"] == "HOLD":
             if hasattr(broker, "record_decision"):
                 broker.record_decision(p["code"], "HOLD",
@@ -1273,16 +1262,11 @@ def _run_scan_inner(cfg):
             continue
         pnl_pct = ((q.get("price") / p["avg_price"] - 1) * 100) \
             if (q and q.get("price") and p.get("avg_price")) else None
-        # 盘中额外保护：今日买入的票炸板（较开盘跌≥3%）→ 即时止损
-        # （sell_decision 的规则2只覆盖「昨日续板」票；今日新买票若开盘强但盘中崩，
-        #   盘中轮比 14:45 尾盘轮提前止血）
-        if dec["verdict"] == "HOLD" and (p.get("buy_date") or "") == today:
-            opn = q.get("open") or 0
-            cur = q.get("price") or 0
-            if opn and cur and cur / opn - 1 <= -0.03:
-                dec = {"verdict": "SELL", "price": cur,
-                       "reason": "盘中巡逻：今日买入票较开盘%.1f%%炸板崩落，即时止损"
-                                 % ((cur / opn - 1) * 100)}
+        # 2026-09-01 T+1 修复：今日买入的票（buy_date==today）已由 sell_decision
+        # 顶部 T+1 守卫锁住（返回 HOLD），此处的「炸板保护」若对今日买入票强卖，
+        # 就是 T+1 违规（用户实证：楚天龙/勤上股份 09:26 买入当日被卖）。
+        # 原逻辑：今日买入票炸板（较开盘跌≥3%）→ 即时止损——已移除（A 股 T+1
+        # 当日买不可卖）。炸板票最早明日按 sell_decision 规则裁决。
         if dec["verdict"] == "SELL" and dec.get("price"):
             cs = strategy.can_sell(q, p["code"])
             if not cs["ok"]:

@@ -84,6 +84,16 @@ def sell_decision(pos: dict, quote: dict, klines: list, today: str = None) -> di
                 "reason": "无有效行情（停牌/未开盘），顺延"}
     today = today or time.strftime("%Y-%m-%d")
 
+    # ============ T+1 硬约束（2026-09-01 修复，用户指出真BUG） ============
+    # A 股 T+1：当日买入的股票当日不可卖出。此前 sell_decision 无此守卫，
+    # 今日买入的票（buy_date==today）在盘中巡逻（炸板保护/规则3止损）或尾盘通道
+    # 里会被 SELL 掉（例：楚天龙 09:26 买入，盘中跌3%触发规则3止损→同日卖出）。
+    # 这是 T+1 违规。修正：buy_date==today 一律 HOLD（锁 T+1），最早明日才能卖。
+    buy_date_today = (pos.get("buy_date") or "") == today
+    if buy_date_today:
+        return {"verdict": "HOLD", "price": cur,
+                "reason": "今日买入（T+1 锁定），最早明日可卖（现价%.2f）" % cur}
+
     # 找昨日K线（今日之前最后一根）
     # 2026-08-31 修复：prev2/yest_limit 必须先初始化——旧代码若 yest 恰好是
     # klines[0]（新股/长停牌复牌只有一根历史K线），循环内不执行 if i>0 分支，
