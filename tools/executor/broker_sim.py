@@ -168,6 +168,19 @@ class SimBroker:
         if vol < 100:
             return {"ok": False, "reason": "金额不足一手"}
         fill = price * (1 + _impact())
+        # 2026-09-01 云端托管加固：撮合层资金闸门。
+        # 上层风控只按「单笔上限 + 单票仓位比」卡金额，若状态包丢失（Release 恢复
+        # 失败）导致一天内多轮重复建仓，累计买入可能超过账户现金 → 出现负现金假账，
+        # 用户不开电脑根本发现不了。这里做最后一道物理拦截：买不动就是买不动。
+        try:
+            need = round(fill * vol, 2)
+            cash = float((self.balance() or {}).get("cash") or 0)
+            if need > cash + 1e-6:
+                reason = "资金不足：需 %.2f 元，可用 %.2f 元（撮合层拒绝）" % (need, cash)
+                self.record_reject(code, "BUY", reason, sig.get("name") or "")
+                return {"ok": False, "reason": reason}
+        except Exception:
+            pass      # 余额查询异常不阻断（宁可放行，也不让资金闸门误杀正常交易）
         self.con.execute(
             "INSERT OR REPLACE INTO sim_trades VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (time.strftime("%Y-%m-%d %H:%M:%S"), d, code, sig.get("name") or "",
@@ -184,7 +197,13 @@ class SimBroker:
 
     def sell_limit(self, code: str, price: float, volume: int = None,
                    sig: dict = None) -> dict:
-        """模拟卖出：全部持仓平掉。price 为委托价，扣冲击成本后成交。"""
+        """模拟卖出：全部持仓平掉。price 为委托价，扣冲击成本后成交。
+
+        T+1 撮合层硬约束（2026-09-01，用户要求「操作层逻辑错误不再出现」）：
+        此前 T+1 只靠决策层 sell_decision 的守卫——任何一条卖出路径漏判
+        （08-31 days_held 误算即实例），撮合层照样成交当日买当日卖。
+        现在撮合层物理拒绝：buy_date == 当日 → 一律拒单留痕，不信任任何上层。
+        """
         sig = sig or {}
         row = self.con.execute(
             "SELECT buy_date, buy_price, volume FROM sim_positions "
@@ -194,6 +213,10 @@ class SimBroker:
             return {"ok": False, "reason": "模拟盘无此持仓"}
         buy_date, buy_price, vol = row
         d = time.strftime("%Y-%m-%d")
+        if (buy_date or "") == d:
+            reason = "T+1 硬约束：当日买入当日不可卖（撮合层拒绝，最早明日）"
+            self.record_reject(code, "SELL", reason, sig.get("name") or "")
+            return {"ok": False, "reason": reason, "buy_date": buy_date}
         fill = price * (1 - _impact())
         pnl = (fill / buy_price - 1) * 100
         self.con.execute(

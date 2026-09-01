@@ -84,6 +84,80 @@ def fetch_user_data(user_id: str, passwd: str, timeout: int = 30) -> dict:
     return json.loads(txt)
 
 
+def data_date(data: dict):
+    """取线上数据的分析日期：meta.date 优先，scan_coverage.date 兜底。"""
+    d = (data or {}).get("meta") or {}
+    if d.get("date"):
+        return d["date"]
+    d = (data or {}).get("scan_coverage") or {}
+    if d.get("date"):
+        return d["date"]
+    return None
+
+
+def prev_trade_date(timeout: int = 15, retries: int = 2):
+    """上一交易日（腾讯上证指数日 K，权威日历）。
+
+    纯云端托管下这是「数据新鲜度」的锚：build 在 15:20 跑完、站点部署后，
+    次日 09:25 执行器理应读到上一交易日的数据。若 build 或 CF 部署任一环节失败，
+    站点上的 data/*.bin 会停留在更早的日期——没有这道闸门，执行器会拿过期信号
+    在今天开盘真金白银下单（用户看不到原因，只看到「买了奇怪的票」）。
+
+    返回 "YYYY-MM-DD" 或 None（取不到时返回 None，调用方放行——网络抖动误杀
+    比陈旧数据交易的伤害小，但两者都应推送告知）。
+    """
+    url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
+           "param=sh000001,day,,,10,qfq")
+    last = None
+    for i in range(1 + max(0, retries)):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as r:
+                js = json.loads(r.read().decode("utf-8"))
+            node = (js.get("data") or {}).get("sh000001") or {}
+            rows = node.get("qfqday") or node.get("day") or []
+            if not rows:
+                return None
+            days = [str(x[0]) for x in rows if x and x[0]]
+            days = [d[:4] + "-" + d[4:6] + "-" + d[6:8] if len(d) == 8 and "-" not in d
+                    else d for d in days]
+            days = sorted(set(days))
+            today = time.strftime("%Y-%m-%d")
+            # 若最后一根是今天（盘后已更新），上一交易日取倒数第二根；否则取最后一根
+            if days[-1] <= today and len(days) >= 2 and days[-1] == today:
+                return days[-2]
+            return days[-1]
+        except Exception as e:
+            last = e
+            if i < retries:
+                time.sleep(1.5 * (i + 1))
+    return None
+
+
+def assert_data_fresh(data: dict, force: bool = False):
+    """数据新鲜度闸门：线上数据日期必须 ≥ 上一交易日，否则抛异常拒交易。
+
+    覆盖两种纯托管故障（用户不开电脑，看不到 CI 失败）：
+      ① build workflow 失败（数据源异常/Secret 缺失/代码错误）
+      ② build 成功但 CF Pages 部署失败（站点停在旧版本）
+    两者都表现为「线上数据是旧日期」→ 一律拒绝开仓，不记任务账本（冗余触发会
+    在几分钟后自动重试，若届时数据已更新则正常交易）。
+    """
+    if force:
+        return None
+    d = data_date(data)
+    if not d:
+        return None       # 数据无日期字段（老版本）→ 放行，避免误杀
+    prev = prev_trade_date()
+    if not prev:
+        return None       # 日历取不到（网络问题）→ 放行，避免误杀
+    if str(d) >= str(prev):
+        return None
+    raise RuntimeError(
+        "线上数据日期 %s 早于上一交易日 %s（build 或 CF 部署未成功，数据已过期）"
+        % (d, prev))
+
+
 def fetch_json(path: str, timeout: int = 30):
     """拉线上任意静态 json（如 users.json）。带 403/5xx 重试。"""
     url = "%s/%s" % (SITE, path)

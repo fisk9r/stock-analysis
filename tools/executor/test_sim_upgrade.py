@@ -89,18 +89,28 @@ rj = b.rejects(time.strftime("%Y-%m-%d"))
 ck("拒绝留痕写入", len(rj) == 2 and {x["action"] for x in rj} == {"SELL", "BUY"},
    str(rj))
 
-# 买入+卖出流程
-r = b.buy_limit("600111", 10.00, 5000, sig={"name": "包钢稀土", "open_gap": 3.2,
-                                            "streak": 3, "source": "core", "reason": "B级测试"})
-ck("买入成交", r.get("ok"))
+# 买入+卖出流程（买入日为上一交易日，模拟真实「昨日建仓、今日卖出」——
+# 验证 T+1 只拦「当日买当日卖」，不误伤合法隔日卖出）
+b.con.execute(
+    "INSERT OR REPLACE INTO sim_positions(buy_date,code,name,open_gap,buy_price,volume,streak)"
+    " VALUES(?,?,?,?,?,?,?)",
+    ("2026-08-29", "600111", "包钢稀土", 3.2, 10.00, 500, 3))
+b.con.commit()
 r = b.sell_limit("600111", 10.50, sig={"name": "包钢稀土", "reason": "落袋为安", "source": "strategy"})
-ck("卖出成交", r.get("ok") and r["pnl_pct"] > 0, str(r))
+ck("隔日卖出成交", r.get("ok") and r["pnl_pct"] > 0, str(r))
+
+# T+1 物理拒单：今日买入的票，当日不可卖（撮合层兜底，不依赖决策层是否正确）
+r = b.buy_limit("600222", 10.00, 5000, sig={"name": "测试T1", "open_gap": 2.0,
+                                            "streak": 2, "source": "core", "reason": "B级测试"})
+ck("T+1 当日买入成交", r.get("ok"))
+r = b.sell_limit("600222", 10.50, sig={"name": "测试T1", "reason": "试图当日卖出", "source": "strategy"})
+ck("T+1 当日卖出被拒", (not r.get("ok")) and "T+1" in (r.get("reason") or ""), str(r))
 
 ds = b.day_summary()
 ck("day_summary 交易数", len(ds["trades"]) == 2, str(len(ds["trades"])))
 ck("day_summary 平仓数", len(ds["closed"]) == 1)
 ck("day_summary 盈亏", ds["closed"][0]["pnl_pct"] > 0)
-ck("day_summary 含被拒", len(ds["rejects"]) == 2)
+ck("day_summary 含被拒", len(ds["rejects"]) == 3)
 bal = ds["balance"]
 ck("balance 总资产>0", bal["total"] > 0)
 
@@ -124,7 +134,7 @@ today = ds["date"]
 ck("review.json 按日累积", today in hist.get("days", {}))
 d0 = hist["days"][today]
 ck("review 含交易明细", isinstance(d0["trades"], list))
-ck("review 含被拒", len(d0["rejects"]) == 2)
+ck("review 含被拒", len(d0["rejects"]) == 3)
 ck("review 含总资产", d0["total"] > 0)
 if os.path.exists(bak):
     shutil.copy2(bak, rev)
@@ -141,6 +151,15 @@ if os.path.exists(tmpdb):
         os.remove(tmpdb)
     except PermissionError as e:
         print("(warn) 临时库清理失败（不影响测试结论）：%r" % e)
+    # 2026-08-31：WorkBuddy 沙箱对 os.remove 走回收站通道，sim.db 被 SQLite
+    # WAL 句柄占用时回收站操作也失败 → OSError 使测试末尾崩溃（PASS 统计被吞）。
+    # 这里兜底：清理失败不致命，改为改名隔离，下次运行开头旧文件换名重建已兼容。
+    except OSError as e:
+        try:
+            os.rename(tmpdb, tmpdb + ".stale")
+            print("(warn) 临时库删除失败，已改名 .stale：%r" % e)
+        except OSError:
+            print("(warn) 临时库清理失败（不影响测试结论）：%r" % e)
 
 # ============ 4. 回归：sell_decision 7 场景 + strategy_filter ============
 print("\n[4] 原有策略回归")

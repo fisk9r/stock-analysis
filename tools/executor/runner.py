@@ -44,7 +44,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from exec_core import (fetch_user_data, extract_signals, realtime_quote,
-                       auction_gate, late_gate, market_gate, SITE)
+                       auction_gate, late_gate, market_gate, SITE,
+                       assert_data_fresh, data_date)
 from risk_gate import RiskGate
 import broker_sim
 import strategy
@@ -496,6 +497,35 @@ def _ledger_missing(date=None):
     return miss
 
 
+# ---------------- 云端托管：状态持久化告警（2026-09-01）----------------
+# 纯托管场景下用户不开电脑，看不到 CI 日志：状态包读/写失败会让模拟盘「静默
+# 失忆」——持仓表空（该卖的没卖）、风控幂等表空（同票重复建仓）、资金回到初始
+# 值。此前这类失败只写日志，用户只感觉「模拟盘又出问题了」却不知原因。现在统一
+# 收集并在进程退出前 dedup 推送（每日最多一条，不轰炸）。
+_PENDING_ALERTS = []
+_LAST_CFG = None
+
+
+def _flush_state_alerts(cfg=None):
+    """进程退出前把状态读写告警一次性推送（dedup：同日同 key 只推一次）。"""
+    global _PENDING_ALERTS
+    cfg = cfg or _LAST_CFG
+    if not _PENDING_ALERTS or not cfg:
+        return
+    msgs, _PENDING_ALERTS = list(_PENDING_ALERTS), []
+    try:
+        _act_notify(
+            cfg,
+            "⚠ 模拟盘状态持久化异常（云端托管告警）",
+            "模拟盘状态在云端读写异常，可能影响持仓与建仓，建议核查：\n\n"
+            + "\n".join("- " + m for m in msgs)
+            + "\n\n- 说明：本条每日最多推送一次；状态包在 Release 资产"
+              " executor_state.tar.gz，随下一轮自动重建。",
+            dedup_key="state_io_fail")
+    except Exception as e:
+        _log("状态告警推送失败：%r" % e)
+
+
 def exec_state_restore(force=False):
     """从 Release 恢复执行器状态（CI 专用；本地已有 sim.db 则跳过）。"""
     if not _in_ci() and not force:
@@ -513,6 +543,9 @@ def exec_state_restore(force=False):
         asset = next((a for a in rel.get("assets", []) if a["name"] == EXEC_STATE_FILE), None)
         if not asset:
             _log("exec_state: 无历史状态包（首次运行正常），从空账本开始")
+            _PENDING_ALERTS.append(
+                "状态包缺失（Release 无 executor_state.tar.gz）：模拟盘以空账本启动，"
+                "历史持仓与风控幂等表为空，可能出现重复建仓")
             return False
         req = urllib.request.Request(asset["browser_download_url"],
                                      headers={"User-Agent": "executor"})
@@ -539,6 +572,9 @@ def exec_state_restore(force=False):
         # BaseException：gh_api 网络失败会抛 SystemExit（不继承 Exception），
         # 必须兜住——恢复失败只能以空账本继续，绝不能让 CI job 直接死掉
         _log("exec_state 恢复失败（以空账本继续，不阻断）：%s %r" % (type(e).__name__, e))
+        _PENDING_ALERTS.append(
+            "状态恢复失败（%s）：本轮以空账本运行，历史持仓该卖的可能没卖、"
+            "同票可能重复建仓" % type(e).__name__)
         return False
 
 
@@ -584,18 +620,40 @@ def exec_state_save():
         # （回存失败下轮仍有本轮前状态，但不影响交易结果与推送）
         _log("exec_state 回存失败（不影响交易结果，下轮仍有本轮前状态）：%s %r"
              % (type(e).__name__, e))
+        _PENDING_ALERTS.append(
+            "状态回存失败（%s）：本轮成交未写回云端，下一轮会回到本轮前的状态，"
+            "可能出现同票重复成交" % type(e).__name__)
         return False
 
 
+def _sh_now():
+    """当前上海时间 (hour, minute)。CI 默认 UTC，需 +8 修正。"""
+    import datetime as _dt
+    utc = _dt.datetime.utcnow() + _dt.timedelta(hours=8)
+    return utc.hour, utc.minute
+
+
 def is_trading_now(force=False):
-    """今日是否 A 股交易日（用上证指数行情时间戳判定，节假日/停市=否）。
+    """今日是否 A 股交易日（用上证指数行情时间戳判定，节假日/停市=否）+ 交易时段闸。
 
     CI 托管后执行器跑在 GitHub Actions（周末 cron 已排除，但法定节假日排除不了）：
     节假日腾讯行情时间戳停在上个交易日 → 日期不匹配 → 整轮跳过，绝不拿旧数据下单。
-    force=True（workflow_dispatch 手动测试）跳过判定。
+
+    时段闸（2026-09-01 加固，用户要求「纯云端、不再出操作层错误」）：
+    实测 GitHub cron 曾延迟投递——14:43 的尾盘任务 19:59 才跑。仅判交易日不够，
+    收盘后的 "尾盘" 会拿收盘价误下单。这里额外卡上海交易时段
+    （09:15-11:35 / 13:00-15:05），非时段一律拒单，不依赖 cron 准时。
+    force=True（workflow_dispatch 手动测试）跳过时段判定。
     """
     if force:
         return True, "force"
+    # 时段闸：非交易时段禁止下单（防 cron 延迟投递拿收盘价误交易）
+    h, m = _sh_now()
+    now_min = h * 60 + m
+    morning = (9 * 60 + 15) <= now_min <= (11 * 60 + 35)
+    afternoon = (13 * 60) <= now_min <= (15 * 60 + 5)
+    if not (morning or afternoon):
+        return False, "非交易时段（上海时间 %02d:%02d，禁止下单）" % (h, m)
     try:
         # 指数行情：realtime_quote 按首码映射 sh/sz/bj 前缀，指数码 000001 会被
         # 误映射成 sz000001（不存在）。上证指数的行情码是 sh000001——直接传
@@ -838,6 +896,22 @@ def run_buys(broker, mode, cfg, sigs, mkt=None):
                             verdict["open_gap"] or 0, cb["reason"]))
             _log("买入被拒 %s：%s" % (verdict["code"], cb["reason"]))
             continue
+        # 2026-09-01 云端托管加固：数据库层持仓幂等。
+        # 风控幂等表（risk_state.json）存在 Release 资产里，状态恢复失败时会丢失
+        # → 同一只票在同一轮/同一天被重复建仓。这里用 sim_positions 做第二道闸：
+        # 已持有未平仓的票一律不再买（不依赖任何外部文件）。
+        try:
+            held = [p for p in (broker.positions(open_only=True) or [])
+                    if p.get("code") == verdict["code"]]
+        except Exception:
+            held = []
+        if held:
+            reason = "已持有 %d 股（未平仓），不重复建仓" % (held[0].get("volume") or 0)
+            gate.record(verdict, "REJECT", 0, reason)
+            _track(verdict["code"], verdict.get("name"), "SKIP", "持仓幂等：%s" % reason)
+            lines.append("- %s(%s) 已持仓，跳过重复建仓" % (verdict["name"], verdict["code"]))
+            _log("买入跳过 %s：%s" % (verdict["code"], reason))
+            continue
         amount = int((gate.cfg["max_trade_amount"]) * sf["weight"] * caution_cut)
         if total:
             amount = int(min(amount, total * gate.cfg["max_position_pct"]))
@@ -1057,6 +1131,10 @@ def _run_once_inner(cfg, force=False):
     data_ok = False
     try:
         data = fetch_user_data(acc["user_id"], acc["passwd"])
+        # 2026-09-01 云端托管加固：数据新鲜度闸门——build 失败或 CF 部署失败时
+        # 线上数据会停留在旧日期，没有这道闸门就会拿过期信号在今天开盘下单。
+        assert_data_fresh(data, force=force)
+        _log("线上数据日期：%s（新鲜度校验通过）" % (data_date(data) or "未知"))
         sigs = extract_signals(data)
         mkt = market_gate(data)
         _log("大盘环境闸门：%s｜%s" % (mkt["mode"], mkt["reason"]))
@@ -1144,6 +1222,17 @@ def _tail_buys(broker, cfg, sigs, mkt):
         if not cb["ok"]:
             gate.record(v, "TAIL_SKIP", 0, "尾盘买不进:" + cb["reason"])
             _track(v["code"], v.get("name"), "SKIP", "尾盘买不进:%s" % cb["reason"])
+            continue
+        # 同开仓通道：数据库层持仓幂等（不依赖 risk_state 文件）
+        try:
+            held = [p for p in (broker.positions(open_only=True) or [])
+                    if p.get("code") == v["code"]]
+        except Exception:
+            held = []
+        if held:
+            _track(v["code"], v.get("name"), "SKIP",
+                   "持仓幂等：已持有未平仓，尾盘不重复建仓")
+            _log("尾盘买入跳过 %s：已持仓" % v["code"])
             continue
         amount = int(gate.cfg["max_trade_amount"] * 0.5 * cut)
         if total:
@@ -1365,6 +1454,9 @@ def _run_tail_inner(cfg, force=False):
     data_ok = False
     try:
         data = fetch_user_data(acc["user_id"], acc["passwd"])
+        # 同开仓通道：拒绝用过期数据入场（云端托管下 build/部署失败的自保闸门）
+        assert_data_fresh(data, force=force)
+        _log("线上数据日期：%s（新鲜度校验通过）" % (data_date(data) or "未知"))
         sigs = extract_signals(data)
         mkt = market_gate(data)
         buy_lines, n_buy = _tail_buys(broker, cfg, sigs, mkt)
@@ -1871,6 +1963,8 @@ def main():
     force = "--force" in args          # CI workflow_dispatch 手动测试：跳过交易日判定
     args = [a for a in args if a != "--force"]
     cfg = load_cfg()
+    global _LAST_CFG
+    _LAST_CFG = cfg      # 供进程退出前统一推送状态告警使用
     # 2026-08-31 修复（全时段可操作 prerequisite）：状态恢复统一挪到入口。
     # 此前只有 run_review 调 exec_state_restore——CI 全新容器跑 --now/--tail
     # 会以「空账本」启动：看不到历史持仓（该卖的没卖）、RiskGate 幂等表为空
@@ -1938,3 +2032,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # 云端托管：把本轮积累的状态持久化告警统一 dedup 推送（用户不开电脑，
+    # 看不到 CI 日志——静默失败必须变成一条推送）
+    _flush_state_alerts()
