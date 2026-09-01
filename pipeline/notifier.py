@@ -2045,6 +2045,132 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     _engine_sec("**🎯 买卖区间与操作提示**", _zn, "zones", cap=6,
                 mark=(_MARK_ZN, _MARK_ZN_END))
 
+    # ---- Batch1 升级：已算好但未推送的高信噪比段（席位跟随/回避、模拟盘、板块轮动、K线/筹码、龙虎榜、资金流）----
+    # 全段 try/except 包裹：任一字段缺失或解析异常都不影响主流程（零回归）。
+    try:
+        # 1) 游资席位·可跟 / 回避
+        _sf = data.get("seat_follow") or {}
+        if _sf.get("items"):
+            _sec("🐉 游资席位·可跟", [
+                "**%s** 胜率%.0f%%（%d次）%s" % (
+                    it.get("label", "?"), it.get("win_rate", 0) or 0, it.get("n", 0),
+                    ("｜代表：" + "、".join("%s" % (r.get("name") or r.get("code")) for r in (it.get("reps") or [])[:3]))
+                    if (it.get("reps")) else "")
+                for it in _sf["items"][:4]])
+        _sa = data.get("seat_avoid") or {}
+        if _sa.get("items"):
+            _sec("🚫 游资席位·回避（负期望慎跟）", [
+                "**%s** 胜率%.0f%%（%d次）%s" % (
+                    it.get("label", "?"), it.get("win_rate", 0) or 0, it.get("n", 0),
+                    ("｜代表：" + "、".join("%s" % (r.get("name") or r.get("code")) for r in (it.get("reps") or [])[:3]))
+                    if (it.get("reps")) else "")
+                for it in _sa["items"][:4]])
+    except Exception:
+        pass
+    try:
+        # 2) 模拟盘每日战绩
+        _sim = data.get("sim") or {}
+        _sl = _sim.get("last") or {}
+        if _sl:
+            _hb = (_sim.get("heartbeat") or {})
+            _rows = ["累计 %+.2f%% ｜ 现金%.0f ｜ 持仓%d只%s" % (
+                _sl.get("total_pct") or 0, _sl.get("cash") or 0, _sl.get("n_holding") or 0,
+                "（⚠数据滞后）" if _hb.get("stale") else "")]
+            _nt = len(_sl.get("trades") or [])
+            _nc = len(_sl.get("closed") or [])
+            _nr = len(_sl.get("rejects") or [])
+            if (_nt or _nc or _nr):
+                _rows.append("今日：开/加%d笔 ｜ 平仓%d笔 ｜ 被拒%d笔" % (_nt, _nc, _nr))
+            if _sl.get("summary_line"):
+                _rows.append(_sl["summary_line"])
+            _sec("🤖 模拟盘战绩", _rows)
+    except Exception:
+        pass
+    try:
+        # 3) 板块轮动·主线强度 + 可操作 + 接力/退潮
+        _rot = data.get("rotation") or []
+        if _rot:
+            _sec("🔄 板块轮动·主线强度", [
+                "%s 涨停%d家 %s%s" % (
+                    s.get("name"), s.get("today") or 0, s.get("trend"),
+                    "（持续）" if s.get("persistent") else ("（新晋）" if s.get("is_new") else ""))
+                for s in _rot[:4]])
+        _st = data.get("sector_trade") or []
+        if _st:
+            _sec("🎯 板块轮动·可操作", [
+                "%s（%s）%s" % (
+                    s.get("sector"), s.get("trend"),
+                    ("领涨：" + "、".join("%s(+%.1f%%)" % (l.get("name"), (l.get("chg") or 0)) for l in (s.get("leads") or [])[:3]))
+                    if (s.get("leads")) else "")
+                for s in _st[:3]])
+        _rel = data.get("sector_relay") or {}
+        if _rel.get("available") and (_rel.get("broken") or _rel.get("relay")):
+            _rrows = []
+            if _rel.get("broken"):
+                _b = _rel["broken"]
+                _rrows.append("退潮旧主线：**%s**（峰值%d→%d家）" % (_b.get("name"), _b.get("peak_zt"), _b.get("latest_zt")))
+            for _r in (_rel.get("relay") or [])[:3]:
+                _rrows.append("接力方向：**%s**（%s，确定性%d%%）" % (_r.get("name"), _r.get("kind"), _r.get("certainty") or 0))
+            if _rel.get("phase_desc"):
+                _rrows.append(_rel["phase_desc"])
+            _sec("↔️ 主线接力 / 退潮", _rrows)
+    except Exception:
+        pass
+    try:
+        # 4) K线形态 + 筹码
+        _cd = data.get("candles") or {}
+        _ch = _cd.get("hits") or []
+        if _ch:
+            _bull = [h for h in _ch if (h.get("direction") or "") == "bull"][:3]
+            _bear = [h for h in _ch if (h.get("direction") or "") == "bear"][:2]
+            _rows = []
+            for h in _bull:
+                _rows.append("看多 %s **%s**(%.1f%%)" % (h.get("pattern"), h.get("name"), (h.get("pct") or 0)))
+            for h in _bear:
+                _rows.append("看空 %s **%s**(%.1f%%)" % (h.get("pattern"), h.get("name"), (h.get("pct") or 0)))
+            if _rows:
+                _sec("🕯 K线形态", _rows)
+        _cp = data.get("chips") or {}
+        _tl = _cp.get("top_low") or []
+        if _tl:
+            _sec("🧩 筹码·套牢盘最重（超跌区）", [
+                "**%s**（获利盘%.0f%%）" % (h.get("name"), (h.get("ratio") or 0) * 100)
+                for h in _tl[:3]])
+    except Exception:
+        pass
+    try:
+        # 5) 龙虎榜上榜个股（游资合力）
+        _lhb = data.get("lhb") or {}
+        if _lhb:
+            _items = sorted(_lhb.items(), key=lambda kv: -(kv[1].get("net_amt") or 0))[:5]
+            _sec("🏛 龙虎榜上榜个股（游资合力）", [
+                "**%s** %+.1f%% 净买%.0f万 %d席｜%s" % (
+                    it.get("name") or code, it.get("change_rate") or 0,
+                    (it.get("net_amt") or 0) / 1e4, it.get("buy_seat") or 0,
+                    (it.get("explanation") or "")[:18])
+                for code, it in _items])
+    except Exception:
+        pass
+    try:
+        # 6) 主力资金流（近5日，东财 fflow daykline 字符串：date,开,收,高,低,量,额,振,涨%,涨跌,换手,主力净流入(f62·元),...）
+        _ff = (data.get("market") or {}).get("fundflow") or []
+        if _ff:
+            _vals = []
+            for _k in _ff[-5:]:
+                try:
+                    if isinstance(_k, str) and "," in _k:
+                        _parts = _k.split(",")
+                        if len(_parts) > 11:
+                            _v = float(_parts[11])  # f62 主力净流入(元)
+                            if abs(_v) > 1e4:       # 量级保护：避免误抓换手率/涨跌幅字段
+                                _vals.append(_v / 1e8)
+                except Exception:
+                    pass
+            if _vals:
+                _sec("💰 主力资金流（近5日·亿）", [" ".join("%+.1f" % v for v in _vals)])
+    except Exception:
+        pass
+
     # 数据完整性体检（仅异常时告警，健康时静默，避免刷屏）
     ig = data.get("integrity")
     if ig and not ig.get("ok") and (ig.get("warnings") or ig.get("scale_anomalies")):

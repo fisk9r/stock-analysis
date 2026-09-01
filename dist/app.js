@@ -303,6 +303,16 @@
       h += card('🔍 数据完整性体检', igBody, '构建期自动自检：最新交易日覆盖度、量纲错乱(股/手·分/元混用放大百倍)、价格异常(收盘≤0/高<低)。异常会污染量比/热度/持仓缩量判断，发现即告警');
     }
 
+    /* 全市场扫描覆盖度徽标（Batch1：强化「全量非抽样」信任感） */
+    var SC = D.scan_coverage;
+    if (SC && SC.universe) {
+      h += '<div style="margin:10px 0;display:flex;flex-wrap:wrap;gap:8px">' +
+        '<span class="bd" style="background:' + C.blue + '22;color:' + C.blue + ';border-color:' + C.blue + '">🛰 全市场扫描覆盖 <b>' + n2(SC.universe) + '</b> 只</span>' +
+        '<span class="bd" style="background:' + C.up + '22;color:' + C.up + ';border-color:' + C.up + '">当日涨停 <b>' + n2(SC.limit_up_today) + '</b> 只</span>' +
+        '<span class="bd" style="color:var(--muted);border-color:var(--border)">交易日 <b>' + E(SC.date || '—') + '</b></span>' +
+        '</div>';
+    }
+
     /* KPI */
     var lus = D.limit_ups || [];
     var maxlb = lus.reduce(function (a, b) { return Math.max(a, b.streak || 0); }, 0);
