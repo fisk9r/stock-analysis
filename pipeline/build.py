@@ -535,6 +535,9 @@ def run(date_override=None, dedup_close=False):
 
     log("生成当日推荐 ...")
     rec = engine.recommend(lus, risks, demons, inds, sent, cyc, stats, auction["items"], regime, relay)
+    # #4 (2026-09-02)：弱市（标杆热度=冷）主动压低推荐密度，而非硬推。
+    # 仅保留 worth_score 较高的头部标的，避免低质量标的充斥推荐区（日胜率随市场 β 大幅波动）。
+    rec = engine.market_density_filter(rec, bench_heat.get("level"))
 
     # 连板预期空间引擎（用户需求 2026-08-27）：挖掘「明天有机会买的连板票」，
     # 给买入/卖出区间、止损与预期高度（如 3板→预期5板）；高位票只标注不拦。
@@ -587,7 +590,9 @@ def run(date_override=None, dedup_close=False):
 
     # 趋势向上选股（独立于连板体系，覆盖主升段趋势票）
     try:
-        rec["trend"] = engine.screen_uptrend(u, date, code2boards, topn=12)
+        # #4 (2026-09-02)：弱市（标杆热度=冷）将趋势候选池由 12 缩至 6，主动降密度
+        _trend_topn = 6 if bench_heat.get("level") == "冷" else 12
+        rec["trend"] = engine.screen_uptrend(u, date, code2boards, topn=_trend_topn)
         log("  趋势向上筛选 %d 只" % len(rec.get("trend") or []))
     except Exception as e:
         log("  趋势向上筛选失败（不影响主流程）：%r" % e)
@@ -760,7 +765,9 @@ def run(date_override=None, dedup_close=False):
     # 强动量 · 连板余波选股（接住『连板妖股基因、今天非涨停』掉缝里的票，
     # 如风范股份；与 screen_uptrend 的平滑趋势互补，两档并列呈现）
     try:
-        rec["momentum"] = engine.screen_momentum(u, date, code2boards, topn=12)
+        # #4 (2026-09-02)：弱市（标杆热度=冷）将动量候选池由 12 缩至 6
+        _mom_topn = 6 if bench_heat.get("level") == "冷" else 12
+        rec["momentum"] = engine.screen_momentum(u, date, code2boards, topn=_mom_topn)
         log("  强动量/连板余波筛选 %d 只" % len(rec.get("momentum") or []))
     except Exception as e:
         log("  强动量筛选失败（不影响主流程）：%r" % e)

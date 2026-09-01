@@ -667,6 +667,42 @@ def main():
           "-> %s" % [l for l in _cl["text"].splitlines() if "纪律" in l][:1])
     check("收盘推送·买入持有天数", "建议买入·持有20天" in _cl["text"])
 
+    # ============ #252 可升级点回归（2026-09-02）============
+    # 关注股异动逻辑：自选/持仓排序前置（中化国际 600500 类问题——加进自选却收不到提示被截断）
+    from watchreco import distill as _distill
+    _z = {"items": [
+        {"code": "A", "name": "推荐票", "action": "建议买入", "cost": None, "buy_zone": [1, 2],
+         "sell_zone": [3, 4], "stop": 0.9, "horizon": "短线", "urgent": False, "reasons": ["x"],
+         "pnl_pct": None, "rotate": None, "replace": [], "time_status": None},
+        {"code": "600500", "name": "中化国际", "action": "持有", "cost": 6.8, "buy_zone": [6, 6.5],
+         "sell_zone": [7, 7.5], "stop": 6.5, "horizon": "中线", "urgent": False, "reasons": ["y"],
+         "pnl_pct": 3.0, "rotate": None, "replace": [], "time_status": None},
+        {"code": "B", "name": "自选票", "action": "持有", "cost": None, "buy_zone": [1, 2],
+         "sell_zone": [3, 4], "stop": 0.9, "horizon": "短线", "urgent": False, "reasons": ["z"],
+         "pnl_pct": None, "rotate": None, "replace": [], "time_status": None},
+    ]}
+    _wr = _distill(_z, holding_codes={"600500"}, watch_codes={"B"}, topn=14)
+    _ih = next((i for i, x in enumerate(_wr["items"]) if x["code"] == "600500"), 99)
+    _ir = next((i for i, x in enumerate(_wr["items"]) if x["code"] == "A"), 99)
+    check("#252 持仓排序前置于纯推荐票", _ih < _ir, "hold=%d rec=%d" % (_ih, _ir))
+    _iw = next((i for i, x in enumerate(_wr["items"]) if x["code"] == "B"), 99)
+    check("#252 自选排序前置于纯推荐票", _iw < _ir, "watch=%d rec=%d" % (_iw, _ir))
+
+    # ============ #2 / #4 可升级点回归（2026-09-02）============
+    import engine as _eng
+    # #2：st=2 二板降权（归因胜率23.9% vs 全样本59.3%）
+    _s0, _w0, _f0 = _eng.st2_adjust(80.0, 70.0, 3)
+    _s2, _w2, _f2 = _eng.st2_adjust(80.0, 70.0, 2)
+    check("st=2 降权生效(score↓)", _s2 < _s0 and _f2 is True, "s3=%s s2=%s" % (_s0, _s2))
+    check("st=2 降权生效(worth↓)", _w2 < _w0, "w3=%s w2=%s" % (_w0, _w2))
+    check("st≠2 不降权", _f0 is False and _s0 == 80.0)
+    # #4：弱市主动压低推荐密度
+    _items = [{"worth_score": 50}, {"worth_score": 40}, {"worth_score": 30}, {"worth_score": 60}]
+    _cold = _eng.market_density_filter(_items, "冷")
+    _warm = _eng.market_density_filter(_items, "温")
+    check("弱市仅留 worth≥45 头部", len(_cold) == 2 and all(x["worth_score"] >= 45 for x in _cold), "-> %d" % len(_cold))
+    check("非冷市原样返回", len(_warm) == 4)
+
     print("\n================ 结果 ================")
     print("PASS=%d  FAIL=%d" % (PASS, FAIL))
     return 0 if FAIL == 0 else 1

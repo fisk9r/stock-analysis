@@ -2018,6 +2018,31 @@ def auction_discipline(streak):
         "basis": "本系统367条历史推荐实测：高开≥2%组胜率67.4%/+4.08%（全量仅+0.93%），低开<-2%组-2.55%——决策线把期望收益提升4倍"}
 
 
+def st2_adjust(score, worth, streak):
+    """#2 (2026-09-02)：st=2 二板降权。
+
+    归因背书：rec_picks 实测 st=2 胜率仅 **23.9%**（n=44），远低于全样本 59.3%，
+    且低于 st=1/st=3 —— 系统挑二板在「帮倒忙」。对二板候选降权并标记，
+    仅保留「强确认」的二板（前序 auction_discipline 已把 st=2 高开门槛抬到 5%）。
+    返回 (score, worth, is_st2)。
+    """
+    if int(streak or 0) == 2:
+        return clamp(score - 12, 0, 100), clamp(worth - 14, 0, 100), True
+    return score, worth, False
+
+
+def market_density_filter(items, level, min_worth=45):
+    """#4 (2026-09-02)：弱市主动压低推荐密度。
+
+    标杆趋势股市场热度=冷 时，仅保留 worth_score≥min_worth 的头部标的，
+    避免低质量标的充斥推荐区（日胜率随市场 β 大幅波动，弱市硬推等于送钱）。
+    非冷市原样返回。
+    """
+    if level != "冷":
+        return list(items)
+    return [x for x in items if (x.get("worth_score") or 0) >= min_worth]
+
+
 def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=None, hist=None, relay_info=None):
     rmap = {r["code"]: r for r in risks}
     dmap = {d["code"]: d for d in demons}
@@ -2059,6 +2084,8 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
         # 是否值得购入分值（0-100，越高越值得）：综合续板概率/质量/板块/妖股，扣减历史风险
         worth = clamp(0.46 * pc_adj + 0.20 * r["quality"] + 0.16 * sec.get("strength", 30)
                       + 0.18 * (dm.get("score") or 30) - hf * 55, 0, 100)
+        # #2 (2026-09-02)：st=2 二板降权（归因胜率23.9% vs 全样本59.3%）
+        score, worth, _st2 = st2_adjust(score, worth, r.get("streak"))
         relay_dir = r["industry"] in relay_secs
         if relay_dir:
             # 接力方向：旧主线退潮后资金切入的新抱团，给与加权并打标
@@ -2088,8 +2115,9 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
             "quality": r["quality"], "p_continue": round(pc_adj, 1),
             "p_break": round(pb_adj, 1), "risk": rk.get("risk"),
             "demon": dm.get("score"), "sector_strength": sec.get("strength"),
-            "sector_tier": sec.get("tier"), "relay_dir": relay_dir, "score": round(score, 1),
+            "sector_tier": sec.get("tier"), "relay_dir": relay_dir,             "score": round(score, 1),
             "worth_score": round(worth, 1), "hist_factor": round(hf, 3),
+            "st2_warn": bool(_st2),
             "turn_flag": (turn_flag or {}).get("flag"),
             "similar": dm.get("similar", [])[:1],
             "yizi": r["yizi"], "seal_time": r.get("seal_time"), "zb_count": r.get("zb_count"),
@@ -2110,10 +2138,12 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
         rs = []
         if it["streak"] >= 2:
             rs.append("已走出 %d 连板，具备接力资金关注度" % it["streak"])
+            if it["streak"] == 2:
+                rs.append("⚠️ 二板接力历史胜率仅约24%（全样本59%%），已降权，仅强确认才参与")
         if it["streak"] >= 6:
             rs.append("全样本回测：%d 板以上空间板次日胜率 69%%~82%%、均值 +3.5%%~+6%%，高度溢价显著" % it["streak"])
         elif it["streak"] >= 4:
-            rs.append("全样本回测：4 板以上次日胜率 64%%，高于二板（59%%）与首板（56%%）")
+            rs.append("全样本回测：4 板以上次日胜率 64%%，显著高于低位首板/二板接力")
         if it["sector_tier"] == "主线":
             rs.append("所属【%s】为当日主线板块（强度 %.0f）" % (it["industry"], it["sector_strength"] or 0))
         elif it["sector_tier"] == "支线":

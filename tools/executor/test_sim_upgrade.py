@@ -181,6 +181,18 @@ ck("续板HOLD", r["verdict"] == "HOLD", str(r))
 q = {"open": 12.5, "price": 12.0, "prev_close": 12.4}
 r = strategy.sell_decision(pos, q, ks2, today="2026-08-27")
 ck("高开低走SELL", r["verdict"] == "SELL", str(r))
+
+# #3 (2026-09-02)：统一硬止损线（归因背书：统一止损每笔平均可挽回 +5.16%）
+# 续板但已深套（成本10，开盘9.7/现价9.68 → 浮亏3.2%），且不触发「高开低走」(现价≈开盘) → 硬止损 SELL
+pos3 = {"code": "600000", "name": "x", "buy_date": "2026-08-25", "avg_price": 10.0,
+        "volume": 300, "streak": 3}
+q3 = {"open": 9.7, "price": 9.68, "prev_close": 12.4}
+r3 = strategy.sell_decision(pos3, q3, ks2, today="2026-08-27")
+ck("统一硬止损·续板深套SELL", r3["verdict"] == "SELL" and "硬止损" in r3["reason"], str(r3))
+# 盈利续板 → 不被硬止损误伤（仍走续板持有逻辑）
+q3b = {"open": 12.5, "price": 12.6, "prev_close": 12.4}
+r3b = strategy.sell_decision(pos3, q3b, ks2, today="2026-08-27")
+ck("盈利续板不受硬止损误伤", r3b["verdict"] == "HOLD", str(r3b))
 sf = strategy.strategy_filter({"open_gap": 6, "streak": 4}, {}, 100)
 ck("A级通过", sf["grade"] == "A")
 sf = strategy.strategy_filter({"open_gap": 3, "streak": 1}, {}, 100)

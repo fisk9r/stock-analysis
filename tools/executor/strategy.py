@@ -146,6 +146,14 @@ def sell_decision(pos: dict, quote: dict, klines: list, today: str = None) -> di
                 "reason": "昨日断板（收%s未封板），按纪律开盘卖出（回测拖到T+2平均-1.18%%）"
                           % yest_pct_txt}
 
+    # 规则3b：统一硬止损线（2026-09-02，归因背书：统一止损每笔平均可挽回 +5.16%）
+    # 与炸板/尾盘保护并列的第三道闸——持仓成本浮亏 ≤ -3% 一律止损，
+    # 覆盖「续板但已深套」等规则2会误判 HOLD 的漏网情形。T+1 已在最前拦截，此处安全。
+    _pnl = (cur / pos["avg_price"] - 1) * 100 if pos.get("avg_price") else 0
+    if _pnl <= -3:
+        return {"verdict": "SELL", "price": cur,
+                "reason": "统一硬止损：持仓浮亏%.2f%%≤-3%%，触发止损离场（归因显示可挽回约5%%/笔）" % _pnl}
+
     # 规则2：昨日续板 → 吃高度溢价，但现价弱于开盘则锁定
     if yest_limit:
         # 今日冲高乏力：现价 < 开盘价（高开低走）→ 卖
