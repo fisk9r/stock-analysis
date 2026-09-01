@@ -3200,6 +3200,10 @@ def screen_momentum(u, date, code2boards=None, topn=12):
             "float_mv": u.stocks.get(code, {}).get("float_mv"),
             "turn": round(last.get("turn") or 0, 2),
             "quality": 0, "p_continue": 0, "demon": 0,
+            # 2026-09-02：连板余波通道历史胜率 9.1%（n=11）远低于 30% 红线，
+            # 降为「观察级」——仍生成并进入 rec_picks 归因库（供持续回测），
+            # 但标记为 observe，站点单独分区展示、不再作为可买推荐。
+            "observe": True,
             "score": round(sc, 1), "worth_score": round(worth, 1),
             "momentum_meta": {
                 "ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2),

@@ -2111,9 +2111,10 @@
             + '<span>买入价值 <b style="color:' + wcol + '">' + f(it.worth_score, 0) + '</b></span>'
             + '<span>妖股基因 <b>' + f(it.demon, 0) + '</b></span>'
             + '</div>';
-        return '<div class="rec ' + cls + '"><div class="rh">' +
+        return '<div class="rec ' + cls + (it.observe ? ' observe' : '') + '"><div class="rh">' +
           '<span class="nm">' + stk(it.code, it.name) + '</span><span class="code faint">' + E(it.code) + '</span>' +
           lbBadge(it.streak) + tierBadge(it.sector_tier) + mlBadge(it) + relayBadge(it) + vaBadge + hcBadge +
+          (it.observe ? '<span class="bd" style="border-color:' + C.gray + ';color:' + C.gray + ';font-size:11px;padding:0 4px">观察·非操作</span>' : '') +
           wlQuickBtn(it.code, it.name) +
           '<span class="sc" style="color:' + scol + '">' + f(it.score, 1) + '</span></div>' +
           '<div class="rb">' + kvHtml +
@@ -2212,8 +2213,8 @@
       h += card('📈 趋势主升 · 候选（' + TR.length + '，🆕=新入选 / 历史=持续跟踪）', body,
         '双通道入选：强趋势（日均≥2%+4涨）与缓坡慢牛（斜率≥1.5%+20日涨≥8%）；🚀加速/🐢放缓标签看涨速变化，🏦标签为机构或主力资金介入证据（龙虎榜净买/大宗机构专用/板块主力净流入）');
     })();
-    h += group('⚡ 强动量 · 连板余波（' + (R.momentum || []).length + '）', R.momentum, 'momentum',
-      '近期≥2次涨停/≥2连板基因 + 多头未破位 + 距高点回撤≤18%（接住“连板妖股型、今日非涨停”掉缝里的票，如风范股份）');
+    h += group('🔭 观察池 · 连板余波（' + (R.momentum || []).length + '）', R.momentum, 'momentum observe-group',
+      '⚠️ 观察级（非操作建议）：近期≥2次涨停/≥2连板基因 + 多头未破位 + 距高点回撤≤18%，历史胜率仅约 9%（样本 11 只）远低于 30% 红线，仅供跟踪连板妖股余波，不构成买入依据');
 
     /* 连板机会计划：挖掘「连板第二天有机会买」的票，给预期高度+买卖区间（2026-08-27 用户需求） */
     (function () {
