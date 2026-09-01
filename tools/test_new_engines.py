@@ -702,6 +702,25 @@ def main():
     _warm = _eng.market_density_filter(_items, "温")
     check("弱市仅留 worth≥45 头部", len(_cold) == 2 and all(x["worth_score"] >= 45 for x in _cold), "-> %d" % len(_cold))
     check("非冷市原样返回", len(_warm) == 4)
+    # #4 修正：密度过滤必须作用于全部买入桶（core/relay/ambush/all），否则主推池无效
+    _rec = {
+        "core": [{"worth_score": 80}, {"worth_score": 40}],
+        "relay": [{"worth_score": 30}, {"worth_score": 55}],
+        "ambush": [{"worth_score": 20}],
+        "all": [{"worth_score": 35}, {"worth_score": 50}],
+        "avoid": [{"worth_score": 10}],          # 风险回避清单，弱市也不该被砍
+        "position": [{"worth_score": 5}],         # 持仓建议，不动
+    }
+    _eng.apply_market_density(_rec, "冷")
+    check("#4 冷市 core 已降密度", len(_rec["core"]) == 1 and _rec["core"][0]["worth_score"] == 80)
+    check("#4 冷市 relay 已降密度", len(_rec["relay"]) == 1 and _rec["relay"][0]["worth_score"] == 55)
+    check("#4 冷市 ambush 已降密度", len(_rec["ambush"]) == 0)
+    check("#4 冷市 all 已降密度", len(_rec["all"]) == 1 and _rec["all"][0]["worth_score"] == 50)
+    check("#4 冷市 avoid 不被砍", len(_rec["avoid"]) == 1 and _rec["avoid"][0]["worth_score"] == 10)
+    check("#4 冷市 position 不动", len(_rec["position"]) == 1 and _rec["position"][0]["worth_score"] == 5)
+    _rec2 = {"core": [{"worth_score": 40}], "all": [{"worth_score": 30}]}
+    _eng.apply_market_density(_rec2, "温")
+    check("#4 非冷市原样返回(多桶)", len(_rec2["core"]) == 1 and len(_rec2["all"]) == 1)
 
     print("\n================ 结果 ================")
     print("PASS=%d  FAIL=%d" % (PASS, FAIL))

@@ -2043,6 +2043,22 @@ def market_density_filter(items, level, min_worth=45):
     return [x for x in items if (x.get("worth_score") or 0) >= min_worth]
 
 
+def apply_market_density(rec, level, min_worth=45):
+    """#4 (2026-09-02 修正)：弱市降密度必须作用于全部「买入推荐桶」，否则主推池无效。
+
+    早期只在 rec["all"] 上过滤，但 notifier 的 _top_recs(core, relay, all)
+    先合并未过滤的 core/relay、仅不足 n 时才回退到已过滤的 all ——
+    结果冷市里核心/接力高辨识度票照常出现，密度没真正降下来。
+    这里统一对 core/relay/ambush/all 四个买入桶做密度过滤；avoid/position 不动
+    （avoid 是风险回避清单、position 是持仓建议，不应因弱市被砍）。
+    非冷市各桶原样返回（market_density_filter 内部已 gate）。
+    """
+    for k in ("core", "relay", "ambush", "all"):
+        if k in rec:
+            rec[k] = market_density_filter(rec.get(k, []), level, min_worth)
+    return rec
+
+
 def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=None, hist=None, relay_info=None):
     rmap = {r["code"]: r for r in risks}
     dmap = {d["code"]: d for d in demons}

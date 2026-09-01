@@ -535,10 +535,10 @@ def run(date_override=None, dedup_close=False):
 
     log("生成当日推荐 ...")
     rec = engine.recommend(lus, risks, demons, inds, sent, cyc, stats, auction["items"], regime, relay)
-    # #4 (2026-09-02)：弱市（标杆热度=冷）主动压低推荐密度，而非硬推。
-    # 仅保留 worth_score 较高的头部标的，避免低质量标的充斥推荐区（日胜率随市场 β 大幅波动）。
-    # recommend() 返回的推荐列表挂在 rec["all"] 下（rec 本身是含 core/relay/avoid 等的 dict）。
-    rec["all"] = engine.market_density_filter(rec.get("all", []), bench_heat.get("level"))
+    # #4 (2026-09-02，2026-09-02 修正)：弱市（标杆热度=冷）主动压低推荐密度，而非硬推。
+    # 统一对 core/relay/ambush/all 四个买入桶做密度过滤（avoid/position 不动），
+    # 否则 notifier 的 _top_recs 先合并未过滤的 core/relay，主推池密度降不下来。
+    rec = engine.apply_market_density(rec, bench_heat.get("level"))
 
     # 连板预期空间引擎（用户需求 2026-08-27）：挖掘「明天有机会买的连板票」，
     # 给买入/卖出区间、止损与预期高度（如 3板→预期5板）；高位票只标注不拦。
