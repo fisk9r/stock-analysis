@@ -727,6 +727,26 @@ def main():
     check("不追票附买入建议行", any("↳ 买入建议" in l for l in _ls),
           "-> %s" % [l for l in _ls if "↳" in l][:1])
 
+    # ---- 替代候选必须「现价就在买点附近」（2026-09-02 用户拍板：现价50买区30=永远等不到）----
+    _z2c = {"items": [dict(_z2["items"][0], replace=[
+        # 现价50.2 vs 买区[30,32]：差 57%，等不到 → 必须被渲染层剔除
+        {"name": "到不了的票", "code": "FAR", "industry": "电子", "market_type": "趋势",
+         "close": 50.2, "buy_zone": [30, 32], "sell_zone": [55, 60], "stop": 28},
+        # 现价31.5 vs 买区[30,32]：就在买区内 → 保留
+        {"name": "能买的票", "code": "NEAR", "industry": "电子", "market_type": "趋势",
+         "close": 31.5, "buy_zone": [30, 32], "sell_zone": [38, 40], "stop": 28.5},
+        # 现价33.4 vs 买区[30,32]：刚出买区 4.4%（≤5%）→ 保留
+        {"name": "贴近买区的票", "code": "OK5", "industry": "机械", "market_type": "趋势",
+         "close": 33.4, "buy_zone": [30, 32], "sell_zone": [40, 42], "stop": 28.5},
+    ])]}
+    _wr2c = _distill(_z2c, holding_codes=set(), watch_codes={"W1"}, topn=14)
+    _ls2 = _wlines(_wr2c, n=12)
+    _rep_ls = [l for l in _ls2 if "↳ 买入建议" in l]
+    check("远买区候选被剔除", not any("到不了的票" in l for l in _rep_ls),
+          "-> %s" % _rep_ls)
+    check("买区内候选保留", any("能买的票" in l for l in _rep_ls))
+    check("贴近买区(≤5%)候选保留", any("贴近买区的票" in l for l in _rep_ls))
+
     # ============ #2 / #4 可升级点回归（2026-09-02）============
     import engine as _eng
     # #2：st=2 二板降权（归因胜率23.9% vs 全样本59.3%）

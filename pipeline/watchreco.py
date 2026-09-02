@@ -168,7 +168,17 @@ def lines(wr, n=6, compact=False):
         if ((it.get("action") or "").startswith("卖出")
                 or (it.get("action") or "").startswith("不追")
                 or it.get("rotate") or (it.get("action") == "离场换强")):
-            for rp in (it.get("replace") or [])[:2]:
+            # 2026-09-02 渲染层防御：只推「现价就在买点附近」的候选——
+            # 现价距买区上沿超过 5% 的票（买区远低于现价，根本等不到）不推；
+            # 先过滤再取前 2，避免无效候选占掉名额。
+            _n = 0
+            for rp in (it.get("replace") or []):
+                _rp_close, _rp_bz = rp.get("close"), (rp.get("buy_zone") or [None, None])
+                if _rp_close and _rp_bz[1] and _rp_close > float(_rp_bz[1]) * 1.05:
+                    continue
+                if _n >= 2:
+                    break
+                _n += 1
                 mt = rp.get("market_type") or ("连板" if (rp.get("streak") or 0) >= 1 else "趋势")
                 if mt == "连板":
                     mtag = "连板" + ("%d板" % rp["streak"] if rp.get("streak") else "票")

@@ -565,6 +565,10 @@ def scan(u, date, codes=None, extra_names=None, costs=None,
             r = None
         if r:
             # 更换建议候选票补齐买卖区间 + 连板/趋势标签（band_levels 轻量、可批量）
+            # 2026-09-02 用户拍板：替代候选必须「现价就在买点附近，能直接换过去买」——
+            # 现价远高于买区上沿的候选（如现价50、买区30：根本等不到回落）直接剔除；
+            # 无法验证（无K线/无区间）的也宁缺毋滥不推。
+            _kept_reps = []
             for rep in (r.get("replace") or []):
                 rc = rep.get("code")
                 if not rc:
@@ -574,15 +578,23 @@ def scan(u, date, codes=None, extra_names=None, costs=None,
                     bd = band_levels(cb)
                 except Exception:
                     bd = None
-                if bd:
-                    rep["buy_zone"] = bd.get("buy_zone")
-                    rep["sell_zone"] = bd.get("sell_zone")
-                    rep["stop"] = bd.get("stop")
-                    rep["band_action"] = bd.get("band_action")
+                if not (cb and bd):
+                    continue
+                _rc_close = float(bd.get("close") or cb[-1]["c"])
+                _bz = bd.get("buy_zone") or [None, None]
+                if not (_bz[0] and _bz[1]) or _rc_close > float(_bz[1]) * 1.05:
+                    continue
+                rep["buy_zone"] = _bz
+                rep["sell_zone"] = bd.get("sell_zone")
+                rep["stop"] = bd.get("stop")
+                rep["band_action"] = bd.get("band_action")
+                rep["close"] = round(_rc_close, 2)
                 rep["streak"] = rep.get("streak") or \
                     (((getattr(u, "streak", None) or {}).get(rc) or {}).get(date, 0)) or \
                     _pool_streak.get(rc, 0)
                 rep["market_type"] = "连板" if (rep.get("streak") or 0) >= 1 else "趋势"
+                _kept_reps.append(rep)
+            r["replace"] = _kept_reps[:3]
             items.append(r)
     order = {"破位卖出": 0, "加仓提示": 1, "回踩买入区": 2,
              "跌破警示": 3, "逼近卖出": 4, "突破持有": 5, "正常持有": 6}
