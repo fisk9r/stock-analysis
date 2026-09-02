@@ -372,6 +372,35 @@ def run(date_override=None, dedup_close=False):
     log("载入行情库 ...")
     u = engine.Universe(con, days=270)
     log("覆盖 %d 只个股 / %d 个交易日" % (len(u.bars), len(u.dates)))
+    # 兜底补发自愈（close_again 专属，2026-09-02 复盘已复现根因）：
+    # 若行情库最新日期非「今日」且今日为交易日且已过 15:10，先 fetch 补齐当日数据再构建，
+    # 避免 pick_date 退化到上一交易日、把昨日复盘当今日补发重推（旧行为：护栏的
+    # `today in u.dates` 兜底在非交易日判定下误判为「非交易日·数据滞后正常」而放行退化）。
+    # 正常 daily build（dedup_close=False）不受影响。fetch 失败则终止构建，绝不发布旧日复盘。
+    if dedup_close:
+        try:
+            _bj0 = _bj_now()
+            _today0 = _bj0.strftime("%Y-%m-%d")
+            _hm0 = _bj0.strftime("%H%M")
+            if u.dates and u.dates[-1] != _today0 and _hm0 >= "1510":
+                _td0 = _is_td
+                if _td0 is None:
+                    try:
+                        _td0 = notifier.trade_calendar.is_trade_day()
+                    except Exception:
+                        _td0 = None
+                if _td0:
+                    log("  ⚠ 兜底: 行情库最新=%s 非今日(%s)，先 fetch 补齐当日数据…"
+                        % (u.dates[-1], _today0))
+                    import fetch as _fetch
+                    _fetch.run()
+                    u = engine.Universe(con, days=270)
+                    log("  ✅ 兜底 fetch 完成，行情库最新=%s" % (u.dates[-1] if u.dates else "空"))
+        except RuntimeError:
+            raise
+        except Exception as e:
+            log("  ⛔ 兜底 fetch 补齐失败：%r" % e)
+            raise RuntimeError("兜底补发：本地缺当日数据且 fetch 补齐失败，终止以避免发布旧日复盘")
     # 数据新鲜度护栏（#15）：交易日后数据仍陈旧 → 终止构建，避免发布过期分析
     _bj = _bj_now()
     _is_td = None
@@ -2011,8 +2040,14 @@ def push_anomaly():
         print("[anomaly] 当前非交易时段（北京 %s），跳过" % notifier._bj_now().strftime("%H:%M"))
         return ["skipped:off-hours"]
     # 1) 实时异动（最优）：盘中随时捕捉涨停/急拉/板块异动
+    # 2026-09-02：附带昨日 zones/连板计划买区映射 → 异动票现价进买区时标注「🔴可买」
+    _data_ctx = None
     try:
-        s = _live_anomaly_summary(_deploy_url())
+        _data_ctx = load_existing_data()
+    except Exception:
+        _data_ctx = None
+    try:
+        s = _live_anomaly_summary(_deploy_url(), data=_data_ctx)
     except Exception as e:
         # 实时抓取失败：绝不回退到昨日 data.js（会被误读为"迟到信息"），直接跳过
         print("[anomaly] 实时异动抓取失败，跳过（不回退旧快照）：%r" % e)
@@ -2298,15 +2333,30 @@ def _live_watch_movers(threshold=3.0):
     return out
 
 
-def _live_anomaly_summary(url):
+def _live_anomaly_summary(url, data=None):
     """实时异动：涨停池 + 涨幅榜急拉，生成 Markdown。
-    各数据源独立容错：某一路失败仅跳过该段，其余仍实时呈现；全部失败才上抛。"""
+    各数据源独立容错：某一路失败仅跳过该段，其余仍实时呈现；全部失败才上抛。
+    2026-09-02（用户需求）：异动达到可买区间时给出「🔴现价进买区✅可买」提示——
+    接入 zones（自选/持仓）与连板计划的买区映射；模板结构与其它推送统一。"""
     import em_api
     now = time.strftime("%Y-%m-%d %H:%M")
+    # 买区映射：zones（关注/持仓票）+ 连板计划（次日竞价介入口径）
+    _zone_bz, _plan_bz = {}, {}
+    if data:
+        for _z in ((data.get("zones") or {}).get("items") or []):
+            _c = _z.get("code")
+            _bz = _z.get("buy_zone")
+            if _c and _bz and _bz[0]:
+                _zone_bz[str(_c)] = (_bz, _z.get("stop"))
+        for _p in ((data.get("recommend") or {}).get("ladder_plans") or []):
+            _c = _p.get("code")
+            _bz = _p.get("buy_zone")
+            if _c and _bz and _bz[0]:
+                _plan_bz[str(_c)] = (_bz, _p.get("stop"), _p.get("name") or "")
     L = []
-    L.append("## A股盘中异动提醒 · %s" % now)
+    L.append("## 🚨 A股盘中异动 · %s" % now)
     L.append("")
-    L.append("> 实时行情来自东方财富公开接口，随时捕捉涨停/急拉/板块异动。")
+    L.append("> 实时捕捉涨停/急拉/关注股异动；现价进入买区的票会标注 🔴**可买**。")
     L.append("")
     # 实时涨停池（独立容错）
     zt = []
@@ -2329,7 +2379,8 @@ def _live_anomaly_summary(url):
             zbc = it.get("zbc") or 0
             tag = ("%d板" % lbc) if lbc and lbc > 1 else "首板"
             warn = " ⚠炸板%d次" % zbc if zbc else ""
-            L.append("- **%s**(/%s) %s · %s · 封板%s%s" % (name, code, tag, hy, fbt_s, warn))
+            _plan = " ｜ 📋连板计划标的（次日竞价达标介入）" if code in _plan_bz else ""
+            L.append("- **%s**(/%s) %s · %s · 封板%s%s%s" % (name, code, tag, hy, fbt_s, warn, _plan))
     else:
         L.append("（当前无涨停标的）")
     L.append("")
@@ -2351,7 +2402,15 @@ def _live_anomaly_summary(url):
             main = m.get("f62") or 0
             hs = m.get("f184") or 0
             main_s = ("主力净流入 %.1f亿" % (main / 1e8)) if abs(main) >= 1e7 else "主力净流出 %.1f亿" % (abs(main) / 1e8)
-            L.append("- **%s**(/%s) +%.2f%% ｜ 换手%.1f%% ｜ %s" % (name, code, pct, hs, main_s))
+            # f2=现价（clist 带 fltt=2 为真实值）：在买区内/贴近买区 → 🔴可买标注
+            _bz = (_zone_bz.get(str(code)) or (_plan_bz.get(str(code)) or (None, None)))[0]
+            _ok = notifier.zone_buyable(m.get("f2"), _bz)
+            _buy = ""
+            if _ok is True and _bz:
+                _buy = " ｜ 🔴 **现价进买区✅ 可买 %.2f~%.2f**" % (_bz[0], _bz[1])
+            elif _ok is False:
+                _buy = " ｜ ⚪ 已过买点·不追"
+            L.append("- **%s**(/%s) %.2f元 +%.2f%% ｜ 换手%.1f%% ｜ %s%s" % (name, code, m.get("f2") or 0, pct, hs, main_s, _buy))
     else:
         L.append("（当前无显著涨幅异动）")
     L.append("")
@@ -2370,9 +2429,16 @@ def _live_anomaly_summary(url):
         L.append("")
         L.append("### ⭐ 关注股盘中异动（%d）" % len(wm))
         for w in wm:
-            L.append("- **%s**(/%s) %s%% ｜ 现价 %s" % (w.get("n"), w.get("c"),
+            _bz = (_zone_bz.get(str(w.get("c"))) or (None, None))[0]
+            _ok = notifier.zone_buyable(w.get("price"), _bz)
+            _buy = ""
+            if _ok is True and _bz:
+                _buy = " ｜ 🔴 **现价进买区✅ 可买 %.2f~%.2f**" % (_bz[0], _bz[1])
+            elif _ok is False:
+                _buy = " ｜ ⚪ 已过买点·观望不追"
+            L.append("- **%s**(/%s) %s%% ｜ 现价 %s%s" % (w.get("n"), w.get("c"),
                       ("+" if w.get("pct", 0) >= 0 else "") + str(w.get("pct")),
-                      w.get("price")))
+                      w.get("price"), _buy))
     if url:
         L.append("---")
         L.append("完整数据看板：%s" % url)
