@@ -2031,6 +2031,52 @@ def st2_adjust(score, worth, streak):
     return score, worth, False
 
 
+def winrate_penalty(worth, tag, wr_map, floor=0.6):
+    """2026-09-03：按标签实测胜率给价值分降权（用户核心诉求=成功率）。
+    实证基线（rec_picks 近90日）：核心龙头 78% / 主线接力 58% / 低位潜伏 43% /
+    趋势·主升强趋势 32% / 动量·连板余波 29%（后两者均值已为负）。
+    规则：胜率<45% → ×0.85；<35% → ×0.75；样本不足或无该标签 → 不动（不臆断）。
+    返回 (new_worth, 系数, 实测胜率 or None)。"""
+    if not wr_map or not tag:
+        return worth, 1.0, None
+    w = wr_map.get(str(tag))
+    if not w or (w.get("n") or 0) < 10:
+        return worth, 1.0, (w or {}).get("win_rate")
+    wr = float(w.get("win_rate") or 0)
+    if wr < 35:
+        k = 0.75
+    elif wr < 45:
+        k = 0.85
+    else:
+        return worth, 1.0, wr
+    k = max(floor, k)
+    return clamp(worth * k, 0, 100), k, wr
+
+
+def apply_winrate_penalty(rec, wr_map, floor=0.6):
+    """对推荐 dict 的买入桶施加实测胜率降权（core/relay/ambush/all/trend/momentum）。"""
+    if not isinstance(rec, dict) or not wr_map:
+        return rec
+    for key in ("core", "relay", "ambush", "all", "trend", "momentum"):
+        arr = rec.get(key)
+        if not isinstance(arr, list):
+            continue
+        out = []
+        for it in arr:
+            if isinstance(it, dict):
+                nw, k, wr = winrate_penalty(it.get("worth_score") or 0, it.get("tag"), wr_map, floor)
+                it["worth_score"] = round(nw, 1)
+                if k < 1.0:
+                    it["wr_penalty"] = round(k, 2)
+                    _note = "实测：该类型近90日胜率仅 %.0f%%（n=%d），已降权" % (wr, (wr_map.get(str(it.get("tag"))) or {}).get("n") or 0)
+                    it.setdefault("reasons", [])
+                    if _note not in it["reasons"]:
+                        it["reasons"] = ([_note] + list(it["reasons"]))[:3]
+            out.append(it)
+        rec[key] = sorted(out, key=lambda x: -(x.get("worth_score") or 0))
+    return rec
+
+
 def market_density_filter(items, level, min_worth=45):
     """#4 (2026-09-02)：弱市主动压低推荐密度。
 

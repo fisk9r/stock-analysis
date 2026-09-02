@@ -115,6 +115,26 @@ ck("day_summary 含被拒", len(ds["rejects"]) == 3)
 bal = ds["balance"]
 ck("balance 总资产>0", bal["total"] > 0)
 
+# 2026-09-03 交易成本真实性（用户要求成功率统计真实）：佣金买+卖、印花税卖出
+# 默认 impact 0.1% / 佣金 0.025% / 印花税 0.05%
+_i, _c, _s = broker_sim._impact(), broker_sim._commission(), broker_sim._stamp()
+ck("费用参数默认生效", _i > 0 and _c > 0 and _s > 0, "i=%s c=%s s=%s" % (_i, _c, _s))
+_r = b.buy_limit("600333", 10.00, 5000, sig={"name": "成本测试", "open_gap": 1.0,
+                                             "streak": 1, "source": "core", "reason": "成本"})
+_exp_buy = 10.00 * (1 + _i + _c)
+ck("买入成交价含冲击+佣金", _r.get("ok") and abs(_r["price"] - _exp_buy) < 0.001,
+   "got=%s exp=%.4f" % (_r.get("price"), _exp_buy))
+# 改为历史买入日，绕过 T+1 撮合拒单
+b.con.execute("UPDATE sim_positions SET buy_date='2026-08-29' WHERE code='600333'")
+b.con.commit()
+_r2 = b.sell_limit("600333", 11.00, sig={"name": "成本测试", "reason": "止盈", "source": "strategy"})
+_exp_sell = 11.00 * (1 - _i - _c - _s)
+ck("卖出成交价扣冲击+佣金+印花税",
+   _r2.get("ok") and abs(_r2["price"] - _exp_sell) < 0.001,
+   "got=%s exp=%.4f" % (_r2.get("price"), _exp_sell))
+ck("费用计入后仍盈利但低于毛价(10→11 毛+10%)",
+   _r2.get("ok") and 0 < _r2["pnl_pct"] < 10.0, "pnl=%s" % _r2.get("pnl_pct"))
+
 # ============ 3. runner 复盘写入 sim_review.json ============
 print("\n[3] runner 复盘与推送文本")
 import runner

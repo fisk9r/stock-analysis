@@ -36,6 +36,17 @@ def _impact():
     return float(((_load_cfg().get("sim")) or {}).get("impact_cost_pct") or 0.1) / 100.0
 
 
+def _commission():
+    """佣金（买卖双向）：默认万2.5。2026-09-03 用户要求成功率统计真实——
+    此前模拟盘零费用，模拟收益虚高（每笔来回约 0.15%），胜率评估失真。"""
+    return float(((_load_cfg().get("sim")) or {}).get("commission_pct") or 0.025) / 100.0
+
+
+def _stamp():
+    """印花税（仅卖出）：默认万5。"""
+    return float(((_load_cfg().get("sim")) or {}).get("stamp_pct") or 0.05) / 100.0
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sim_trades(
   ts TEXT, date TEXT, code TEXT, name TEXT,
@@ -130,12 +141,14 @@ class SimBroker:
 
     def balance(self) -> dict:
         d = time.strftime("%Y-%m-%d")
+        # 建仓成本口径 = 成交价 + 冲击成本 + 佣金（与 buy_limit 一致，2026-09-03）
+        _buy_rate = _impact() + _commission()
         today_buy = self.con.execute(
             "SELECT COALESCE(SUM(buy_price*volume*(1+?)),0) FROM sim_positions "
-            "WHERE buy_date=?", (_impact(), d)).fetchone()[0]
+            "WHERE buy_date=?", (_buy_rate, d)).fetchone()[0]
         open_buy_all = self.con.execute(
             "SELECT COALESCE(SUM(buy_price*volume*(1+?)),0) FROM sim_positions "
-            "WHERE sell_date IS NULL", (_impact(),)).fetchone()[0]
+            "WHERE sell_date IS NULL", (_buy_rate,)).fetchone()[0]
         open_mv = self.con.execute(
             "SELECT COALESCE(SUM(buy_price*volume),0) FROM sim_positions "
             "WHERE sell_date IS NULL").fetchone()[0]
@@ -167,7 +180,7 @@ class SimBroker:
         vol = int(amount_yuan / price / 100) * 100
         if vol < 100:
             return {"ok": False, "reason": "金额不足一手"}
-        fill = price * (1 + _impact())
+        fill = price * (1 + _impact() + _commission())
         # 2026-09-01 云端托管加固：撮合层资金闸门。
         # 上层风控只按「单笔上限 + 单票仓位比」卡金额，若状态包丢失（Release 恢复
         # 失败）导致一天内多轮重复建仓，累计买入可能超过账户现金 → 出现负现金假账，
@@ -217,7 +230,8 @@ class SimBroker:
             reason = "T+1 硬约束：当日买入当日不可卖（撮合层拒绝，最早明日）"
             self.record_reject(code, "SELL", reason, sig.get("name") or "")
             return {"ok": False, "reason": reason, "buy_date": buy_date}
-        fill = price * (1 - _impact())
+        # 2026-09-03：卖出同样扣冲击成本 + 佣金 + 印花税（模拟收益与胜率统计才真实）
+        fill = price * (1 - _impact() - _commission() - _stamp())
         pnl = (fill / buy_price - 1) * 100
         self.con.execute(
             "INSERT OR REPLACE INTO sim_trades VALUES(?,?,?,?,?,?,?,?,?,?,?)",

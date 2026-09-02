@@ -841,6 +841,33 @@ def main():
     _p5, _pr5 = _bld._norm_em_quote(980, 98765)   # 全编码场景：9.8% / 987.65
     check("关注股异动 全编码联动除100", _p5 == 9.8 and _pr5 == 987.65)
 
+    # ---- 实测胜率自动降权（2026-09-03 用户核心诉求：成功率闭环）----
+    _wr = {"核心龙头": {"n": 37, "win_rate": 78.4, "avg_pct": 5.01},
+           "主线接力": {"n": 114, "win_rate": 57.9, "avg_pct": 2.55},
+           "低位潜伏": {"n": 230, "win_rate": 42.6, "avg_pct": 0.15},
+           "趋势·主升强趋势": {"n": 22, "win_rate": 31.8, "avg_pct": -1.33},
+           "动量·连板余波": {"n": 31, "win_rate": 29.0, "avg_pct": -1.73},
+           "观察": {"n": 3, "win_rate": 0.0, "avg_pct": 0.0}}
+    _k_hi = _eng.winrate_penalty(80, "核心龙头", _wr)[1]
+    _k_mid = _eng.winrate_penalty(80, "主线接力", _wr)[1]
+    _k_low = _eng.winrate_penalty(80, "低位潜伏", _wr)[1]
+    _k_bad = _eng.winrate_penalty(80, "趋势·主升强趋势", _wr)[1]
+    check("高胜率标签不降权", _k_hi == 1.0 and _k_mid == 1.0)
+    check("中低胜率标签降权0.85", _k_low == 0.85, "-> %s" % _k_low)
+    check("负期望标签降权0.75", _k_bad == 0.75, "-> %s" % _k_bad)
+    check("样本<10不臆断", _eng.winrate_penalty(80, "观察", _wr)[1] == 1.0)
+    check("无标签/无映射不动", _eng.winrate_penalty(80, None, _wr)[1] == 1.0
+          and _eng.winrate_penalty(80, "主线接力", None)[1] == 1.0)
+    _rec3 = {"all": [{"name": "趋势票", "tag": "趋势·主升强趋势", "worth_score": 80},
+                     {"name": "接力票", "tag": "主线接力", "worth_score": 70},
+                     {"name": "潜伏票", "tag": "低位潜伏", "worth_score": 72}]}
+    _eng.apply_winrate_penalty(_rec3, _wr)
+    _by = {x["name"]: x for x in _rec3["all"]}
+    check("降权后排序：接力票居首", _rec3["all"][0]["name"] == "接力票",
+          "-> %s" % [(x["name"], x["worth_score"]) for x in _rec3["all"]])
+    check("降权票带实测说明", any("实测" in r for r in (_by["趋势票"].get("reasons") or [])))
+    check("降权票标 wr_penalty", _by["趋势票"].get("wr_penalty") == 0.75)
+
     print("\n================ 结果 ================")
     print("PASS=%d  FAIL=%d" % (PASS, FAIL))
     return 0 if FAIL == 0 else 1

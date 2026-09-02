@@ -568,6 +568,16 @@ def run(date_override=None, dedup_close=False):
     # 统一对 core/relay/ambush/all 四个买入桶做密度过滤（avoid/position 不动），
     # 否则 notifier 的 _top_recs 先合并未过滤的 core/relay，主推池密度降不下来。
     rec = engine.apply_market_density(rec, bench_heat.get("level"))
+    # 2026-09-03 闭环（用户要成功率）：按「实测次日胜率」给低胜率标签自动降权——
+    # rec_picks 实证：核心龙头78% / 主线接力58% > 低位潜伏43% > 趋势主升32% > 连板余波29%（均值负）。
+    # 低胜率标签不是硬砍，而是压低价值分→排序自然靠后，仅强确认票才浮上来。
+    try:
+        _wr = notifier.tag_winrate(con, days=90)
+        rec = engine.apply_winrate_penalty(rec, _wr)
+        log("  实测胜率降权：%s" % ("、".join("%s %.0f%%(n=%d)" % (k, v["win_rate"], v["n"])
+                                             for k, v in list(_wr.items())[:4]) or "样本不足"))
+    except Exception as _e:
+        log("  实测胜率降权跳过：%r" % _e)
 
     # 连板预期空间引擎（用户需求 2026-08-27）：挖掘「明天有机会买的连板票」，
     # 给买入/卖出区间、止损与预期高度（如 3板→预期5板）；高位票只标注不拦。

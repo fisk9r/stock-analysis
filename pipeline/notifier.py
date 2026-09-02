@@ -1566,6 +1566,18 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     # ---- 推荐 Top5（双重认证前置：评分+晋级率双达标排前并打 ✅，未认证殿后） ----
     L.append("")
     recs = _top_recs(rec.get("core"), rec.get("relay"), rec.get("all"), 5) if _on("rec") else []
+    # 信号实测胜率（2026-09-03 用户要求「要成功率」）：按 tag 统计近 N 笔次日表现，
+    # 让推荐带上历史实证，低胜率标签一眼可见（样本<10 不出结论，避免小样本误导）。
+    _tw = _tag_winrate(con, days=90)
+    if _on("rec") and _tw:
+        L.append("")
+        L.append("📊 **信号实测（近90日 · 次日收红率）**：%s"
+                 % " ｜ ".join("%s %.0f%%(n=%d) 均值%+.2f%%"
+                               % (k, v["win_rate"], v["n"], v["avg_pct"]) for k, v in _tw))
+        _worst = min(_tw.items(), key=lambda kv: kv[1]["win_rate"])
+        if _worst[1]["win_rate"] < 45:
+            L.append("> ⚠ 最差标签 **%s**（胜率 %.0f%%）：仅在其出现强确认时才考虑。"
+                     % (_worst[0], _worst[1]["win_rate"]))
     # 双确认置顶；组内严格按买入价值分降序、再按晋级率降序
     # （修复：此前只分组不排序，组内保持 core→relay 原始顺序，出现「低分在前」的分数错乱）
     recs = sorted(recs, key=lambda x: (0 if _dual_ok(x) else 1,
@@ -2857,6 +2869,35 @@ def basis_once(ledger_mode, full_text, brief_text):
         return full_text
     except Exception:
         return full_text
+
+
+def tag_winrate(con, days=90, min_n=10):
+    """按推荐标签统计次日实测表现（2026-09-03 用户要求「要成功率」）：
+    rec_picks.next_pct 非空即已兑现，按 tag 聚合胜率(收红占比)/均值/样本数。
+    样本 < min_n 不出结论（小样本误导比不给信息更糟）。返回 {tag: {win_rate,n,avg_pct}}。
+    """
+    if con is None:
+        return {}
+    try:
+        rows = con.execute(
+            "SELECT tag, COUNT(*) n, AVG(next_pct) avg_pct, "
+            "SUM(CASE WHEN next_pct > 0 THEN 1 ELSE 0 END) wins "
+            "FROM rec_picks WHERE next_pct IS NOT NULL AND tag IS NOT NULL "
+            "AND date >= date('now', ?) GROUP BY tag", ("-%d days" % int(days),)).fetchall()
+        out = {}
+        for tag, n, avg_pct, wins in rows:
+            if not tag or (n or 0) < int(min_n):
+                continue
+            out[str(tag)] = {"n": int(n),
+                             "win_rate": round(float(wins or 0) * 100.0 / int(n), 1),
+                             "avg_pct": round(float(avg_pct or 0), 2)}
+        return dict(sorted(out.items(), key=lambda kv: -kv[1]["win_rate"]))
+    except Exception:
+        return {}
+
+
+def _tag_winrate(con, days=90, min_n=10):
+    return tag_winrate(con, days=days, min_n=min_n)
 
 
 def fetch_open_snapshot(codes):
