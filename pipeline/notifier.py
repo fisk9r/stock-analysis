@@ -1067,8 +1067,15 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
         # （已复现：20:00 兜底被 once-per-day 吞掉，用户收不到补发）。
         # SA_FORCE_PUSH=1 显式强制绕过（手工补发/测试）。
         _force = os.environ.get("SA_FORCE_PUSH") == "1"
+        _last_ts = _last_push_ts(mode, analysis_date)
+        # 仅允许「同一分析日、且发生在当日(自然日)内」的 >2h 重推：
+        # 覆盖合法场景 16:36 主推 → 20:00 兜底(同自然日, ~3.5h)。
+        # 禁止跨自然日重发「昨日复盘」——本地缺当日数据致 build 退化到上一交易日时，
+        # 25h 的间隔会误触发 gap 放行，把昨日复盘当成今日补发重推（2026-09-02 已复现）。
         _gap_ok = (mode == "close_again"
-                   and _minutes_since(_last_push_ts(mode, analysis_date)) > 120)
+                   and _last_ts is not None
+                   and str(_last_ts).startswith(_bj_now().strftime("%Y-%m-%d"))
+                   and _minutes_since(_last_ts) > 120)
         if not (_force or _gap_ok):
             print("[notifier][%s] 今日已推送，跳过通道发送（防重复触发）" % mode)
             return ["skipped:dup"]
@@ -1631,6 +1638,10 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         meta = t.get("trend_meta") or {}
         vd = t.get("verdict") or {}
         act = vd.get("action") or t.get("advice") or ""
+        # 2026-09-02（用户拍板：我没买的票不要推送卖点）——趋势跟踪池的票默认未持仓，
+        # 「卖出（分批止盈）」本是持仓者语境（现价进入卖出区）→ 对未持仓者即「已过买点」。
+        if act.startswith("卖出"):
+            act = "回避（趋势走坏）" if "止损" in act else "不追（已过买点）"
         # 趋势早期票：显式「建议买入·持有X天」（用户需求：前期就给买入+持有期限）
         sfx = ""
         if act:
@@ -2382,7 +2393,8 @@ def _act_emoji(act):
     推送为 Markdown，无法着色文字，用 🔴/🟢/⚪ 圆形 emoji 作视觉区分。
     """
     a = act or ""
-    if a.startswith("卖出") or "卖出" in a or a in ("离场换强", "减仓", "止损", "跌破警示"):
+    if a.startswith("卖出") or "卖出" in a or a in ("离场换强", "减仓", "止损", "跌破警示") \
+            or a.startswith("回避"):
         return "🟢"
     if a in ("建议买入", "回踩买入", "加仓") or "买入" in a:
         return "🔴"

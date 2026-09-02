@@ -24,11 +24,19 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# 动作紧急度（越小越靠前）
+# 动作紧急度（越小越靠前）——持仓票视角：卖出最优先（止盈止损关系真金白银）
 _URGENCY = {
     "卖出（止损）": 0, "卖出（追板被套）": 0, "卖出（止盈）": 1,
     "离场换强": 2, "减仓": 3, "加仓": 4,
     "建议买入": 5, "回踩买入": 6, "持有（强势）": 7, "持有": 8, "观望": 9,
+}
+
+# 2026-09-02（用户拍板：我没买的票不要给我推送卖点）——非持仓票视角：买点最优先。
+# 自选票的 zones「卖出」判定本是持仓者语境（进入卖出区=持仓者止盈），
+# 对未买入者实际含义是「已过买点/走坏」，转译后按「现在能不能买」排序。
+_URGENCY_UNHELD = {
+    "建议买入": 0, "回踩买入": 1, "加仓": 2, "持有（强势）": 3, "持有": 4,
+    "观望": 5, "不追（已过买点）": 6, "回避（趋势走坏）": 7,
 }
 
 
@@ -69,6 +77,12 @@ def distill(zones_data, holding_codes=None, watch_names=None, topn=14, watch_cod
             code = it.get("code")
             v = _verdict(it)
             is_holding = code in holding_codes or it.get("cost")
+            # 2026-09-02（用户拍板）：没买的票不给「卖出」动作——
+            # 「卖出（止盈）」= 价格进入卖出区 → 未持仓者视角「不追（已过买点）」；
+            # 「卖出（止损/追板被套）」= 走坏 → 未持仓者视角「回避（趋势走坏）」。
+            # 持仓票（有成本/在持仓表）保留原卖出动作，止盈止损只对真金白银有意义。
+            if not is_holding and v.startswith("卖出"):
+                v = "不追（已过买点）" if "止盈" in v else "回避（趋势走坏）"
             buy = it.get("buy_zone") or [None, None]
             sell = it.get("sell_zone") or [None, None]
             rs = it.get("reasons") or []
@@ -96,9 +110,14 @@ def distill(zones_data, holding_codes=None, watch_names=None, topn=14, watch_cod
     # 2026-09-01 排序前置（用户诉求：自选票加入后每天都要收到操作说明）：
     # 此前统一按紧急度排序，自选/持仓票常被推荐池的票挤到 n=6 之外被截断，
     # 表现为「票加进自选了但推送里看不到它的操作提示」（中化国际 600500 即此例）。
-    # 现在顺序：持仓(有成本) > 自选(关注池) > 其它推荐票，组内再按紧急度排序。
+    # 组序：持仓(有成本) > 自选(关注池) > 其它推荐票；
+    # 组内紧急度分视角：持仓票卖出优先（_URGENCY），非持仓票买点优先（_URGENCY_UNHELD，2026-09-02）。
+    def _urg(x):
+        tbl = _URGENCY if x.get("is_holding") else _URGENCY_UNHELD
+        return tbl.get(x["action"], 9)
+
     items.sort(key=lambda x: (0 if x.get("is_holding") else (1 if x.get("is_watch") else 2),
-                              _URGENCY.get(x["action"], 9),
+                              _urg(x),
                               -(x.get("pnl_pct") if x.get("pnl_pct") is not None else -99)))
     items = items[:topn]
     return {
@@ -143,9 +162,12 @@ def lines(wr, n=6, compact=False):
         if note and not compact:
             seg += "（%s）" % note[:28]
         out.append(seg)
-        # 2026-09-01 用户需求：需要卖出的票 → 给出买入建议（可连板票/可趋势票）
+        # 2026-09-01 用户需求：需要卖出/不追的票 → 给出买入建议（可连板票/可趋势票）
         # + 同板块优先 + 买入区间/卖出区间（zones.replace 候选已带 industry/market_type/buy_zone/sell_zone）
-        if (it.get("action") or "").startswith("卖出") or it.get("rotate") or (it.get("action") == "离场换强"):
+        # 2026-09-02：「不追（已过买点）」票同样附替代买入建议（用户诉求：推送要给能买的票）
+        if ((it.get("action") or "").startswith("卖出")
+                or (it.get("action") or "").startswith("不追")
+                or it.get("rotate") or (it.get("action") == "离场换强")):
             for rp in (it.get("replace") or [])[:2]:
                 mt = rp.get("market_type") or ("连板" if (rp.get("streak") or 0) >= 1 else "趋势")
                 if mt == "连板":

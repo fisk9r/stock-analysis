@@ -688,6 +688,45 @@ def main():
     _iw = next((i for i, x in enumerate(_wr["items"]) if x["code"] == "B"), 99)
     check("#252 自选排序前置于纯推荐票", _iw < _ir, "watch=%d rec=%d" % (_iw, _ir))
 
+    # ============ 未持仓票不给「卖出」动作（2026-09-02 用户拍板）============
+    # 「我都没买怎么卖」：自选票进入卖出区→原样输出「卖出（止盈）」→ 未持仓者误导。
+    _z2 = {"items": [
+        # 自选票·进入卖出区（原判定「卖出（止盈）」）→ 应转译「不追（已过买点）」
+        {"code": "W1", "name": "自选涨到卖区", "action": "分批止盈（进入卖出区）", "cost": None,
+         "buy_zone": [4, 4.5], "sell_zone": [6, 6.5], "stop": 3.8, "horizon": "短线",
+         "urgent": False, "reasons": ["r"], "pnl_pct": None, "rotate": None, "replace": [], "time_status": None},
+        # 自选票·破位（原判定「卖出（止损）」）→ 应转译「回避（趋势走坏）」
+        {"code": "W2", "name": "自选破位", "action": "破位卖出", "cost": None,
+         "buy_zone": [4, 4.5], "sell_zone": [6, 6.5], "stop": 3.8, "horizon": "短线",
+         "urgent": False, "reasons": ["r"], "pnl_pct": None, "rotate": None, "replace": [], "time_status": None},
+        # 持仓票·进入卖出区 → 保留「卖出（止盈）」（真金白银）
+        {"code": "H1", "name": "持仓止盈", "action": "分批止盈（进入卖出区）", "cost": 5.0,
+         "buy_zone": [4, 4.5], "sell_zone": [6, 6.5], "stop": 3.8, "horizon": "短线",
+         "urgent": False, "reasons": ["r"], "pnl_pct": 12.0, "rotate": None, "replace": [], "time_status": None},
+        # 自选票·回踩买入区 → 保持买点动作且排最前（用户要买点票）
+        {"code": "W3", "name": "自选买点", "action": "回踩买入区", "cost": None,
+         "buy_zone": [4, 4.5], "sell_zone": [6, 6.5], "stop": 3.8, "horizon": "短线",
+         "urgent": False, "reasons": ["r"], "pnl_pct": None, "rotate": None, "replace": [], "time_status": None},
+    ]}
+    _wr2 = _distill(_z2, holding_codes={"H1"}, watch_codes={"W1", "W2", "W3"}, topn=14)
+    _m2 = {x["code"]: x for x in _wr2["items"]}
+    check("自选进卖区→不追", _m2["W1"]["action"] == "不追（已过买点）", "-> %s" % _m2["W1"]["action"])
+    check("自选破位→回避", _m2["W2"]["action"] == "回避（趋势走坏）", "-> %s" % _m2["W2"]["action"])
+    check("持仓卖出动作保留", _m2["H1"]["action"].startswith("卖出"), "-> %s" % _m2["H1"]["action"])
+    check("买点票排自选组最前（持仓组之后）",
+          [x["code"] for x in _wr2["items"]] == ["H1", "W3", "W1", "W2"],
+          "-> order=%s" % [x["code"] for x in _wr2["items"]])
+    check("sell_n 只计真持仓卖出", _wr2["sell_n"] == 1, "-> %d" % _wr2["sell_n"])
+    # lines() 渲染：不追票应附替代买入建议（↳ 买入建议）
+    from watchreco import lines as _wlines
+    _z2b = {"items": [dict(_z2["items"][0], replace=[
+        {"name": "替代票", "code": "ALT", "industry": "电子", "market_type": "趋势",
+         "buy_zone": [5, 5.2], "sell_zone": [7, 7.4], "stop": 4.6}])]}
+    _wr2b = _distill(_z2b, holding_codes=set(), watch_codes={"W1"}, topn=14)
+    _ls = _wlines(_wr2b, n=10)
+    check("不追票附买入建议行", any("↳ 买入建议" in l for l in _ls),
+          "-> %s" % [l for l in _ls if "↳" in l][:1])
+
     # ============ #2 / #4 可升级点回归（2026-09-02）============
     import engine as _eng
     # #2：st=2 二板降权（归因胜率23.9% vs 全样本59.3%）
