@@ -722,6 +722,21 @@ def main():
     _eng.apply_market_density(_rec2, "温")
     check("#4 非冷市原样返回(多桶)", len(_rec2["core"]) == 1 and len(_rec2["all"]) == 1)
 
+    # ---- 关注股盘中异动 · 东财编码值归一化（2026-09-02 华电辽能 bug：-314%/现价1357）----
+    import build as _bld
+    _p, _pr = _bld._norm_em_quote(-314, 1357)
+    check("关注股异动 编码值归一 pct", _p == -3.14, "-> %s" % _p)
+    check("关注股异动 编码值归一 price", _pr == 13.57, "-> %s" % _pr)
+    _p2, _pr2 = _bld._norm_em_quote(-3.14, 13.57)
+    check("关注股异动 真实值不动 pct", _p2 == -3.14)
+    check("关注股异动 真实值不动 price", _pr2 == 13.57)
+    _p3, _pr3 = _bld._norm_em_quote(None, "--")
+    check("关注股异动 空值容错", _p3 == 0.0 and _pr3 is None)
+    _p4, _pr4 = _bld._norm_em_quote(1.2, 1700.0)  # 高价股真实值（茅台级）不误伤
+    check("关注股异动 高价股不误伤 price", _pr4 == 1700.0 and _p4 == 1.2)
+    _p5, _pr5 = _bld._norm_em_quote(980, 98765)   # 全编码场景：9.8% / 987.65
+    check("关注股异动 全编码联动除100", _p5 == 9.8 and _pr5 == 987.65)
+
     print("\n================ 结果 ================")
     print("PASS=%d  FAIL=%d" % (PASS, FAIL))
     return 0 if FAIL == 0 else 1

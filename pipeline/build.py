@@ -2246,6 +2246,27 @@ def _crash_section():
         return False, "> 盘面恐慌监控暂不可用：%s" % str(e)[:40]
 
 
+def _norm_em_quote(pct, price):
+    """东财 push2 stock/get 若未带 fltt=2，f43(现价)/f170(涨跌幅) 返回 ×100 编码整数
+    （2026-09-02 实测：华电辽能显示「-314.00% ｜ 现价 1357」，实为 -3.14% / 13.57 元）。
+    归一化兜底：两字段缩放一致，联合判定——主板/创业板/科创板涨跌幅不超 ±20%，
+    |pct|>21 即判定为编码值，price 同步除以 100（编码价格与真实价格区间重叠，无法单靠 price 判定）。"""
+    try:
+        pct = float(pct) if pct not in (None, "-", "--", "") else 0.0
+    except Exception:
+        pct = 0.0
+    encoded = abs(pct) > 21
+    if encoded:
+        pct /= 100.0
+    try:
+        price = float(price) if price not in (None, "-", "--", "") else None
+    except Exception:
+        price = None
+    if price is not None and encoded:
+        price /= 100.0
+    return round(pct, 2), (round(price, 2) if price is not None else price)
+
+
 def _live_watch_movers(threshold=3.0):
     """关注股盘中实时异动：对关注池（notify/watch.json/holdings）实时报价，挑出 |涨跌幅|≥阈值
     或触及涨停/跌停的标的。走东财 push2（CI 有网）；任一失败仅跳过该只。"""
@@ -2264,16 +2285,14 @@ def _live_watch_movers(threshold=3.0):
         secid = "%d.%s" % (m, c)
         try:
             j = em_api.push2_json(
-                "/api/qt/stock/get?secid=%s&fields=f43,f57,f58,f170&_=%d" % (secid, int(time.time() * 1000)))
+                "/api/qt/stock/get?secid=%s&fields=f43,f57,f58,f170&fltt=2&invt=2&_=%d"
+                % (secid, int(time.time() * 1000)))
             d = (j or {}).get("data") or {}
-            pct = d.get("f170")
-            try:
-                pct = float(pct) if pct not in (None, "-", "--", "") else 0.0
-            except Exception:
-                pct = 0.0
+            # fltt=2 下 f43/f170 为真实浮点；若上游异常仍回编码整数，由 _norm_em_quote 兜底
+            pct, price = _norm_em_quote(d.get("f170"), d.get("f43"))
             if abs(pct) >= threshold or abs(pct) >= 9.8:
                 out.append({"c": c, "n": d.get("f58") or names.get(c) or c,
-                            "pct": round(pct, 2), "price": d.get("f43")})
+                            "pct": pct, "price": price})
         except Exception:
             continue
     return out
