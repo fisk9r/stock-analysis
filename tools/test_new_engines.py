@@ -767,6 +767,31 @@ def main():
     check("飞在天上/无买区靠后",
           set(x["name"] for x in _sorted[2:]) == {"飞在天上", "无买区票"})
 
+    # ---- 竞价确认操作提示（2026-09-02 用户需求：给减半/加仓/买入/观望明确动作）----
+    from notifier import auction_action as _aa
+    _z_hold_bad = {"action": "破位卖出", "rotate": "止损", "rotate_reason": "趋势向下",
+                   "buy_zone": [5, 5.5], "sell_zone": [9, 10], "stop": 4.8}
+    _e, _a, _w = _aa("600500", "持仓破位", True, _z_hold_bad, {"open": 5.4, "open_pct": -3.0})
+    check("持仓破位→止损离场", _a == "止损离场" and _e == "🟢")
+    _z_hold = {"action": "正常持有", "rotate": None, "rotate_reason": "",
+               "buy_zone": [5, 5.5], "sell_zone": [9, 10], "stop": 4.8}
+    _e, _a, _ = _aa("X", "持仓低开", True, _z_hold, {"open": 4.8, "open_pct": -3.5})
+    check("持仓低开≤-2%→减半提示", "减半" in _a and _e == "🟢", "-> %s" % _a)
+    _e, _a, _ = _aa("X", "持仓进卖区", True, _z_hold, {"open": 9.2, "open_pct": 5.0})
+    check("持仓竞价进卖点区→止盈/减半", "止盈" in _a, "-> %s" % _a)
+    _e, _a, _ = _aa("X", "持仓高开强", True, _z_hold, {"open": 5.8, "open_pct": 3.2})
+    check("持仓高开≥2%→持有/可加仓", "加仓" in _a and _e == "🔴", "-> %s" % _a)
+    _e, _a, _ = _aa("X", "持仓平开", True, _z_hold, {"open": 5.45, "open_pct": 0.1})
+    check("持仓平开→按计划持有", "持有" in _a, "-> %s" % _a)
+    _z_watch = {"action": "正常持有", "rotate": None, "rotate_reason": "",
+                "buy_zone": [10, 11], "sell_zone": [15, 16], "stop": 9.5}
+    _e, _a, _ = _aa("Y", "关注进买区", False, _z_watch, {"open": 10.8, "open_pct": 1.0})
+    check("关注竞价进买区→可买入", "可买入" in _a and _e == "🔴", "-> %s" % _a)
+    _e, _a, _ = _aa("Y", "关注高开飞", False, _z_watch, {"open": 13.0, "open_pct": 8.0})
+    check("关注高开过买点→观望不追", "不追" in _a, "-> %s" % _a)
+    _e, _a, _ = _aa("Y", "关注低开破区", False, _z_watch, {"open": 9.6, "open_pct": -2.5})
+    check("关注低开破买区→观望", "观望" in _a, "-> %s" % _a)
+
     # ============ #2 / #4 可升级点回归（2026-09-02）============
     import engine as _eng
     # #2：st=2 二板降权（归因胜率23.9% vs 全样本59.3%）

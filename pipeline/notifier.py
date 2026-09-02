@@ -2859,10 +2859,143 @@ def basis_once(ledger_mode, full_text, brief_text):
         return full_text
 
 
+def fetch_open_snapshot(codes):
+    """竞价确认后实时拉自选/持仓票的今开/昨收/现价（腾讯 qt.gtimg，9:25 集合竞价成交价）。
+    返回 {code: {"open":x,"prev":x,"price":x,"open_pct":x}}；失败返回 {}（调用方降级）。"""
+    if not codes:
+        return {}
+    try:
+        import urllib.request, ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        pref = [("-sh" if c[0] in "69" else "-sz") + c for c in codes if len(c) == 6]
+        if not pref:
+            return {}
+        url = "https://qt.gtimg.cn/q=" + ",".join(x.replace("-", "=") for x in
+                                                  [("s_" + p) for p in pref])
+        # s_ 前缀精简行情：v_s_sh600396="1~华电辽能~600396~现价~涨跌~涨跌幅~成交量~成交额~总市值";
+        # 精简格式无今开 → 改用完整行情（f[5]=今开）
+        url = "https://qt.gtimg.cn/q=" + ",".join(
+            ("sh" if c[0] in "69" else "sz") + c for c in codes if len(c) == 6)
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        raw = urllib.request.urlopen(req, timeout=15, context=ctx).read().decode("gbk", "ignore")
+        out = {}
+        for line in raw.strip().split(";"):
+            line = line.strip()
+            if "=" not in line:
+                continue
+            val = line.split("=", 1)[1].strip().strip('"')
+            f = val.split("~")
+            if len(f) < 6 or not f[2]:
+                continue
+            code = f[2]
+            try:
+                price, prev, opx = float(f[3]), float(f[4]), float(f[5])
+            except Exception:
+                continue
+            open_pct = round((opx / prev - 1) * 100, 2) if prev > 0 and opx > 0 else None
+            out[code] = {"open": opx if opx > 0 else None, "prev": prev,
+                         "price": price, "open_pct": open_pct}
+        return out
+    except Exception:
+        return {}
+
+
+def auction_action(code, name, is_holding, zone_it, snap):
+    """单票竞价操作判定（2026-09-02 用户需求：竞价确认后给减半/加仓/买入/观望明确动作）。
+    zone_it: zones item（买卖区/动作判定，可为 None）；snap: fetch_open_snapshot 条目（可为 None）。
+    返回 (emoji, 动作短语, 依据) 或 None（无任何信息可判）。"""
+    bz = (zone_it or {}).get("buy_zone") or [None, None]
+    sz = (zone_it or {}).get("sell_zone") or [None, None]
+    stop = (zone_it or {}).get("stop")
+    act = (zone_it or {}).get("action") or ""
+    rot = (zone_it or {}).get("rotate")
+    opx = (snap or {}).get("open")
+    open_pct = (snap or {}).get("open_pct")
+    # ── 持仓票：卖出/减半/加仓/持有 ──
+    if is_holding:
+        if act == "破位卖出" or rot in ("止损", "割肉"):
+            return "🟢", "止损离场", ((zone_it or {}).get("rotate_reason") or act)[:28]
+        if open_pct is not None and open_pct <= -2:
+            return "🟢", "低开%.1f%%·开盘走弱即减半" % open_pct, "竞价低开 T+1 收红率仅24%"
+        if opx and sz[0] and opx >= sz[0]:
+            return "🟢", "竞价进卖点区·分批止盈/减半", "开盘 %.2f ≥ 卖点 %.2f" % (opx, sz[0])
+        if open_pct is not None and open_pct >= 2:
+            return "🔴", "竞价强势确认·持有为主，回踩不破MA20可加仓", "高开 %.1f%%" % open_pct
+        if open_pct is not None:
+            return "⚪", "平开·按计划持有", ("破 %s 止损" % ("%.2f" % stop)) if stop else "盯卖点区"
+        return "⚪", "持有·竞价未采集", ("破 %s 止损" % ("%.2f" % stop)) if stop else ""
+    # ── 关注票：买入/观望 ──
+    if act == "破位卖出" or rot in ("止损", "割肉"):
+        return "🟢", "回避·趋势走坏", ((zone_it or {}).get("rotate_reason") or act)[:28]
+    if opx and bz[0] and bz[1] and bz[0] <= opx <= float(bz[1]) * 1.05:
+        seg = "可买入 %.2f~%.2f" % (bz[0], float(bz[1]))
+        return "🔴", "竞价进买区✅ " + seg, ("破 %s 止损" % ("%.2f" % stop)) if stop else ""
+    if opx and bz[1] and opx > float(bz[1]) * 1.05:
+        return "⚪", "高开已过买点·观望不追（回落 %.2f~%.2f 再看）" % (bz[0], bz[1]), ""
+    if opx and bz[0] and opx < bz[0]:
+        return "⚪", "低开破买区·观望（企稳回买区 %.2f~%.2f 再看）" % (bz[0], bz[1]), ""
+    if opx and open_pct is not None:
+        return "⚪", "竞价开 %.1f%%·观望等方向" % open_pct, ""
+    return None
+
+
+def _today_action_lines(data, snap):
+    """「⚡ 今日操作提示」行：持仓+自选逐票竞价动作。持仓在前，买入提示次之，观望殿后。"""
+    try:
+        import holdings as _hd
+        positions = _hd.load_positions() or []
+    except Exception:
+        positions = []
+    zmap = {x.get("code"): x for x in ((data.get("zones") or {}).get("items") or [])
+            if x.get("code")}
+    rows = []
+    for p in positions:
+        code = str(p.get("code") or "").strip()
+        if not code or len(code) != 6:
+            continue
+        z = zmap.get(code)
+        name = p.get("name") or (z or {}).get("name") or code
+        is_holding = bool(p.get("cost")) or (z or {}).get("cost") is not None
+        r = auction_action(code, name, is_holding, z, snap.get(code))
+        if not r:
+            continue
+        emo, actv, why = r
+        seg = "- %s **%s** → %s" % (emo, name, actv)
+        if why:
+            seg += "（%s）" % why
+        rows.append((0 if is_holding else 1,
+                     0 if actv.startswith(("止损", "低开", "竞价进卖点", "回避")) else
+                     (1 if "可买" in actv or actv.startswith("竞价强势") else 2),
+                     seg))
+    rows.sort(key=lambda x: (x[0], x[1]))
+    return [x[2] for x in rows]
+
+
 def format_auction_summary(data, url="", con=None):
     """竞价后确认（9:25）：结合前一交易日推荐名单，对比今日竞价强弱，判定续强/掉队/新晋（Markdown 分区）。"""
     m = data.get("meta", {})
     date = m.get("date", "")
+    # ── ⚡ 今日操作提示（2026-09-02 用户需求：竞价确认后给持仓/自选逐票明确动作——
+    #    减半/加仓/买入/止损/观望，不错过行情也不冒进）──
+    _pos_codes = set()
+    try:
+        import holdings as _hd0
+        _pos_codes = {str(p.get("code") or "").strip()
+                      for p in (_hd0.load_positions() or []) if p.get("code")}
+    except Exception:
+        pass
+    _snap = fetch_open_snapshot(_pos_codes) if _pos_codes else {}
+    _act_rows = _today_action_lines(data, _snap)
+    L0 = []
+    if _act_rows:
+        L0.append("## ⚡ 今日操作提示 · 竞价确认 %s" % time.strftime("%H:%M"))
+        L0.append("")
+        L0.append("> 持仓=止损/减半/加仓/持有；关注=买入/观望。低开-2%以下 T+1 收红率仅 24%，宁可错过不可深套。")
+        L0.append("")
+        L0.extend(_act_rows)
+        L0.append("")
     # 昨日推荐 = 本次分析日系统给出的推荐标的（即上一交易日推荐名单），直接取自 data，
     # 避免依赖 rec_picks 历史表缺失导致对比为空。
     recommended = data.get("recommend", {}).get("all") or []
@@ -2870,7 +3003,7 @@ def format_auction_summary(data, url="", con=None):
     aitems = (data.get("auction") or {}).get("items") or {}
     recs = recommended
     g = data.get("global_market") or {}
-    L = []
+    L = L0  # 操作提示置顶
     L.append("## A股竞价后确认 · %s" % date)
     L.append("")
     L.append("**对比对象**：分析日(%s)推荐名单 vs 今日竞价强弱" % date)
