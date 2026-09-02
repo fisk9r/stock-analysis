@@ -468,29 +468,40 @@ def send_wechat_pushplus(cfg, title, text):
     url = "https://www.pushplus.plus/send"   # 2026-09-01：http 明文 → https
     ok_list, fail_list = [], []
     for token in tokens:
-        try:
-            # 2026-09-01：三色 HTML 排版（md2html 转换后走 html 模板；
-            # 早期直接把 markdown 塞进 html 模板会裸显符号，现在已完成真转换）
-            _content = md2html(title, text)
-            payload = {"token": token, "title": title, "content": _content,
-                       # 可在 notify.json wechat_pushplus.template 覆盖（万一需要回退 markdown）
-                       "template": cfg.get("template") or "html"}
-            # topic 为群组编码，缺省走一对一推送；配置了才带上
-            topic = cfg.get("topic")
-            if topic:
-                payload["topic"] = topic
-            resp = http_post_json(url, payload)
+        sent, last_msg = False, None
+        # 2026-09-01：三色 HTML 排版（md2html 转换后走 html 模板；
+        # 早期直接把 markdown 塞进 html 模板会裸显符号，现在已完成真转换）
+        _content = md2html(title, text)
+        payload = {"token": token, "title": title, "content": _content,
+                   # 可在 notify.json wechat_pushplus.template 覆盖（万一需要回退 markdown）
+                   "template": cfg.get("template") or "html"}
+        # topic 为群组编码，缺省走一对一推送；配置了才带上
+        topic = cfg.get("topic")
+        if topic:
+            payload["topic"] = topic
+        # 2026-09-02：业务失败（code!=200，如间歇性「服务端验证错误」）也退避重试——
+        # 此前仅网络异常走 _with_retry，业务拒绝一次即丢（08:45 盘前实失败、09:26 同 token 成功=间歇性）
+        for attempt in range(3):
             try:
-                import json as _json
-                j = _json.loads(resp)
-                if j.get("code") == 200:
-                    ok_list.append(token[:6] + "…")
-                else:
-                    fail_list.append("%s:%s" % (token[:6], str(j.get("msg", resp))[:40]))
-            except Exception:
-                ok_list.append(token[:6] + "…(响应未解析)")
-        except Exception as e:
-            fail_list.append("%s:%r" % (token[:6], e))
+                resp = http_post_json(url, payload)
+                try:
+                    import json as _json
+                    j = _json.loads(resp)
+                    if j.get("code") == 200:
+                        sent = True
+                        break
+                    last_msg = str(j.get("msg", resp))[:40]
+                except Exception:
+                    sent = True   # 响应未解析按成功处理（保持原语义）
+                    break
+            except Exception as e:
+                last_msg = repr(e)
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+        if sent:
+            ok_list.append(token[:6] + "…")
+        else:
+            fail_list.append("%s:%s" % (token[:6], last_msg))
     msg = "PushPlus 成功 %d/%d" % (len(ok_list), len(tokens))
     if fail_list:
         msg += " 失败：" + "；".join(fail_list)
