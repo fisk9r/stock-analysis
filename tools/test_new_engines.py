@@ -747,6 +747,26 @@ def main():
     check("买区内候选保留", any("能买的票" in l for l in _rep_ls))
     check("贴近买区(≤5%)候选保留", any("贴近买区的票" in l for l in _rep_ls))
 
+    # ---- zone_buyable / buyable_first（2026-09-02 用户拍板：重点推可直接买入的票）----
+    from notifier import zone_buyable as _zb, buyable_first as _bf
+    check("现价在买区→可买", _zb(31.5, [30, 32]) is True)
+    check("现价刚出买区4.4%→可买", _zb(33.4, [30, 32]) is True)
+    check("现价超买区6%→不可买", _zb(34.0, [30, 32]) is False)
+    check("现价50买区32→不可买(飞天上)", _zb(50.2, [30, 32]) is False)
+    check("无买区→None不误杀", _zb(50.0, None) is None)
+    _seq = [
+        {"name": "飞在天上", "price": 50.2, "buy_zone": [30, 32]},
+        {"name": "可直接买B", "price": 31.5, "buy_zone": [30, 32]},
+        {"name": "无买区票", "price": 9.9, "buy_zone": None},
+        {"name": "可直接买A", "price": 30.8, "buy_zone": [30, 32]},
+    ]
+    _sorted = _bf(_seq, lambda x: x["price"], lambda x: x["buy_zone"])
+    check("可买票排最前(组内保持原序)",
+          set(x["name"] for x in _sorted[:2]) == {"可直接买A", "可直接买B"},
+          "-> %s" % [x["name"] for x in _sorted])
+    check("飞在天上/无买区靠后",
+          set(x["name"] for x in _sorted[2:]) == {"飞在天上", "无买区票"})
+
     # ============ #2 / #4 可升级点回归（2026-09-02）============
     import engine as _eng
     # #2：st=2 二板降权（归因胜率23.9% vs 全样本59.3%）

@@ -1668,13 +1668,17 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
             _mark = " 🆕"
         elif (t.get("times") or 0) > 1:
             _mark = " (跟踪%d天)" % t.get("times")
-        return ("**%s**%s(%s) %.2f ｜ 日均%.1f%%·%d涨%s%s%s"
+        # 2026-09-02（用户拍板：重点提示可直接买入的票，飞在天上的不算买点）——
+        # 现价在买区内/贴近买区上沿 → 行尾重点标注「✅现价可买」。
+        _can = zone_buyable(t.get("close"), t.get("buy_zone"))
+        _buy_s = " ｜ ✅**现价可买**" if _can is True else ""
+        return ("**%s**%s(%s) %.2f ｜ 日均%.1f%%·%d涨%s%s%s%s"
                 % (t.get("name", "?"), _mark,
                    t.get("industry", "—") or "—",
                    t.get("close", 0) or 0,
                    meta.get("avg_daily", 0) or 0,
                    meta.get("up_days", 0) or 0,
-                   zone_s, inst_s, sfx))
+                   zone_s, inst_s, sfx, _buy_s))
 
     def _trend_group(pred, n, exclude=None):
         out = []
@@ -1699,12 +1703,14 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         _used |= set(id(x) for x in _slow)
         _steady = _trend_group(lambda t: True, 4, _used)
         # 分档推送（用户需求：趋势票要同时给「缓」与「加速」两类，别只给强趋势）
+        # 2026-09-02（用户拍板）：组内「现价可买」的票排最前，飞在天上的靠后。
+        _bf = lambda lst: buyable_first(lst, lambda t: t.get("close"), lambda t: t.get("buy_zone"))
         if _acc:
-            _sec("🚀 趋势 · 加速主升", [_trend_line(t) for t in _acc])
+            _sec("🚀 趋势 · 加速主升", [_trend_line(t) for t in _bf(_acc)])
         if _steady:
-            _sec("📈 趋势 · 稳健上行", [_trend_line(t) for t in _steady])
+            _sec("📈 趋势 · 稳健上行", [_trend_line(t) for t in _bf(_steady)])
         if _slow:
-            _sec("🐢 趋势 · 缓坡慢牛", [_trend_line(t) for t in _slow])
+            _sec("🐢 趋势 · 缓坡慢牛", [_trend_line(t) for t in _bf(_slow)])
     # ---- 买点候选（趋势加速优先）：从 data.buy_points 取加速组，红=买/优先；避免与牛股雷达/经典策略重复 ----
     _bp = data.get("buy_points") or {}
     # 2026-08-31 升级（可操作性）：买点候选反查 zones 引擎的买区/目标区，附价格区间，
@@ -1739,17 +1745,29 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
             "> 以下推荐与买点均为全量扫描后排序得出，不是抽样样本。",
         ])
     # 剔除「已临卖点」矛盾票（warn_sell）：不把引擎判卖出的票当买点推荐
+    # 2026-09-02 用户拍板：飞在天上的票（现价>买区上沿5%）不再作为买点推荐——
+    # 买点候选只留「现价就在买点附近、可以直接买」的票，可买的排最前并重点标注。
     _all_acc = [b for b in (_bp.get("accel") or []) if not b.get("warn_sell")]
+    _all_acc = [b for b in _all_acc
+                if zone_buyable(b.get("price"),
+                                (_zone_bz.get(b.get("code")) or (None, None))[0]) is not False]
+    _all_acc = buyable_first(_all_acc,
+                             lambda b: b.get("price"),
+                             lambda b: (_zone_bz.get(b.get("code")) or (None, None))[0])
     _acc_bp = _all_acc[:5]
     if _acc_bp:
-        _acc_rows = [
-            "🔴 **%s**(%s) %.2f ｜ %s%s ｜ 评分%.0f%s"
-            % (b.get("name", "?"), b.get("ind") or "—", b.get("price") or 0,
-               b.get("btype") or "",
-               (" ×%.2f" % b["accel"] if b.get("accel") is not None else ""),
-               b.get("score") or 0,
-               _bp_zt(b.get("code")))
-            for b in _acc_bp]
+        _acc_rows = []
+        for b in _acc_bp:
+            _bz = (_zone_bz.get(b.get("code")) or (None, None))[0]
+            _flag = "✅现价可买 ｜ " if zone_buyable(b.get("price"), _bz) is True else ""
+            _acc_rows.append(
+                "🔴 **%s**(%s) %.2f ｜ %s%s%s ｜ 评分%.0f%s"
+                % (b.get("name", "?"), b.get("ind") or "—", b.get("price") or 0,
+                   _flag,
+                   b.get("btype") or "",
+                   (" ×%.2f" % b["accel"] if b.get("accel") is not None else ""),
+                   b.get("score") or 0,
+                   _bp_zt(b.get("code"))))
         if len(_all_acc) > len(_acc_bp):
             _acc_rows.append("…（加速买点共 %d 只，列评分前 %d；完整清单见站点「买点候选」视图）"
                              % (len(_all_acc), len(_acc_bp)))
@@ -1757,15 +1775,25 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     # 2026-08-31 升级（用户要求：所有内容均需要推送）：加速优先之外的「其他买点」
     # （趋势多头/回踩/突破）也全部推送，避免买点候选只发头部几只而漏掉其余。
     # 同样剔除矛盾票（warn_sell），按评分取前 6 只控量（缠论买点另有独立段）。
+    # 2026-09-02：同样只留「现价在买点附近」的票，可买排前并标注。
     _all_oth = [b for b in (_bp.get("others") or []) if not b.get("warn_sell")]
+    _all_oth = [b for b in _all_oth
+                if zone_buyable(b.get("price"),
+                                (_zone_bz.get(b.get("code")) or (None, None))[0]) is not False]
+    _all_oth = buyable_first(_all_oth,
+                             lambda b: b.get("price"),
+                             lambda b: (_zone_bz.get(b.get("code")) or (None, None))[0])
     _oth_bp = _all_oth[:6]
     if _oth_bp:
-        _oth_rows = [
-            "🔴 **%s**(%s) %.2f ｜ %s ｜ 评分%.0f%s"
-            % (b.get("name", "?"), b.get("ind") or "—", b.get("price") or 0,
-               b.get("btype") or "", b.get("score") or 0,
-               _bp_zt(b.get("code")))
-            for b in _oth_bp]
+        _oth_rows = []
+        for b in _oth_bp:
+            _bz = (_zone_bz.get(b.get("code")) or (None, None))[0]
+            _flag = "✅现价可买 ｜ " if zone_buyable(b.get("price"), _bz) is True else ""
+            _oth_rows.append(
+                "🔴 **%s**(%s) %.2f ｜ %s%s ｜ 评分%.0f%s"
+                % (b.get("name", "?"), b.get("ind") or "—", b.get("price") or 0,
+                   _flag, b.get("btype") or "", b.get("score") or 0,
+                   _bp_zt(b.get("code"))))
         if len(_all_oth) > len(_oth_bp):
             _oth_rows.append("…（趋势多头买点共 %d 只，列评分前 %d；完整清单见站点「买点候选」视图）"
                              % (len(_all_oth), len(_oth_bp)))
@@ -2385,6 +2413,31 @@ def _watch_action_by_sector(act, dirn):
     if dirn == "偏弱":
         return "冲高减仓（板块偏弱 → 反弹兑现）"
     return "持有（板块震荡 → 按买卖区执行）"
+
+
+def zone_buyable(price, buy_zone, tol=1.05):
+    """2026-09-02 用户拍板：现价是否「可以直接买」——现价 ≤ 买区上沿×tol（默认5%容差）。
+    飞在天上的票（现价远超买区，等回落到买点也不值得追）返回 False。
+    无买区信息时返回 None（调用方决定不误杀）。"""
+    try:
+        if not buy_zone or buy_zone[1] is None or price is None:
+            return None
+        return float(price) <= float(buy_zone[1]) * tol
+    except Exception:
+        return None
+
+
+def buyable_first(seq, price_key, zone_key):
+    """把「现价在买区内/贴近买区」的票排到最前（可买优先，飞在天上的靠后）。
+    price_key/zone_key: 从元素取现价与买区 [lo,hi] 的 callable。无买区的票排最后不误杀。"""
+    def k(x):
+        ok = zone_buyable(price_key(x), zone_key(x))
+        if ok is True:
+            return 0
+        if ok is None:
+            return 2
+        return 1
+    return sorted(seq, key=k)
 
 
 def _act_emoji(act):
