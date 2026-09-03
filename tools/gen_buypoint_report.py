@@ -146,6 +146,39 @@ def _merge(data):
         _rec["live_action"] = _sells[0] if _sells else ""
         _rec["warn_sell"] = bool(_sells)
         _rec["warn_src"] = ",".join(sorted({_s for _s, a in _acts if _SELL_RE.search(a)}))
+    # ── 买点门禁（2026-09-03 用户拍板）：把 build.py 已算好的 entry（近端可执行
+    # 买点阶梯）挂到每条候选上。来源优先级 trend > bull > strategies > zones，
+    # 任一命中即用（同一只票 entry 口径一致，取到即可）。
+    _emap = {}
+    for _src in (((data.get("recommend") or {}).get("trend") or []),
+                 (data.get("bull") or []),
+                 (data.get("strategies") or []),
+                 ((data.get("zones") or {}).get("items") or [])):
+        for _x in _src:
+            if not isinstance(_x, dict):
+                continue
+            _c, _e = _x.get("code"), _x.get("entry")
+            if _c and _e and _c not in _emap:
+                _emap[_c] = _e
+    for _rec in merged.values():
+        _e = _emap.get(_rec["code"])
+        if not _e:
+            _rec["entry_state"] = None
+            _rec["buyable_now"] = None
+            continue
+        _rec["entry"] = _e
+        _rec["entry_state"] = _e.get("entry_state")
+        _rec["entry_gap_pct"] = _e.get("entry_gap_pct")
+        _rec["entry_label"] = _e.get("label")
+        _rec["now_zone"] = _e.get("now_zone")
+        _rec["wait_price"] = _e.get("wait_price")
+        _rec["wait_drop_pct"] = _e.get("wait_drop_pct")
+        _rec["buyable_now"] = bool(_e.get("buyable"))
+        # 现价补齐（bull/strategies 用 price，trend 用 close；统一暴露 close）
+        if not _rec.get("price"):
+            _rec["price"] = _e.get("close")
+    for _rec in merged.values():
+        _rec.setdefault("close", _rec.get("price"))
     return sorted(merged.values(), key=lambda r: -r["score"])
 
 
@@ -156,20 +189,89 @@ def build_data(data):
     """
     date = (data.get("meta") or {}).get("date", "") or ""
     merged = _merge(data)
-    # warn_sell（已临卖点）矛盾票沉到各组末尾，纯买点排最前
-    accel = sorted([r for r in merged if r.get("accel_flag")],
-                   key=lambda r: (1 if r.get("warn_sell") else 0, -(r.get("score") or 0)))
-    others = sorted([r for r in merged if not r.get("accel_flag")],
-                    key=lambda r: (1 if r.get("warn_sell") else 0, -(r.get("score") or 0)))
+    # ══════════════════════════════════════════════════════════════════
+    # 买点硬门禁（2026-09-03 用户拍板：「我不希望再次看到没有达到买点的股票推荐，
+    # 推荐给我一堆在天上的股票根本不切实际」）
+    # ══════════════════════════════════════════════════════════════════
+    # 「买点候选」的定义收紧为：现价确实处于/贴近短线可执行买点（可买/微超）。
+    #   · 等回踩   → 移到 waiting 组（保留可见 + 明确挂单价，不混进买点）
+    #   · 过热勿追 → 移到 skipped 组（默认不展示、不推送）
+    #   · 无 entry 数据 → 保守放行（不误杀），但标 entry_state=None
+    # warn_sell（已临卖点）矛盾票一律不算买点，直接归 skipped。
+    def _bucket(r):
+        if r.get("warn_sell"):
+            return "skipped"
+        st = r.get("entry_state")
+        if st in ("可买", "微超"):
+            return "buy"
+        if st == "等回踩":
+            return "waiting"
+        if st == "过热勿追":
+            return "skipped"
+        return "buy"          # entry 缺失（数据不足）→ 不误杀
+
+    _by = {"buy": [], "waiting": [], "skipped": []}
+    for r in merged:
+        _by[_bucket(r)].append(r)
+
+    def _sk(r):
+        # 可买优先 → 分数降序
+        return (0 if r.get("entry_state") == "可买" else 1, -(r.get("score") or 0))
+
+    buy = sorted(_by["buy"], key=_sk)
+    accel = [r for r in buy if r.get("accel_flag")]
+    others = [r for r in buy if not r.get("accel_flag")]
+    waiting = sorted(_by["waiting"],
+                     key=lambda r: (r.get("wait_drop_pct") is None,
+                                    -(r.get("score") or 0)))
+    skipped = sorted(_by["skipped"], key=lambda r: -(r.get("score") or 0))
     chan = [c for c in ((data.get("chanlun") or {}).get("buys") or []) if c.get("signal")]
     return {
         "date": date,
         "accel": accel,
         "others": others,
+        "waiting": waiting,        # 等回踩：给挂单价，不算买点
+        "skipped": skipped,        # 过热勿追 / 已临卖点：默认不展示
         "chanlun": chan,
-        "total": len(merged) + len(chan),
+        "total": len(buy) + len(chan),
         "accel_count": len(accel),
+        "gate": {
+            "buyable": len(buy),
+            "waiting": len(waiting),
+            "skipped": len(skipped),
+            "raw": len(merged),
+            "note": "买点候选=现价处于/贴近短线可执行买点；等回踩与过热勿追已剔除",
+        },
     }
+
+
+def _entry_cell(r):
+    """近端可执行买点单元格：现价可买价带 / 需回踩到的挂单价 / 过热幅度。
+
+    2026-09-03 用户拍板「不要在天上的票」——报告页也必须把「现价到底能不能买」
+    显式写出来，而不是只给一个遥不可及的 MA20 买区。
+    """
+    st = r.get("entry_state")
+    if not st:
+        return "<span class='badge none'>—</span>"
+    gp = r.get("entry_gap_pct")
+    gp_s = ("%+.1f%%" % gp) if gp is not None else ""
+    nz = r.get("now_zone") or []
+    wp = r.get("wait_price")
+    wd = r.get("wait_drop_pct")
+    if st == "可买":
+        z = ("%.2f~%.2f" % (nz[0], nz[1])) if len(nz) == 2 and nz[0] is not None else ""
+        return "<span class='badge ok'>✅ 现价可买 %s</span>" % z
+    if st == "微超":
+        return "<span class='badge soft'>🟡 小仓试 %s</span>" % gp_s
+    if st == "等回踩":
+        s = "⏳ 等回踩 %.2f" % wp if wp else "⏳ 等回踩"
+        if wd is not None:
+            s += "（需回落 %.1f%%）" % abs(wd)
+        return "<span class='badge wait'>%s</span>" % s
+    if st == "过热勿追":
+        return "<span class='badge hot'>🚫 过热勿追 %s</span>" % gp_s
+    return "<span class='badge none'>%s</span>" % esc(st)
 
 
 def _row_a(r):
@@ -200,22 +302,28 @@ def _row_a(r):
         "<td><span class='bt'>%s</span></td>"
         "<td>%.2f</td><td class='%s'>%s</td><td>%.2f</td>"
         "<td>%s</td><td>%s</td><td class='sc'>%.1f</td>"
-        "<td>%s</td><td class='feat'>%s</td></tr>"
+        "<td>%s</td><td>%s</td><td class='feat'>%s</td></tr>"
         % (row_cls, esc(r["name"]), esc(r["code"]), esc(r["btype"]),
            r["price"] or 0, pcls, pct_s, r["vol_ratio"] or 0,
            esc(r["ind"]), dd_s, r["score"],
-           badge, esc((r["tags"] or "")[:90]))
+           badge, _entry_cell(r), esc((r["tags"] or "")[:90]))
     )
 
 
 def _render(data, date):
-    trend_buy = _merge(data)
-    accel = [r for r in trend_buy if r.get("accel_flag")]
-    others = [r for r in trend_buy if not r.get("accel_flag")]
-    chan = [c for c in ((data.get("chanlun") or {}).get("buys") or []) if c.get("signal")]
+    # 2026-09-03：报告页与站点/推送共用同一份买点门禁（build_data），
+    # 避免「网页说可买、报告页还在推天上的票」两套口径。
+    bd = build_data(data)
+    accel = bd["accel"]
+    others = bd["others"]
+    waiting = bd["waiting"]
+    skipped = bd["skipped"]
+    gate = bd["gate"]
+    chan = bd["chanlun"]
 
     rows_accel = "\n".join(_row_a(r) for r in accel)
     rows_others = "\n".join(_row_a(r) for r in others)
+    rows_wait = "\n".join(_row_a(r) for r in waiting)
     rows_b = []
     for c in chan:
         zs = c.get("zhongshu")
@@ -264,6 +372,14 @@ td { padding:7px 8px; border-bottom:1px solid #13203a; vertical-align:top; }
 .badge.tstate { background:#10203a; color:#9fb3c8; }
 .badge.warn { background:#3a2e0a; color:#ffcf5c; border:1px solid #5a4a16; font-weight:700; }
 .badge.none { color:#5b6b82; }
+.badge.ok { background:#3a1010; color:#ff6b6b; border:1px solid #5a1c1c; font-weight:700; }
+.badge.soft { background:#3a2e0a; color:#ffd76b; border:1px solid #5a4a16; }
+.badge.wait { background:#10203a; color:#5fd0ff; border:1px solid #1d3c5a; }
+.badge.hot { background:#2a1030; color:#c98cff; border:1px solid #43205a; }
+.sec.wait { color:#5fd0ff; }
+.gate { background:#101c14; border-left:3px solid #3fcf6b; padding:9px 13px;
+  border-radius:6px; font-size:12.5px; color:#9fc8ad; line-height:1.7; margin-bottom:16px; }
+.gate b { color:#3fcf6b; }
 tr.accel-row { background:rgba(255,122,69,0.06); }
 tr.warn-row { background:rgba(255,207,92,0.07); }
 </style></head><body>
@@ -276,20 +392,32 @@ tr.warn-row { background:rgba(255,207,92,0.07); }
   优先推荐正在主升加速的票；其余按评分降序。<br>
   <b>非买卖建议</b>，仅作选股线索；介入仍需结合次日竞价（高开≥2%%才跟进、低开≤-2%%放弃）与量能确认。
 </div>
+<div class="gate">
+  <b>买点硬门禁已生效</b>：原始候选 %d 只 → <b>现价可买 %d 只</b>，等回踩 %d 只（给挂单价，另列），
+  过热勿追 / 已临卖点 %d 只<b>已剔除</b>。<br>
+  判定口径：短线成本锚 ref = max(MA5, MA10)；现价 ≤ ref×1.03 → 可买；≤ ref×1.06 → 微超（小仓试）；
+  ≤ ref×1.12 → 等回踩（挂单等）；再高 → 过热勿追。跌破止损 → 回避不接刀。
+</div>
 
 <div class="sec accel">① 趋势加速优先 · 主升加速中的买点（共 %d 只 🚀）</div>
 <table>
-<tr><th>名称</th><th>代码</th><th>买点类型</th><th>现价</th><th>涨跌幅</th><th>量比</th><th>行业</th><th>距60高</th><th>评分</th><th>趋势状态</th><th>关键特征</th></tr>
+<tr><th>名称</th><th>代码</th><th>买点类型</th><th>现价</th><th>涨跌幅</th><th>量比</th><th>行业</th><th>距60高</th><th>评分</th><th>趋势状态</th><th>近端买点</th><th>关键特征</th></tr>
 %s
 </table>
 
 <div class="sec other">② 其他买点（回踩后再起 / 多头突破，共 %d 只）</div>
 <table>
-<tr><th>名称</th><th>代码</th><th>买点类型</th><th>现价</th><th>涨跌幅</th><th>量比</th><th>行业</th><th>距60高</th><th>评分</th><th>趋势状态</th><th>关键特征</th></tr>
+<tr><th>名称</th><th>代码</th><th>买点类型</th><th>现价</th><th>涨跌幅</th><th>量比</th><th>行业</th><th>距60高</th><th>评分</th><th>趋势状态</th><th>近端买点</th><th>关键特征</th></tr>
 %s
 </table>
 
-<div class="sec chan">③ 缠论结构买点（一/二/三买，共 %d 只）</div>
+<div class="sec wait">③ 趋势可以但要等回踩 · 不是现在的买点（共 %d 只 ⏳）</div>
+<table>
+<tr><th>名称</th><th>代码</th><th>买点类型</th><th>现价</th><th>涨跌幅</th><th>量比</th><th>行业</th><th>距60高</th><th>评分</th><th>趋势状态</th><th>挂单价</th><th>关键特征</th></tr>
+%s
+</table>
+
+<div class="sec chan">④ 缠论结构买点（一/二/三买，共 %d 只）</div>
 <table>
 <tr><th>名称</th><th>代码</th><th>买点</th><th>中枢区间</th><th>现价</th><th>说明</th></tr>
 %s
@@ -301,7 +429,10 @@ tr.warn-row { background:rgba(255,207,92,0.07); }
   recommend.trend（engine.screen_uptrend）交叉引用。存在假突破与背驰失效风险，务必次日竞价验证。
 </div>
 </body></html>
-""" % (date, date, len(accel), rows_accel, len(others), rows_others,
+""" % (date, date,
+       gate.get("raw", 0), gate.get("buyable", 0), gate.get("waiting", 0), len(skipped),
+       len(accel), rows_accel, len(others), rows_others,
+       len(waiting), rows_wait,
        len(chan), chan_rows, date)
     return html
 
@@ -330,6 +461,9 @@ def main():
     print("写出生买点报告:", path)
     print("趋势加速优先 %d 只 | 其他买点 %d 只 | 缠论买点 %d 只"
           % (len(bd["accel"]), len(bd["others"]), len(bd["chanlun"])))
+    g = bd["gate"]
+    print("门禁：原始 %d → 可买 %d / 等回踩 %d / 剔除 %d"
+          % (g["raw"], g["buyable"], g["waiting"], g["skipped"]))
     print("Top5:", ", ".join("%s(%.1f)" % (r["name"], r["score"]) for r in _merge(d)[:5]))
 
 

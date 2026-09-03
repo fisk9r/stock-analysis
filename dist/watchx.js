@@ -24,12 +24,24 @@
   var LS_KEY = 'sa_watch_local_v1';
 
   /* ---------------- 存储层 ---------------- */
+  function _num(x) {
+    if (x === '' || x == null || isNaN(+x)) return null;
+    var v = +x;
+    return isFinite(v) ? v : null;
+  }
   function load() {
     try {
       var v = JSON.parse(localStorage.getItem(LS_KEY) || '[]');
       if (Array.isArray(v)) {
         return v.filter(function (x) { return x && /^\d{6}$/.test(x.code || ''); })
-          .map(function (x) { return { code: x.code, name: x.name || '', cost: (x.cost != null && x.cost !== '' ? +x.cost : null), at: x.at || '' }; });
+          .map(function (x) {
+            return {
+              code: x.code, name: x.name || '',
+              cost: _num(x.cost), qty: _num(x.qty),
+              stop: _num(x.stop), target: _num(x.target),
+              at: x.at || ''
+            };
+          });
       }
     } catch (e) {}
     return [];
@@ -46,14 +58,20 @@
 
   function list() { return load(); }
   function has(code) { return load().some(function (x) { return x.code === code; }); }
-  function add(code, name) {
+  function add(code, name, extra) {
     code = String(code || '').trim();
     if (!/^\d{6}$/.test(code)) return { ok: false, msg: '代码须为 6 位数字' };
     var arr = load();
     if (arr.some(function (x) { return x.code === code; })) return { ok: true, msg: code + ' 已在关注池中' };
-    arr.push({ code: code, name: name || resolveName(code) || '', cost: null, at: nowStr() });
+    extra = extra || {};
+    arr.push({
+      code: code, name: name || resolveName(code) || '',
+      cost: _num(extra.cost), qty: _num(extra.qty),
+      stop: _num(extra.stop), target: _num(extra.target),
+      at: nowStr()
+    });
     save(arr);
-    return { ok: true, msg: '已加入关注：' + code + ' ' + (name || resolveName(code) || '') + ' ✅（本机立即生效）' };
+    return { ok: true, msg: '已加入关注：' + code + ' ' + (name || resolveName(code) || '') + ' ✅（本机立即生效·零密钥）' };
   }
   function del(code) {
     var arr = load();
@@ -61,11 +79,26 @@
     save(arr.filter(function (x) { return x.code !== code; }));
     return hit ? { ok: true, msg: '已移出关注：' + code + ' ' + (hit.name || '') } : { ok: false, msg: code + ' 不在关注池中' };
   }
-  function setCost(code, cost) {
-    var arr = load();
-    arr.forEach(function (x) { if (x.code === code) x.cost = (cost === '' || cost == null || isNaN(+cost)) ? null : +cost; });
+  /* 购入股票设置：数量 / 成本价 / 止损 / 目标，逐字段合并（仅更新传入项）。
+     零密钥、本机存储；未关注会自动补一条关注。 */
+  function setPlan(code, plan) {
+    plan = plan || {};
+    code = String(code || '').trim();
+    if (!/^\d{6}$/.test(code)) return { ok: false, msg: '代码须为 6 位数字' };
+    var arr = load(), hit = null;
+    arr.forEach(function (x) { if (x.code === code) hit = x; });
+    if (!hit) {
+      arr.push({ code: code, name: resolveName(code) || '', cost: null, qty: null, stop: null, target: null, at: nowStr() });
+      hit = arr[arr.length - 1];
+    }
+    ['cost', 'qty', 'stop', 'target'].forEach(function (k) {
+      if (plan[k] === undefined) return;
+      hit[k] = _num(plan[k]);
+    });
     save(arr);
+    return { ok: true, msg: code + ' 持仓设置已更新' };
   }
+  function setCost(code, cost) { return setPlan(code, { cost: cost }); }
 
   /* ---------------- 名录索引（stock_names.js）---------------- */
   var IDX = null;
@@ -505,6 +538,11 @@
         if (th.buy_lo != null) thChips += '<span class="chip" style="border-color:var(--up);color:var(--up)">买区 ' + th.buy_lo.toFixed(2) + '~' + th.buy_hi.toFixed(2) + '</span>';
         if (!thChips) thChips += '<span class="chip muted">暂无波段阈值（等下一轮构建关联）</span>';
         var advs = adviceFor(it, q, th, ph).map(function (a) { return '<div>' + esc(a) + '</div>'; }).join('');
+        var planChips = '';
+        if (it.qty != null) planChips += '<span class="chip">数量 <b>' + it.qty + '</b></span>';
+        if (it.stop != null) planChips += '<span class="chip" style="border-color:var(--down);color:var(--down)">止损 <b>' + it.stop.toFixed(2) + '</b></span>';
+        if (it.target != null) planChips += '<span class="chip" style="border-color:var(--warn);color:var(--warn)">目标 <b>' + it.target.toFixed(2) + '</b></span>';
+        if (planChips) planChips = '<div class="wlx-th-chips">' + planChips + '</div>';
         return '<div class="wlx-card">' +
           '<div class="wlx-card-h">' +
           (it.held ? '<span class="bd" style="border-color:var(--warn);color:var(--warn);font-size:10.5px;padding:0 4px">持仓</span>' : '') +
@@ -516,6 +554,7 @@
           (it.held ? '' : '<button class="wl-qk on" data-wl-qk="' + it.code + '" data-wl-name="' + esc(it.name) + '" style="margin-left:auto">★ 移除</button>') +
           '</div>' +
           '<div class="wlx-th-chips">' + thChips + '</div>' +
+          planChips +
           '<div class="wlx-adv">' + advs + '</div>' +
           '</div>';
       }).join('');
@@ -573,7 +612,7 @@
   window.WLX = {
     ensureStyle: ensureStyle,
     bindDelegates: bindDelegates,
-    list: list, has: has, add: add, del: del, setCost: setCost,
+    list: list, has: has, add: add, del: del, setCost: setCost, setPlan: setPlan,
     resolve: resolve, search: search, onlineSearch: onlineSearch,
     resolveName: resolveName, marketOf: marketOf,
     realtime: realtime, thresholdsFor: thresholdsFor,

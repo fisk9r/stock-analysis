@@ -2111,13 +2111,28 @@
             + '<span>买入价值 <b style="color:' + wcol + '">' + f(it.worth_score, 0) + '</b></span>'
             + '<span>妖股基因 <b>' + f(it.demon, 0) + '</b></span>'
             + '</div>';
+        /* 连板体系的「买点」不是回踩买区（刚涨停必然远离均线），而是次日竞价追板区间。
+           2026-09-03 补齐：build.py 已注入 it.chase，此前前端不渲染 → 龙头卡片没有买价。 */
+        var chaseHtml = '';
+        var _ch = it.chase;
+        if (_ch && _ch.zone && _ch.zone[0] != null) {
+          chaseHtml = '<div class="chips" style="margin-top:7px;display:flex;flex-wrap:wrap;gap:5px">' +
+            '<span class="chip" style="border-color:' + C.up + ';color:' + C.up + ';font-weight:700">次日可追 <b>' +
+              f(_ch.zone[0], 2) + '~' + f(_ch.zone[1], 2) + '</b></span>' +
+            (_ch.give_up_below != null ? '<span class="chip" style="border-color:' + C.gold + ';color:' + C.gold +
+              '">低于 ' + f(_ch.give_up_below, 2) + ' 放弃</span>' : '') +
+            (_ch.stop != null ? '<span class="chip" style="border-color:' + C.down + ';color:' + C.down +
+              '">止损 ' + f(_ch.stop, 2) + '</span>' : '') +
+            '</div>' +
+            (_ch.rule ? '<div class="note" style="margin-top:4px;color:var(--muted);font-size:11px">竞价纪律：' + E(_ch.rule) + '</div>' : '');
+        }
         return '<div class="rec ' + cls + (it.observe ? ' observe' : '') + '"><div class="rh">' +
           '<span class="nm">' + stk(it.code, it.name) + '</span><span class="code faint">' + E(it.code) + '</span>' +
           lbBadge(it.streak) + tierBadge(it.sector_tier) + mlBadge(it) + relayBadge(it) + vaBadge + hcBadge +
           (it.observe ? '<span class="bd" style="border-color:' + C.gray + ';color:' + C.gray + ';font-size:11px;padding:0 4px">观察·非操作</span>' : '') +
           wlQuickBtn(it.code, it.name) +
           '<span class="sc" style="color:' + scol + '">' + f(it.score, 1) + '</span></div>' +
-          '<div class="rb">' + kvHtml +
+          '<div class="rb">' + chaseHtml + kvHtml +
           '<ul>' + (it.reasons || []).map(function (r) { return '<li>' + E(r) + '</li>'; }).join('') + '</ul>' +
           ((it.concepts || []).length ? '<div class="chips" style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px">' +
             it.concepts.map(function (c) { return '<span class="chip">' + E(c) + '</span>'; }).join('') + '</div>' : '') +
@@ -2168,10 +2183,34 @@
             (iv.action ? '<div class="' + (actCls(iv.action) || 'muted') + '" style="font-size:10px;margin-top:2px">' + E(iv.action) + '</div>' : '') + '</div>';
         }
         var band = (t.buy_zone && t.sell_zone)
-          ? '<span class="chip">回踩买 <b>' + f(t.buy_zone[0], 2) + '~' + f(t.buy_zone[1], 2) + '</b></span>' +
+          ? '<span class="chip">深回踩买 <b>' + f(t.buy_zone[0], 2) + '~' + f(t.buy_zone[1], 2) + '</b></span>' +
             '<span class="chip">反弹卖 <b>' + f(t.sell_zone[0], 2) + '~' + f(t.sell_zone[1], 2) + '</b></span>' +
             (t.stop ? '<span class="chip" style="border-color:' + C.down + ';color:' + C.down + '">止损 ' + f(t.stop, 2) + '</span>' : '')
           : '';
+        /* 近端可执行买点（2026-09-03 门禁）：把「现价能不能买 / 要等到多少」放在最前，
+           深回踩买区（MA20/MA60 锚）仅作参考，避免用户误以为那是当下买点。 */
+        var entryChips = (function () {
+          var e = t.entry || {};
+          var stt = e.entry_state;
+          if (!stt) return '';
+          var gp = e.entry_gap_pct, nz = e.now_zone || [], pz = e.pull_zone || [];
+          var col = (stt === '可买') ? C.up : (stt === '微超') ? C.gold : (stt === '等回踩') ? C.blue : C.gray;
+          var head = (stt === '可买') ? '✅ 现价可买' : (stt === '微超') ? '🟡 略超·小仓试'
+            : (stt === '等回踩') ? '⏳ 等回踩别追' : '🚫 过热勿追';
+          var s = '<span class="chip" style="border-color:' + col + ';color:' + col + ';font-weight:700">' +
+            head + (gp != null ? ' ' + (gp >= 0 ? '+' : '') + f(gp, 1) + '%' : '') + '</span>';
+          if (nz.length === 2 && nz[0] != null) {
+            s += '<span class="chip" style="border-color:' + col + '">现价档 <b>' + f(nz[0], 2) + '~' + f(nz[1], 2) + '</b></span>';
+          }
+          if (pz.length === 2 && pz[0] != null) {
+            s += '<span class="chip">回踩档 <b>' + f(pz[0], 2) + '~' + f(pz[1], 2) + '</b></span>';
+          }
+          if (e.wait_price != null && stt !== '可买') {
+            s += '<span class="chip" style="border-color:' + C.blue + ';color:' + C.blue + '">挂单 <b>' +
+              f(e.wait_price, 2) + '</b>' + (e.wait_drop_pct != null ? '（回落' + f(Math.abs(e.wait_drop_pct), 1) + '%）' : '') + '</span>';
+          }
+          return s;
+        })();
         var adv = t.advice ? '<div class="note" style="margin-top:4px;color:var(--muted)">波段：' + E(t.advice) + '</div>' : '';
         var vd = t.verdict || null;
         var vdHtml = '';
@@ -2203,15 +2242,29 @@
           if (vd.expired || act0.indexOf('卖出') >= 0 || act0.indexOf('离场') >= 0) hlCls = ' wlx-hl-sell';
           else if (act0.indexOf('买入') >= 0) hlCls = ' wlx-hl-buy';
         }
+        /* 门禁降级的票（等回踩/过热）整卡降饱和度，视觉上就不像「现在可以买」 */
+        var _est = (t.entry || {}).entry_state;
+        if (_est === '等回踩' || _est === '过热勿追') hlCls += ' rec-gated';
+        var eBadge = (_est === '可买')
+          ? '<span class="bd" style="margin-left:4px;font-size:11px;padding:0 4px;border-color:' + C.up + ';color:' + C.up + '">✅ 现价到位</span>'
+          : (_est === '等回踩' || _est === '过热勿追')
+          ? '<span class="bd" style="margin-left:4px;font-size:11px;padding:0 4px;border-color:' + C.gray + ';color:' + C.gray + '">⏳ 价高·等回踩</span>'
+          : '';
         return '<div class="rec trend' + hlCls + '"><div class="rh"><span class="nm">' + stk(t.code, t.name) + '</span>' +
           (bm.band ? '<span class="bd ok" style="margin-left:4px;font-size:11px">' + E(bm.band) + '</span>' : '') +
-          stateBadge + badge +
+          stateBadge + eBadge + badge +
           wlQuickBtn(t.code, t.name) +
           '<span class="sc" style="color:' + C.up + '">' + f(t.close || 0, 2) + '</span></div>' +
-          '<div class="chips" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:5px">' + band + '</div>' + adv + vdHtml + instHtml + '</div>';
+          (entryChips ? '<div class="chips" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:5px">' + entryChips + '</div>' : '') +
+          '<div class="chips" style="margin-top:5px;display:flex;flex-wrap:wrap;gap:5px">' + band + '</div>' + adv + vdHtml + instHtml + '</div>';
       }).join('');
+      var _gk = { '可买': 0, '微超': 0, '等回踩': 0, '过热勿追': 0, '无': 0 };
+      TR.forEach(function (t) { var s = (t.entry || {}).entry_state || '无'; if (_gk[s] != null) _gk[s]++; });
       h += card('📈 趋势主升 · 候选（' + TR.length + '，🆕=新入选 / 历史=持续跟踪）', body,
-        '双通道入选：强趋势（日均≥2%+4涨）与缓坡慢牛（斜率≥1.5%+20日涨≥8%）；🚀加速/🐢放缓标签看涨速变化，🏦标签为机构或主力资金介入证据（龙虎榜净买/大宗机构专用/板块主力净流入）');
+        '<b>近端买点门禁</b>：现价可买 ' + _gk['可买'] + ' 只 · 小仓试 ' + _gk['微超'] + ' 只 · 等回踩 ' +
+        _gk['等回踩'] + ' 只 · 过热勿追 ' + _gk['过热勿追'] + ' 只（后两类结论已被引擎强制改为「等回踩(挂单价)」，' +
+        '不会给出买入建议）。双通道入选：强趋势（日均≥2%+4涨）与缓坡慢牛（斜率≥1.5%+20日涨≥8%）；' +
+        '🚀加速/🐢放缓标签看涨速变化，🏦标签为机构或主力资金介入证据（龙虎榜净买/大宗机构专用/板块主力净流入）');
     })();
     h += group('🔭 观察池 · 连板余波（' + (R.momentum || []).length + '）', R.momentum, 'momentum observe-group',
       '⚠️ 观察级（非操作建议）：近期≥2次涨停/≥2连板基因 + 多头未破位 + 距高点回撤≤18%，历史胜率仅约 9%（样本 11 只）远低于 30% 红线，仅供跟踪连板妖股余波，不构成买入依据');
@@ -3953,20 +4006,26 @@
     var lis = items.length ? items.map(function (it) {
       return '<tr><td><b>' + E(it.name || it.code) + '</b></td>' +
         '<td class="muted" style="font-size:11.5px">' + E(it.code) + '</td>' +
-        '<td><input class="mu-in" style="width:74px" data-wlcost="' + E(it.code) +
-        '" value="' + (it.cost != null ? it.cost : '') + '" placeholder="成本价"></td>' +
+        '<td><input class="mu-in" style="width:64px" data-wlplan="cost" data-code="' + E(it.code) +
+        '" value="' + (it.cost != null ? it.cost : '') + '" placeholder="成本"></td>' +
+        '<td><input class="mu-in" style="width:52px" data-wlplan="qty" data-code="' + E(it.code) +
+        '" value="' + (it.qty != null ? it.qty : '') + '" placeholder="数量"></td>' +
+        '<td><input class="mu-in" style="width:64px" data-wlplan="stop" data-code="' + E(it.code) +
+        '" value="' + (it.stop != null ? it.stop : '') + '" placeholder="止损"></td>' +
+        '<td><input class="mu-in" style="width:64px" data-wlplan="target" data-code="' + E(it.code) +
+        '" value="' + (it.target != null ? it.target : '') + '" placeholder="目标"></td>' +
         '<td><button class="mbtn mbtn-d" data-wlrm="' + E(it.code) + '">删</button></td></tr>';
-    }).join('') : '<tr><td colspan="4" class="sa-mgmt-empty">本机自选池为空。在下方输入代码或名称加入，' +
+    }).join('') : '<tr><td colspan="7" class="sa-mgmt-empty">本机自选池为空。在下方输入代码或名称加入，' +
       '也可以直接在推荐卡、连板卡上点 ☆ 一键加入。</td></tr>';
     box.innerHTML =
       '<div class="sa-mgmt-add" style="position:relative">' +
       '<input id="wlInp" placeholder="输入代码或名称，如 600500 / 中化国际 / zhgj" style="flex:1" autocomplete="off">' +
       '<button class="mbtn mbtn-p" id="wlAddLocal">＋ 加入</button>' +
       '<div id="wlSug" class="wlx-sug" style="display:none"></div></div>' +
-      '<table class="sa-mgmt-t"><thead><tr><th>名称</th><th>代码</th><th>成本价</th><th></th></tr></thead>' +
+      '<table class="sa-mgmt-t"><thead><tr><th>名称</th><th>代码</th><th>成本</th><th>数量</th><th>止损</th><th>目标</th><th></th></tr></thead>' +
       '<tbody>' + lis + '</tbody></table>' +
-      '<div class="muted" style="font-size:11.5px;margin-top:6px">成本价填了之后，' +
-      '「我的自选」页会自动算出止损位/目标位，并在盘中跌破止损时弹告警。</div>';
+      '<div class="muted" style="font-size:11.5px;margin-top:6px">☆ 一键加入 <b>零密钥、本机立即生效</b>；这里可补「购入设置」：' +
+      '填 <b>成本</b> 后「我的自选」页自动算止损/目标并盘中告警；<b>数量/止损/目标</b> 用于持仓管理。全部存本机浏览器，不上传。</div>';
     wlBindLocal(box);
   }
   function wlBindLocal(box) {
@@ -4059,10 +4118,14 @@
         wlNote(r.msg, r.ok ? 'ok' : 'err'); wlRenderLocal();
       });
     });
-    [].forEach.call(box.querySelectorAll('[data-wlcost]'), function (ci) {
+    [].forEach.call(box.querySelectorAll('[data-wlplan]'), function (ci) {
       ci.addEventListener('change', function () {
-        WLX.setCost(ci.getAttribute('data-wlcost'), ci.value, '');
-        wlNote('已保存成本价', 'ok'); wlRenderLocal();
+        var code = ci.getAttribute('data-code');
+        var k = ci.getAttribute('data-wlplan');
+        var plan = {}; plan[k] = ci.value;
+        WLX.setPlan(code, plan);
+        var label = { cost: '成本价', qty: '数量', stop: '止损', target: '目标' }[k] || k;
+        wlNote('已保存 ' + label, 'ok');
       });
     });
   }
@@ -4129,6 +4192,9 @@
     var savedTheme = 'tech';
     try { savedTheme = localStorage.getItem('sa_theme') || 'tech'; } catch (e) {}
     if (document.documentElement) document.documentElement.setAttribute('data-theme', savedTheme);
+    /* 本机关注 ☆ 一键免密钥：全局绑定一次委托监听，使所有推荐卡上的 ☆ 即时生效
+       （此前只在打开管理弹窗时才绑定，导致未开弹窗时 ☆ 无反应，用户被迫走云端输 key 路径） */
+    if (window.WLX) { WLX.ensureStyle(); WLX.bindDelegates(); }
     var tb = document.getElementById('themeBtn');
     if (tb) tb.addEventListener('click', function () {
       var cur = (document.documentElement && document.documentElement.getAttribute('data-theme')) || 'tech';
@@ -4497,26 +4563,60 @@
          原生 SPA 渲染（替代 iframe），红=买入/优先、绿=卖出/回避，与全站配色一致。
          保留「↗ 打开完整报告」直链到 trend_buy_points.html 作全屏兜底。 */
       var bp = D.buy_points || null;
+      var _wait = (bp && bp.waiting) || [];
+      var _skip = (bp && bp.skipped) || [];
+      var _gate = (bp && bp.gate) || null;
       var total = bp ? (bp.accel.length + bp.others.length + bp.chanlun.length) : 0;
       // 反查 zones 引擎买区/卖区，使网页买点视图与推送一致（带价格区间，可直接对照挂单）
       var _zmap = {};
       ((D.zones && D.zones.items) || []).forEach(function (z) { if (z && z.code) _zmap[z.code] = z; });
       var h = '';
-      h += '<div class="bp-bar"><span>🎯 买点候选 · 上升趋势中的介入机会（每日构建生成）</span>' +
+      h += '<div class="bp-bar"><span>🎯 买点候选 · 现价确实到位才算买点（每日构建生成）</span>' +
            '<a class="bp-link" href="trend_buy_points.html" target="_blank" rel="noopener">↗ 打开完整报告</a></div>';
-      if (!bp || !total) {
+      if (_gate) {
+        h += '<div class="bp-gate">🛡 <b>买点硬门禁已生效</b>：原始候选 ' + n2(_gate.raw || 0) +
+          ' 只 → <b class="g-ok">现价可买 ' + n2(_gate.buyable || 0) + ' 只</b>，' +
+          '<b class="g-wait">等回踩 ' + n2(_gate.waiting || 0) + ' 只</b>（另列给挂单价），' +
+          '<b class="g-hot">过热勿追 / 已临卖点 ' + n2(_gate.skipped || 0) + ' 只已剔除</b>。' +
+          '<span class="muted">判定：短线成本锚 ref=max(MA5,MA10)；现价≤ref×1.03 可买，≤1.06 小仓试，' +
+          '≤1.12 等回踩，再高即过热勿追；跌破止损→回避不接刀。</span></div>';
+      }
+      if (!bp || (!total && !_wait.length)) {
         h += card('🎯 买点候选',
           '<div class="empty">今日无明确买点信号（上升结构中的介入机会缺失，建议控仓等待）</div>',
           '买点由 bull / strategies / chanlun 引擎产出，趋势加速维度交叉引用 recommend.trend。');
         return h;
       }
       h += '<div class="grid g4" style="margin-bottom:16px">' +
+        kpi('现价可买', n2((bp.accel.length + bp.others.length)), '✅ 通过买点门禁', (bp.accel.length + bp.others.length) ? 'up' : '') +
         kpi('趋势加速优先', n2(bp.accel.length), '🚀 主升加速中的买点', bp.accel.length ? 'up' : '') +
-        kpi('其他买点', n2(bp.others.length), '回踩后再起 / 多头突破', '') +
-        kpi('缠论买点', n2(bp.chanlun.length), '一/二/三买结构', '') +
-        kpi('合计', n2(total), '当日买点候选总数', '') +
+        kpi('等回踩', n2(_wait.length), '⏳ 趋势可以但价高，挂单等', '') +
+        kpi('已剔除', n2(_skip.length), '🚫 过热勿追 / 已临卖点', _skip.length ? 'down' : '') +
         '</div>';
 
+      /* 近端可执行买点徽标：把「现价到底能不能买」明确写出来。
+         2026-09-03 用户拍板：不要再出现「在天上」的推荐。 */
+      function entryCell(r) {
+        var e = r.entry || {};
+        var st = r.entry_state || e.entry_state;
+        if (!st) return '<span class="muted">—</span>';
+        var gp = (r.entry_gap_pct != null) ? r.entry_gap_pct : e.entry_gap_pct;
+        var gs = (gp != null) ? (gp >= 0 ? '+' : '') + f(gp, 1) + '%' : '';
+        var nz = r.now_zone || e.now_zone || [];
+        var wp = (r.wait_price != null) ? r.wait_price : e.wait_price;
+        var wd = (r.wait_drop_pct != null) ? r.wait_drop_pct : e.wait_drop_pct;
+        if (st === '可买') {
+          var z = (nz.length === 2 && nz[0] != null) ? (f(nz[0], 2) + '~' + f(nz[1], 2)) : '';
+          return '<span class="ent ok">✅ 现价可买 ' + z + '</span>';
+        }
+        if (st === '微超') return '<span class="ent soft">🟡 小仓试 ' + gs + '</span>';
+        if (st === '等回踩') {
+          return '<span class="ent wait">⏳ 挂 ' + (wp != null ? f(wp, 2) : '?') +
+            (wd != null ? '（回落' + f(Math.abs(wd), 1) + '%）' : '') + '</span>';
+        }
+        if (st === '过热勿追') return '<span class="ent hot">🚫 过热 ' + gs + '</span>';
+        return '<span class="muted">' + E(st) + '</span>';
+      }
       function bpRow(r) {
         var sig = (r.signals || []).map(function (s) { return sigBadge(s); }).join(' ');
         var badge;
@@ -4542,6 +4642,7 @@
           '<td class="num">' + (r.dd60 != null ? pct(r.dd60) : '—') + '</td>' +
           '<td class="num">' + f(r.score) + '</td>' +
           '<td>' + badge + '</td>' +
+          '<td>' + entryCell(r) + '</td>' +
           '<td class="num">' + (function () {
             var z = _zmap[r.code]; if (!z) return '—';
             var p = [];
@@ -4555,20 +4656,42 @@
       var cols = [
         { t: '个股' }, { t: '信号' }, { t: '现价', a: 'num' }, { t: '涨跌幅', a: 'num' },
         { t: '量比', a: 'num' }, { t: '行业' }, { t: '距60高', a: 'num' },
-        { t: '评分', a: 'num' }, { t: '趋势状态' }, { t: '买区/卖区', a: 'num' }, { t: '说明' }
+        { t: '评分', a: 'num' }, { t: '趋势状态' }, { t: '近端买点' },
+        { t: '深回踩买区/卖区', a: 'num' }, { t: '说明' }
       ];
       if (bp.accel.length) {
         var cwarn = bp.accel.filter(function (x) { return x.warn_sell; }).length;
         h += '<div class="bp-sec accel">① 趋势加速优先 · 主升加速中的买点（共 ' + bp.accel.length + ' 只 🚀）</div>';
         h += card('🚀 加速优先买点', table(cols, bp.accel.map(bpRow).join('')),
-          '已处于「加速上行」的买点候选，优先推荐；买入=红。' +
+          '已处于「加速上行」的买点候选，且现价已通过近端买点门禁（可买/小仓试）；买入=红。' +
           (cwarn ? ('⚠ ' + cwarn + ' 只已临卖点（引擎判「卖出/止盈」），已用黄标区分、不参与推送，勿当买点。') : '') +
           '介入仍需次日竞价（高开≥2%才跟进、低开≤-2%放弃）确认。');
       }
       if (bp.others.length) {
         h += '<div class="bp-sec other">② 其他买点（回踩后再起 / 多头突破，共 ' + bp.others.length + ' 只）</div>';
         h += card('🎯 其他买点', table(cols, bp.others.map(bpRow).join('')),
-          '上升结构中的回踩企稳 / 多头刚突破买点，按评分降序；买入=红。');
+          '上升结构中的回踩企稳 / 多头刚突破买点，现价已到位，按评分降序；买入=红。');
+      }
+      if (_wait.length) {
+        h += '<div class="bp-sec wait">③ 趋势可以但要等回踩 · 不是现在的买点（共 ' + _wait.length + ' 只 ⏳）</div>';
+        h += card('⏳ 等回踩挂单清单', table(cols, _wait.map(bpRow).join('')),
+          '这些票趋势结构没问题，但<b>现价已高出短线成本锚</b>，追进去就是「买在天上」。' +
+          '按「近端买点」列的挂单价挂单等回踩，回不来就不做——不追高是这套门禁的核心纪律。');
+      }
+      if (_skip.length) {
+        var _skRows = _skip.slice(0, 30).map(function (r) {
+          return '<tr><td>' + stk(r.code, r.name) + '</td>' +
+            '<td class="num">' + (r.price != null ? f(r.price) : '—') + '</td>' +
+            '<td>' + entryCell(r) + '</td>' +
+            '<td>' + (r.warn_sell ? '<span class="sig-bar warn">⚠ 已临卖点 ' + E(r.live_action || '卖出') + '</span>'
+              : '<span class="ent hot">🚫 过热勿追</span>') + '</td>' +
+            '<td class="muted">' + E((r.tags || '').slice(0, 48)) + '</td></tr>';
+        }).join('');
+        h += '<div class="bp-sec skip">④ 已被门禁剔除（不推送、不当买点，仅留档核查，共 ' + _skip.length + ' 只 🚫）</div>';
+        h += card('🚫 剔除清单',
+          table([{ t: '个股' }, { t: '现价', a: 'num' }, { t: '偏离' }, { t: '剔除原因' }, { t: '说明' }], _skRows),
+          '现价远高于短线买点（过热勿追）或引擎已判卖出/止盈的矛盾票。留在此处只为可追溯，' +
+          '<b>不进买点、不进推送</b>。最多显示 30 条。');
       }
       if (bp.chanlun.length) {
         var crows = bp.chanlun.map(function (c) {
@@ -4581,7 +4704,7 @@
             '<td class="muted">' + E((c.reason || '').slice(0, 50)) + '</td>' +
             '</tr>';
         }).join('');
-        h += '<div class="bp-sec chan">③ 缠论结构买点（一/二/三买，共 ' + bp.chanlun.length + ' 只）</div>';
+        h += '<div class="bp-sec chan">⑤ 缠论结构买点（一/二/三买，共 ' + bp.chanlun.length + ' 只）</div>';
         h += card('📐 缠论买点',
           table([{ t: '个股' }, { t: '买点' }, { t: '中枢区间', a: 'num' }, { t: '现价', a: 'num' }, { t: '说明' }], crows),
           '缠论一/二/三买结构，下跌末端底背驰介入；买入=红。');

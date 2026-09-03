@@ -278,6 +278,166 @@ def band_levels(bars, cost=None, vol_ratio=None):
     }
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 近端可执行买点（2026-09-03 用户拍板：不要再推「飞在天上」的票）
+# ══════════════════════════════════════════════════════════════════════════
+# 问题根因（实测 09-03 数据）：band_levels 的买区锚在 MA20/MA60/45日结构低点，
+# 对已走出主升段的强势票，买区在现价下方 20%~47%（金健米业 +47.3%、深中华A
+# +46.9%）。这种「买点」要么永远等不到，要么等到时趋势已破——等于没有买点。
+# 于是 trend_verdict 只能走「未到卖区就建议买入」的分支，用户看到的就是
+# 一堆现价远超买区的票被标成「建议买入」。
+#
+# 修复口径：把买点拆成三档「阶梯」，并显式给出可执行性状态 entry_state：
+#   T1 现价档 now   —— 短线可直接下单区（MA5 附近 + 近3日低点托底）
+#   T2 近端回踩 pull —— 1~2 根K线内可能触及（MA10~MA5）
+#   T3 深回踩  deep  —— 原 band_levels 买区（MA20/结构低点），理想加仓位
+# entry_state ∈ 可买 / 微超 / 等回踩 / 过热勿追  ← 推荐与推送的硬门禁依据
+ENTRY_OK = ("可买", "微超")
+ENTRY_STATES = ("可买", "微超", "等回踩", "过热勿追")
+# 现价相对「可买上沿」的容差分档（用户拍板：宁缺勿滥）
+_ENTRY_TOL_OK = 0.03      # ≤ 参考位×1.03 → 可买
+_ENTRY_TOL_NEAR = 0.06    # ≤ ×1.06 → 微超（可小仓试）
+_ENTRY_TOL_WAIT = 0.12    # ≤ ×1.12 → 等回踩；超过 → 过热勿追
+
+
+def _atr(bars, n=14):
+    """真实波幅均值（用于判断「回踩一个波幅」的合理落点）。"""
+    if len(bars) < n + 1:
+        n = max(2, len(bars) - 1)
+    if n < 2:
+        return None
+    trs = []
+    for i in range(len(bars) - n, len(bars)):
+        if i < 1:
+            continue
+        h = float(bars[i].get("h") or bars[i]["c"])
+        lo = float(bars[i].get("l") or bars[i]["c"])
+        pc = float(bars[i - 1]["c"])
+        trs.append(max(h - lo, abs(h - pc), abs(lo - pc)))
+    return (sum(trs) / len(trs)) if trs else None
+
+
+def entry_plan(bars, deep_zone=None, stop=None):
+    """近端可执行买点阶梯 + 可买判定。bars: 升序日K（≥12 根）。
+
+    deep_zone: 已算好的 band_levels.buy_zone（可选，作为 T3 深回踩档）。
+    stop:      已算好的止损位（可选，用于剔除「已破位不接刀」）。
+
+    返回 dict 或 None：
+      close, ma5, ma10, ma20, lo3, atr,
+      now_zone[lo,hi]    T1 现价档（短线可直接下单）
+      pull_zone[lo,hi]   T2 近端回踩档
+      deep_zone[lo,hi]   T3 深回踩档（原买区）
+      ref                可买参考位（max(ma5, ma10)）
+      entry_state        可买/微超/等回踩/过热勿追
+      entry_gap_pct      现价相对「可买上沿」的偏离%（>0 即超出）
+      wait_price         需要等待的挂单价（T2 上沿）
+      wait_drop_pct      现价需回落多少%才到 wait_price（负数）
+      buyable            bool，entry_state ∈ ENTRY_OK
+      label              一句话中文结论（可直接上前端/推送）
+    """
+    if not bars or len(bars) < 12 or not bars[-1].get("c"):
+        return None
+    closes = [float(b["c"]) for b in bars]
+    close = closes[-1]
+    if close <= 0:
+        return None
+    ma5 = _sma(closes, 5)
+    ma10 = _sma(closes, 10)
+    ma20 = _sma(closes, 20)
+    lo3 = min(float(b.get("l") or b["c"]) for b in bars[-3:])
+    atr = _atr(bars)
+
+    # 可买参考位：短线资金真正的成本锚 = max(MA5, MA10)。
+    # 强势票 MA5 紧贴现价 → 现价即可买；追高票现价远离 MA5 → 判为过热。
+    ref = max([x for x in (ma5, ma10) if x] or [close])
+
+    # ── T1 现价档：MA5 微下方 ~ 现价微上方，近3日低点托底 ──
+    now_lo = round(max(min(lo3, close * 0.985), ref * 0.97), 2)
+    now_hi = round(close * 1.005, 2)
+    if now_lo > now_hi:
+        now_lo = round(now_hi * 0.98, 2)
+
+    # ── T2 近端回踩档：MA10 下沿 ~ MA5 上沿（或一个 ATR 的回撤）──
+    pull_anchor = min([x for x in (ma5, ma10) if x] or [close])
+    if atr:
+        pull_anchor = min(pull_anchor, close - atr * 0.8)
+    pull_lo = round(min(pull_anchor * 0.99, lo3), 2)
+    pull_hi = round(max(pull_anchor * 1.01, (ma5 or close) * 1.005), 2)
+    if pull_hi <= pull_lo:
+        pull_hi = round(pull_lo * 1.02, 2)
+
+    # ── T3 深回踩档：沿用 band_levels 买区 ──
+    deep = list(deep_zone) if (deep_zone and deep_zone[0]) else None
+
+    # ── 可执行性判定 ──
+    ok_hi = ref * (1 + _ENTRY_TOL_OK)
+    gap = (close / ok_hi - 1) * 100
+    broken = bool(stop and close <= float(stop))
+    if broken:
+        state = "过热勿追"      # 语义复用：已破位同样禁止买入（下方 label 区分）
+    elif close <= ok_hi:
+        state = "可买"
+    elif close <= ref * (1 + _ENTRY_TOL_NEAR):
+        state = "微超"
+    elif close <= ref * (1 + _ENTRY_TOL_WAIT):
+        state = "等回踩"
+    else:
+        state = "过热勿追"
+
+    wait_price = pull_hi if pull_hi < close else round(close * 0.97, 2)
+    wait_drop = (wait_price / close - 1) * 100
+
+    if broken:
+        label = "已破止损 %.2f，不接刀" % float(stop)
+    elif state == "可买":
+        label = "现价可买（%.2f~%.2f）" % (now_lo, now_hi)
+    elif state == "微超":
+        label = "小仓试（超买点 %+.1f%%，%.2f 内可接）" % (gap, now_hi)
+    elif state == "等回踩":
+        label = "等回踩 %.2f（需回落 %.1f%%）" % (wait_price, abs(wait_drop))
+    else:
+        label = "过热勿追（超买点 %+.1f%%）" % gap
+
+    return {
+        "close": round(close, 2),
+        "ma5": round(ma5, 2) if ma5 else None,
+        "ma10": round(ma10, 2) if ma10 else None,
+        "ma20": round(ma20, 2) if ma20 else None,
+        "lo3": round(lo3, 2),
+        "atr": round(atr, 2) if atr else None,
+        "ref": round(ref, 2),
+        "now_zone": [now_lo, now_hi],
+        "pull_zone": [pull_lo, pull_hi],
+        "deep_zone": deep,
+        "entry_state": state,
+        "entry_gap_pct": round(gap, 1),
+        "wait_price": wait_price,
+        "wait_drop_pct": round(wait_drop, 1),
+        "buyable": state in ENTRY_OK,
+        "broken": broken,
+        "label": label,
+    }
+
+
+def attach_entry(item, bars):
+    """把 entry_plan 结果挂到推荐条目上（就地修改并返回 item）。
+
+    统一入口：趋势票/连板票/买点候选/自选票都走这里，保证字段口径一致。
+    已有 buy_zone/stop 的条目自动作为 T3 深回踩档与破位判据传入。
+    """
+    try:
+        ep = entry_plan(bars, deep_zone=item.get("buy_zone"), stop=item.get("stop"))
+    except Exception:
+        ep = None
+    if ep:
+        item["entry"] = ep
+        item["entry_state"] = ep["entry_state"]
+        item["entry_gap_pct"] = ep["entry_gap_pct"]
+        item["buyable_now"] = ep["buyable"]
+    return item
+
+
 def analyze_one(code, name, bars, cost=None, horizon=None, elapsed=None,
                 replace_pool=None, exclude=None, industries=None):
     """bars: [{d,o,h,l,c,v,...}] 升序；cost: 持仓成本价（可选）；

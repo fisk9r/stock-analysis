@@ -1811,15 +1811,22 @@ def position_suggestion(heat_level, sentiment_level, heat_score=None, sent_score
             "suggest_pct": pct, "level": lv, "reason": reason}
 
 
-def trend_verdict(bars, band=None, first_seen=None, date=None, cost=None):
+def trend_verdict(bars, band=None, first_seen=None, date=None, cost=None, entry=None):
     """趋势票明确结论（需求3）：建议买入 / 卖出 / 持有，给出具体价格与持有期限。
 
     纪律硬约束：波段持有上限 **20 个交易日（约1个月）**——连续涨一个月极少见，
     到期未到卖区也应离场换股。数据来自日K + band_levels，纯本地。
 
-    返回 {action: 建议买入|建议卖出|持有观察|到期离场,
+    2026-09-03 用户拍板（不要再推「飞在天上」的票）：新增 entry 门禁。
+    entry = zones.entry_plan(...) 的结果（近端可执行买点阶梯）。
+    只要 entry.entry_state 不在 zones.ENTRY_OK（可买/微超），任何「建议买入」
+    都会被降级为「等回踩(挂单价)」并写明还需回落多少 %——绝不再对现价远超
+    短线买点的票喊买。entry 缺失时保持旧行为（不误杀数据不足的票）。
+
+    返回 {action: 建议买入|建议卖出|持有观察|到期离场|等回踩(x.xx),
           buy_price, sell_price, stop_price, hold_limit_days,
-          days_held, deadline, reason} 或 None。
+          days_held, deadline, reason, entry_state, entry_gap_pct,
+          wait_price, buyable_now} 或 None。
     """
     if not bars or len(bars) < 20 or not bars[-1].get("c"):
         return None
@@ -1887,6 +1894,33 @@ def trend_verdict(bars, band=None, first_seen=None, date=None, cost=None):
                       ("%.2f" % stop) if stop else "MA20",
                       ("%.2f" % sz_lo) if sz_lo else "上沿"))
 
+    # ── 买点硬门禁（2026-09-03 用户拍板：现价不到买点就不许喊买）──
+    # 只拦「买入类」动作；卖出/止损/到期离场/持有观察 一律放行（那些不是买入建议）。
+    ent = entry or {}
+    e_state = ent.get("entry_state")
+    e_gap = ent.get("entry_gap_pct")
+    e_wait = ent.get("wait_price")
+    gated = False
+    if e_state and action in ("建议买入", "买入", "加仓"):
+        if e_state not in ("可买", "微超"):
+            gated = True
+            if ent.get("broken"):
+                action = "回避（已破位）"
+                reason = "已跌破止损 %s，不接下跌中的刀——趋势修复后再看" % (
+                    ("%.2f" % stop) if stop else "关键位")
+            else:
+                action = "等回踩(%.2f)" % e_wait if e_wait else "等回踩"
+                reason = ("现价 %.2f 高出短线买点 %+.1f%%（%s档）——"
+                          "不追高。挂 %.2f 等回踩（需回落 %.1f%%），"
+                          "深回踩加仓位 %s；到价再买，不到不动。" % (
+                              cur, e_gap if e_gap is not None else 0.0, e_state,
+                              e_wait if e_wait else cur * 0.97,
+                              abs(ent.get("wait_drop_pct") or 3.0),
+                              ("%.2f~%.2f" % (bz_lo, bz_hi)) if bz_lo else "MA20"))
+        elif e_state == "微超":
+            reason += "｜现价略超短线买点 %+.1f%%，仅可小仓试，%.2f 以内接" % (
+                e_gap or 0.0, (ent.get("now_zone") or [0, cur])[1])
+
     # 趋势早期票：显式输出建议持有天数（波段纪律 20 日上限，早期留足空间）
     suggested_hold = HOLD_LIMIT - days_held if (early and action in ("建议买入", "买入")) else None
 
@@ -1905,6 +1939,14 @@ def trend_verdict(bars, band=None, first_seen=None, date=None, cost=None):
         "close": round(cur, 2),
         "cost": cost,
         "reason": reason,
+        # 买点门禁透出（前端/推送直接用，无需再算）
+        "entry_state": e_state,
+        "entry_gap_pct": e_gap,
+        "wait_price": e_wait,
+        "now_zone": ent.get("now_zone"),
+        "entry_label": ent.get("label"),
+        "buyable_now": bool(ent.get("buyable")) if e_state else None,
+        "gated": gated,
     }
 
 

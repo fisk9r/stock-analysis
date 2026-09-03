@@ -72,7 +72,7 @@ _REQUIRED_EXPORTS = {
               "watch_first_seen"),
     "engine": ("screen_uptrend", "trend_verdict", "institution_evidence",
                "sector_day_forecast", "classify_trend_state"),
-    "zones": ("band_levels", "scan"),
+    "zones": ("band_levels", "scan", "entry_plan", "attach_entry"),
     "watchreco": ("distill", "lines"),
 }
 
@@ -653,6 +653,9 @@ def run(date_override=None, dedup_close=False):
                     _p["stop"] = _bd["stop"]
                     _p["band_action"] = _bd["band_action"]
                     _p["advice"] = _bd["advice"]
+                # 近端可执行买点阶梯（2026-09-03：买区锚在 MA20 太远，强势票
+                # 现价常高出 20~47%，必须另给「短线现在能不能买」的口径）
+                zones.attach_entry(_p, _bs)
         _states = store.trend_track_states(con) if con else {}
         _merged = {}
         for _p in cur_trend:
@@ -666,7 +669,8 @@ def run(date_override=None, dedup_close=False):
             try:
                 _bs_v = [b for b in (u.bars.get(_c) or []) if b["d"] <= date]
                 _vd = engine.trend_verdict(_bs_v, band=_p,
-                                           first_seen=_p.get("first_seen"), date=date)
+                                           first_seen=_p.get("first_seen"), date=date,
+                                           entry=_p.get("entry"))
                 if _vd:
                     _p["verdict"] = _vd
             except Exception:
@@ -751,9 +755,11 @@ def run(date_override=None, dedup_close=False):
                     _p["buy_zone"] = _bd["buy_zone"]; _p["sell_zone"] = _bd["sell_zone"]
                     _p["stop"] = _bd["stop"]; _p["band_action"] = _bd["band_action"]
                     _p["advice"] = _bd["advice"]
+                zones.attach_entry(_p, _bs)
                 try:
                     _vd = engine.trend_verdict(_bs, band=_bd or {},
-                                               first_seen=_stt["first_seen"], date=date)
+                                               first_seen=_stt["first_seen"], date=date,
+                                               entry=_p.get("entry"))
                     if _vd:
                         _p["verdict"] = _vd
                 except Exception:
@@ -975,6 +981,64 @@ def run(date_override=None, dedup_close=False):
     except Exception as e:
         log("  经典策略失败（不影响主流程）：%r" % e)
         data["strategies"] = []
+
+    # ══════════════════════════════════════════════════════════════════
+    # 买点门禁（2026-09-03 用户拍板：不要再推「飞在天上」的票）
+    # ══════════════════════════════════════════════════════════════════
+    # 给所有「买入候选池」统一附加近端可执行买点 entry（zones.entry_plan）：
+    #   bull / strategies / recommend.trend / recommend.momentum
+    # entry_state ∈ 可买 / 微超 / 等回踩 / 过热勿追，供 buy_points 过滤、
+    # 前端徽标、推送门禁共用一套口径。
+    # 连板体系 core/relay/ambush 走另一套（次日竞价追板区 chase），
+    # 因为刚涨停的票必然远离 MA5，用 entry_plan 会一刀切全砍。
+    try:
+        _eg_stat = {"可买": 0, "微超": 0, "等回踩": 0, "过热勿追": 0, "无数据": 0}
+
+        def _attach_entry_pool(arr, price_key="price"):
+            n = 0
+            for _it in (arr or []):
+                if not isinstance(_it, dict):
+                    continue
+                _c = _it.get("code")
+                _bs = [b for b in (u.bars.get(_c) or []) if b["d"] <= date]
+                if len(_bs) < 12:
+                    _eg_stat["无数据"] += 1
+                    continue
+                zones.attach_entry(_it, _bs)
+                _st = _it.get("entry_state")
+                if _st:
+                    _eg_stat[_st] = _eg_stat.get(_st, 0) + 1
+                    n += 1
+                else:
+                    _eg_stat["无数据"] += 1
+            return n
+
+        _attach_entry_pool(data.get("bull"))
+        _attach_entry_pool(data.get("strategies"))
+        _attach_entry_pool(rec.get("momentum"))
+        # 连板体系：给出「次日竞价可追区」——实证纪律（118万K线）：
+        # 高开≥2% 跟进胜率 67.4%，低开≤-2% 放弃（胜率仅 5%）。
+        for _k in ("core", "relay", "ambush", "all"):
+            for _it in (rec.get(_k) or []):
+                if not isinstance(_it, dict) or _it.get("chase"):
+                    continue
+                _cl = _it.get("close")
+                if not _cl:
+                    continue
+                _cl = float(_cl)
+                _it["chase"] = {
+                    "zone": [round(_cl * 0.995, 2), round(_cl * 1.03, 2)],
+                    "give_up_below": round(_cl * 0.98, 2),
+                    "stop": round(_cl * 0.93, 2),
+                    "rule": "次日竞价不低开(>-2%)可追；高开≥2%积极跟进；低开≤-2%放弃",
+                }
+        log("  买点门禁：可买 %d / 微超 %d / 等回踩 %d / 过热勿追 %d（数据不足 %d）"
+            % (_eg_stat.get("可买", 0), _eg_stat.get("微超", 0),
+               _eg_stat.get("等回踩", 0), _eg_stat.get("过热勿追", 0),
+               _eg_stat.get("无数据", 0)))
+        data["entry_gate_stat"] = _eg_stat
+    except Exception as e:
+        log("  买点门禁附加失败（不影响主流程）：%r" % e)
 
     # ---- 策略历史回测：近 25 个交易日逐日重放信号，统计次日/3日胜率 ----
     try:

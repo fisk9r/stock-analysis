@@ -1822,10 +1822,12 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
             _mark = " 🆕"
         elif (t.get("times") or 0) > 1:
             _mark = " (跟踪%d天)" % t.get("times")
-        # 2026-09-02（用户拍板：重点提示可直接买入的票，飞在天上的不算买点）——
-        # 现价在买区内/贴近买区上沿 → 行尾重点标注「✅现价可买」。
-        _can = zone_buyable(t.get("close"), t.get("buy_zone"))
-        _buy_s = " ｜ ✅**现价可买**" if _can is True else ""
+        # 2026-09-03（用户拍板：不要再推没到买点的票）——行尾统一标注买点状态：
+        # ✅现价可买 X.XX~X.XX / 🟡小仓试 / ⏳等回踩 X.XX(需回落Y%) / 🚫过热勿追。
+        _buy_s = entry_badge(t)
+        if not _buy_s:
+            _can = zone_buyable(t.get("close"), t.get("buy_zone"))
+            _buy_s = " ｜ ✅**现价可买**" if _can is True else ""
         return ("**%s**%s(%s) %.2f ｜ 日均%.1f%%·%d涨%s%s%s%s"
                 % (t.get("name", "?"), _mark,
                    t.get("industry", "—") or "—",
@@ -1901,10 +1903,26 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     # 剔除「已临卖点」矛盾票（warn_sell）：不把引擎判卖出的票当买点推荐
     # 2026-09-02 用户拍板：飞在天上的票（现价>买区上沿5%）不再作为买点推荐——
     # 买点候选只留「现价就在买点附近、可以直接买」的票，可买的排最前并重点标注。
+    # 2026-09-03 口径升级：buy_points.accel/others 在 build 侧已按 entry_state
+    # （近端可执行买点）过滤过一遍，这里只做二次保险 + 排序 + 标注。
+    # 关键修正：不再用 MA20 买区容差二次筛（那个口径对强势票天然偏远，会把
+    # 真正「现价可买」的票也误杀），改用 entry_buyable，缺 entry 时才回退。
+    def _bp_keep(b):
+        ok = entry_buyable(b)
+        if ok is not None:
+            return ok
+        return zone_buyable(b.get("price"),
+                            (_zone_bz.get(b.get("code")) or (None, None))[0]) is not False
+
+    def _bp_flag(b):
+        s = entry_badge(b)
+        if s:
+            return s.replace(" ｜ ", "", 1) + " ｜ "
+        _bz = (_zone_bz.get(b.get("code")) or (None, None))[0]
+        return "✅现价可买 ｜ " if zone_buyable(b.get("price"), _bz) is True else ""
+
     _all_acc = [b for b in (_bp.get("accel") or []) if not b.get("warn_sell")]
-    _all_acc = [b for b in _all_acc
-                if zone_buyable(b.get("price"),
-                                (_zone_bz.get(b.get("code")) or (None, None))[0]) is not False]
+    _all_acc = [b for b in _all_acc if _bp_keep(b)]
     _all_acc = buyable_first(_all_acc,
                              lambda b: b.get("price"),
                              lambda b: (_zone_bz.get(b.get("code")) or (None, None))[0])
@@ -1912,12 +1930,10 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     if _acc_bp:
         _acc_rows = []
         for b in _acc_bp:
-            _bz = (_zone_bz.get(b.get("code")) or (None, None))[0]
-            _flag = "✅现价可买 ｜ " if zone_buyable(b.get("price"), _bz) is True else ""
             _acc_rows.append(
                 "🔴 **%s**(%s) %.2f ｜ %s%s%s ｜ 评分%.0f%s"
                 % (b.get("name", "?"), b.get("ind") or "—", b.get("price") or 0,
-                   _flag,
+                   _bp_flag(b),
                    b.get("btype") or "",
                    (" ×%.2f" % b["accel"] if b.get("accel") is not None else ""),
                    b.get("score") or 0,
@@ -1931,9 +1947,7 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     # 同样剔除矛盾票（warn_sell），按评分取前 6 只控量（缠论买点另有独立段）。
     # 2026-09-02：同样只留「现价在买点附近」的票，可买排前并标注。
     _all_oth = [b for b in (_bp.get("others") or []) if not b.get("warn_sell")]
-    _all_oth = [b for b in _all_oth
-                if zone_buyable(b.get("price"),
-                                (_zone_bz.get(b.get("code")) or (None, None))[0]) is not False]
+    _all_oth = [b for b in _all_oth if _bp_keep(b)]
     _all_oth = buyable_first(_all_oth,
                              lambda b: b.get("price"),
                              lambda b: (_zone_bz.get(b.get("code")) or (None, None))[0])
@@ -1941,17 +1955,32 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     if _oth_bp:
         _oth_rows = []
         for b in _oth_bp:
-            _bz = (_zone_bz.get(b.get("code")) or (None, None))[0]
-            _flag = "✅现价可买 ｜ " if zone_buyable(b.get("price"), _bz) is True else ""
             _oth_rows.append(
                 "🔴 **%s**(%s) %.2f ｜ %s%s ｜ 评分%.0f%s"
                 % (b.get("name", "?"), b.get("ind") or "—", b.get("price") or 0,
-                   _flag, b.get("btype") or "", b.get("score") or 0,
+                   _bp_flag(b), b.get("btype") or "", b.get("score") or 0,
                    _bp_zt(b.get("code"))))
         if len(_all_oth) > len(_oth_bp):
             _oth_rows.append("…（趋势多头买点共 %d 只，列评分前 %d；完整清单见站点「买点候选」视图）"
                              % (len(_all_oth), len(_oth_bp)))
         _sec("📈 买点候选 · 其他（趋势多头）", _oth_rows)
+    # ---- 等回踩清单（2026-09-03 用户拍板：没到买点的票不混进买点候选，
+    #      但也不能凭空消失——单列一段给明确挂单价，到价才动手）----
+    _wait_bp = (_bp.get("waiting") or [])[:8]
+    if _wait_bp:
+        _wrows = []
+        for b in _wait_bp:
+            _e = b.get("entry") or {}
+            _wp = _e.get("wait_price") or b.get("wait_price")
+            _wrows.append(
+                "⏳ **%s**(%s) 现价%.2f → 挂 **%.2f**（需回落%.1f%%）｜ %s ｜ 评分%.0f"
+                % (b.get("name", "?"), b.get("ind") or "—", b.get("price") or 0,
+                   _wp or 0, abs(_e.get("wait_drop_pct") or 0.0),
+                   b.get("btype") or "", b.get("score") or 0))
+        _gate = _bp.get("gate") or {}
+        _wrows.append("> 趋势没问题但**现价高于短线买点**，不追高：到价成交才算买点。"
+                      "本次共剔除 %d 只过热/已临卖点票。" % (_gate.get("skipped") or 0))
+        _sec("⏳ 趋势可以但要等回踩（挂单价）", _wrows)
     # ---- 自选/持仓操作结论（P1/P4：跟着做）----
     _wr = rec.get("watch_reco")
     if _wr and _wr.get("items") and _on("rec"):
@@ -2599,7 +2628,11 @@ def _watch_action_by_sector(act, dirn):
 def zone_buyable(price, buy_zone, tol=1.05):
     """2026-09-02 用户拍板：现价是否「可以直接买」——现价 ≤ 买区上沿×tol（默认5%容差）。
     飞在天上的票（现价远超买区，等回落到买点也不值得追）返回 False。
-    无买区信息时返回 None（调用方决定不误杀）。"""
+    无买区信息时返回 None（调用方决定不误杀）。
+
+    注意：buy_zone 锚在 MA20/结构低点，对强势票天然偏远（实测 09-03 十只趋势票
+    九只现价高出买区 8%~47%）。因此优先用 entry_state（近端可执行买点）判定，
+    见 entry_buyable / item_buyable。本函数保留为无 entry 数据时的兼容路径。"""
     try:
         if not buy_zone or buy_zone[1] is None or price is None:
             return None
@@ -2608,17 +2641,89 @@ def zone_buyable(price, buy_zone, tol=1.05):
         return None
 
 
+def entry_buyable(item):
+    """2026-09-03 用户拍板（不要再推「在天上」的票）：以 zones.entry_plan 的
+    entry_state 为准判「现价能不能买」。
+
+    可买/微超 → True；等回踩/过热勿追 → False；无 entry 数据 → None（交给
+    调用方回退到 zone_buyable，避免误杀数据不足的票）。"""
+    if not isinstance(item, dict):
+        return None
+    st = item.get("entry_state") or ((item.get("entry") or {}).get("entry_state"))
+    if not st:
+        vd = item.get("verdict")
+        if isinstance(vd, dict):
+            st = vd.get("entry_state")
+    if not st:
+        return None
+    return st in ("可买", "微超")
+
+
+def item_buyable(item, price_key=None, zone_key=None):
+    """统一「可买」判定：entry_state 优先，缺失时回退买区容差判定。"""
+    ok = entry_buyable(item)
+    if ok is not None:
+        return ok
+    p = price_key(item) if price_key else item.get("close")
+    z = zone_key(item) if zone_key else item.get("buy_zone")
+    return zone_buyable(p, z)
+
+
+def entry_badge(item):
+    """行尾买点徽标：✅现价可买 / 🟡小仓试 / ⏳等回踩X.XX(-Y%) / 🚫过热勿追(+Z%)。"""
+    if not isinstance(item, dict):
+        return ""
+    ent = item.get("entry") or {}
+    st = item.get("entry_state") or ent.get("entry_state")
+    if not st:
+        vd = item.get("verdict") or {}
+        st = vd.get("entry_state") if isinstance(vd, dict) else None
+        ent = ent or {}
+    if not st:
+        return ""
+    gap = item.get("entry_gap_pct")
+    if gap is None:
+        gap = ent.get("entry_gap_pct")
+    wait = ent.get("wait_price") or item.get("wait_price")
+    if ent.get("broken"):
+        return " ｜ 🚫**已破位不接**"
+    if st == "可买":
+        nz = ent.get("now_zone") or item.get("now_zone")
+        return (" ｜ ✅**现价可买 %.2f~%.2f**" % (nz[0], nz[1])) if nz else " ｜ ✅**现价可买**"
+    if st == "微超":
+        return " ｜ 🟡**小仓试**(超买点%+.1f%%)" % (gap or 0.0)
+    if st == "等回踩":
+        return (" ｜ ⏳等回踩 **%.2f**(需回落%.1f%%)"
+                % (wait, abs(ent.get("wait_drop_pct") or 0.0))) if wait else " ｜ ⏳等回踩"
+    return " ｜ 🚫**过热勿追**(超买点%+.1f%%)" % (gap or 0.0)
+
+
 def buyable_first(seq, price_key, zone_key):
-    """把「现价在买区内/贴近买区」的票排到最前（可买优先，飞在天上的靠后）。
-    price_key/zone_key: 从元素取现价与买区 [lo,hi] 的 callable。无买区的票排最后不误杀。"""
+    """把「现价在买点上/贴近买点」的票排到最前（可买优先，飞在天上的靠后）。
+    price_key/zone_key: 从元素取现价与买区 [lo,hi] 的 callable（entry 缺失时的回退）。
+    2026-09-03：优先看 entry_state，其次才用买区容差。无信息的票排最后不误杀。"""
     def k(x):
+        st = (x.get("entry_state") if isinstance(x, dict) else None) \
+            or ((x.get("entry") or {}).get("entry_state") if isinstance(x, dict) else None)
+        if st:
+            return {"可买": 0, "微超": 1, "等回踩": 3, "过热勿追": 4}.get(st, 2)
         ok = zone_buyable(price_key(x), zone_key(x))
         if ok is True:
             return 0
         if ok is None:
             return 2
-        return 1
+        return 3
     return sorted(seq, key=k)
+
+
+def drop_unbuyable(seq):
+    """从「买入推荐」序列里剔除 等回踩/过热勿追/已破位 的票（推送门禁）。
+    entry 缺失的票保守保留。返回 (保留列表, 被剔除列表)。"""
+    keep, cut = [], []
+    for x in seq:
+        ok = entry_buyable(x)
+        (keep if ok is not False else cut).append(x)
+    return keep, cut
 
 
 def _act_emoji(act):
