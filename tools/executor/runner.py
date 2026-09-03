@@ -557,16 +557,28 @@ def exec_state_restore(force=False):
         tf = tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz")
         # 安全：只解包白名单成员，拒绝绝对路径/.. 穿越（恶意或损坏的压缩包）
         _allow = set(_EXEC_STATE_MEMBERS)
+        # 2026-09-03 修复（重大）：sim_review.json 是「本轮输出」不是「状态」——
+        # 此前每次运行都把 Release 包里的旧复盘文件解包出来，workflow 第 7 步又把它
+        # 原样推回 state/sim_review.json，导致 9/1 的旧占位文件永远循环覆盖线上
+        # （复盘因时段闸失败后，新数据永远写不进来）。恢复时排除它，并删除本地残留。
+        _allow.discard("sim_review.json")
         safe_members = []
         for m in tf.getmembers():
             name = m.name.replace("\\", "/").lstrip("./")
             if name not in _allow or m.issym() or m.islnk():
+                if name == "sim_review.json":
+                    continue  # 静默跳过：旧复盘不落地
                 _log("exec_state: 跳过非法成员 %r" % m.name)
                 continue
             m.name = name
             safe_members.append(m)
         tf.extractall(ex, members=safe_members)
         tf.close()
+        # 防御：清掉可能的历史残留（旧包/手工放置），保证第 7 步只在
+        # 本轮复盘真正生成时才回传
+        _stale = os.path.join(ex, "sim_review.json")
+        if os.path.exists(_stale):
+            os.remove(_stale)
         _log("exec_state: 状态已恢复（sim.db %s）"
              % os.path.getsize(os.path.join(ex, "sim.db")))
         return True
@@ -635,7 +647,7 @@ def _sh_now():
     return utc.hour, utc.minute
 
 
-def is_trading_now(force=False):
+def is_trading_now(force=False, check_window=True):
     """今日是否 A 股交易日（用上证指数行情时间戳判定，节假日/停市=否）+ 交易时段闸。
 
     CI 托管后执行器跑在 GitHub Actions（周末 cron 已排除，但法定节假日排除不了）：
@@ -646,16 +658,22 @@ def is_trading_now(force=False):
     收盘后的 "尾盘" 会拿收盘价误下单。这里额外卡上海交易时段
     （09:15-11:35 / 13:00-15:05），非时段一律拒单，不依赖 cron 准时。
     force=True（workflow_dispatch 手动测试）跳过时段判定。
+
+    check_window=False（2026-09-03 修复）：只读任务（复盘 run_review）专用——
+    此前 15:32 的复盘被「15:32 已收盘 → 禁止下单」时段闸误杀，模拟盘复盘
+    自 9/1 起再未成功写入，网站永远显示 9/1 空占位日。复盘不下单，
+    只需交易日判定（节假日/停市仍然拦截），收盘后 15:00-23:59 均可跑。
     """
     if force:
         return True, "force"
     # 时段闸：非交易时段禁止下单（防 cron 延迟投递拿收盘价误交易）
-    h, m = _sh_now()
-    now_min = h * 60 + m
-    morning = (9 * 60 + 15) <= now_min <= (11 * 60 + 35)
-    afternoon = (13 * 60) <= now_min <= (15 * 60 + 5)
-    if not (morning or afternoon):
-        return False, "非交易时段（上海时间 %02d:%02d，禁止下单）" % (h, m)
+    if check_window:
+        h, m = _sh_now()
+        now_min = h * 60 + m
+        morning = (9 * 60 + 15) <= now_min <= (11 * 60 + 35)
+        afternoon = (13 * 60) <= now_min <= (15 * 60 + 5)
+        if not (morning or afternoon):
+            return False, "非交易时段（上海时间 %02d:%02d，禁止下单）" % (h, m)
     try:
         # 指数行情：realtime_quote 按首码映射 sh/sz/bj 前缀，指数码 000001 会被
         # 误映射成 sz000001（不存在）。上证指数的行情码是 sh000001——直接传
@@ -1826,7 +1844,9 @@ def run_review(cfg=None, push=True, force=False):
     cfg = cfg or load_cfg()
     if mode_check_no_sim(cfg):
         return
-    ok, why = is_trading_now(force=force)
+    # 2026-09-03 修复：check_window=False——复盘是只读汇总+明日计划，不下单，
+    # 15:32 收盘后运行不应被「禁止下单」时段闸挡掉（该闸导致 9/1 后复盘全灭）。
+    ok, why = is_trading_now(force=force, check_window=False)
     if not ok:
         _log("非交易日，复盘跳过：%s" % why)
         return None

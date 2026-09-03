@@ -128,13 +128,19 @@ def distill(zones_data, holding_codes=None, watch_names=None, topn=14, watch_cod
     }
 
 
-def _fallback_replaces(item, rec, tol=1.15):
+def _fallback_replaces(item, rec, tol=1.0):
     """replace 候选被「现价远超买区」过滤清空、或 zones 本就没给（如止盈/离场）时的兜底：
     从推荐池补真正可买的票。用户 2026-09-03 拍板：提示卖出/割肉的票必须同时给出可以买入
     的票，不能只留「观望」让人无所适从。
 
-    候选来源：推荐池全量（core/relay/ambush/all/trend）+ 连板计划，要求『现价就在买点附近』
-    （close ≤ 买区上沿×tol），按价值分排序，排除原票，最多 2 只。
+    2026-09-03 二次收紧（用户原话：德尔未来买点 9~9.36 现价 10 以上，「让我干瞪眼还是怎么？
+    我需要的是能够立即切换的股票，而不是让我继续等」）：
+    tol 收紧到 1.0 —— 只推「现价 ≤ 买区上沿」的票，即**当下就能下单买入**的票；
+    现价高于买点的票一律不给（那是让人等回调，不是给可买票）。池内没有就空手而回，
+    宁可不推也不拿远端票凑数。
+
+    候选来源：推荐池全量（core/relay/ambush/all/trend）+ 连板计划，按价值分排序，
+    排除原票，最多 2 只。
     注意：连板计划（ladder_plans）多为高位续强票，现价常远超买区上沿被过滤——所以主源
     改为带买区的推荐池本身，连板计划只作为补充。"""
     if not rec:
@@ -160,6 +166,7 @@ def _fallback_replaces(item, rec, tol=1.15):
             pr = float(pr)
         except Exception:
             continue
+        # 2026-09-03 收紧：现价必须不高于买区上沿（≈0% 溢出）才算「立即可以买」
         if pr > float(bz[1]) * tol:
             continue
         seen.add(c)
@@ -258,7 +265,9 @@ def lines(wr, n=6, compact=False, rec=None):
                 _merged.append(_rp0)
             for rp in _merged:
                 _rp_close, _rp_bz = rp.get("close"), (rp.get("buy_zone") or [None, None])
-                if _rp_close and _rp_bz[1] and _rp_close > float(_rp_bz[1]) * 1.15:
+                # 2026-09-03 收紧：渲染层同步只放行「现价 ≤ 买区上沿」的候选
+                #（用户：要能立即切换的票，不要让我等回调）
+                if _rp_close and _rp_bz[1] and _rp_close > float(_rp_bz[1]) * 1.0:
                     continue
                 if _n >= 2:
                     break
