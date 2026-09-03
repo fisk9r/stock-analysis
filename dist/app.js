@@ -2045,7 +2045,22 @@
   function viewRec() {
     var R = D.recommend || {}, st = (D.market || {}).sentiment || {}, cy = (D.market || {}).cycle || {};
     var ML = R.mainline_map || {};
+    // 🎯 只看可介入：默认开。隐藏「过热勿追 / 已破位」（飞在天上的票），按可买优先排序。
+    var SA_REC_FILTER = (function () { try { return localStorage.getItem('sa_rec_filter') !== '0'; } catch (e) { return true; } })();
+    var _RANK = { '可买': 0, '微超': 1, '等回踩': 2, '无': 3, '已破位': 4, '过热勿追': 5 };
+    function _rankOf(s) { return _RANK.hasOwnProperty(s) ? _RANK[s] : 3; }
+    function _estOf(it) { return (it.entry && it.entry.entry_state) || null; }
+    function recPass(it) {
+      if (!SA_REC_FILTER) return true;
+      var s = _estOf(it);
+      if (s === '过热勿追' || s === '已破位') return false;
+      return true;
+    }
     var h = '';
+    h += '<div class="rec-filter-bar">' +
+      '<button id="recFilterToggle" class="mbtn ' + (SA_REC_FILTER ? 'mbtn-p' : 'mbtn-ghost') + '">🎯 只看可介入：' + (SA_REC_FILTER ? '开' : '关') + '</button>' +
+      '<span class="muted" style="font-size:11.5px;margin-left:6px">开启后隐藏「过热勿追 / 已破位」的飞在天上的票，只留现价可买或等回踩的标的</span>' +
+      '</div>';
     h += card('🧭 次日操作总纲', '<div class="grid g4" style="margin-bottom:14px">' +
       kpi('建议仓位', E(R.position || '—'), '基于情绪分 ' + f(st.score, 1)) +
       kpi('情绪状态', E(st.level || '—'), E(st.label || '')) +
@@ -2157,7 +2172,11 @@
       '连板≥3 且断板概率≥86%，次日冲高回落概率大，列出仅为提示回避');
     /* 趋势主升：标注历史/新推荐 + 波段买卖价（避免每日随行情波动） */
     (function () {
-      var TR = R.trend || [];
+      var TR0 = R.trend || [];
+      var TRhidden = TR0.filter(function (t) { return !recPass(t); }).length;
+      var TR = TR0.filter(recPass).slice().sort(function (a, b) {
+        return _rankOf(_estOf(a)) - _rankOf(_estOf(b));
+      });
       if (!TR.length) return;
       var body = TR.map(function (t) {
         var badge = t.is_new
@@ -2259,11 +2278,15 @@
           '<div class="chips" style="margin-top:5px;display:flex;flex-wrap:wrap;gap:5px">' + band + '</div>' + adv + vdHtml + instHtml + '</div>';
       }).join('');
       var _gk = { '可买': 0, '微超': 0, '等回踩': 0, '过热勿追': 0, '无': 0 };
-      TR.forEach(function (t) { var s = (t.entry || {}).entry_state || '无'; if (_gk[s] != null) _gk[s]++; });
-      h += card('📈 趋势主升 · 候选（' + TR.length + '，🆕=新入选 / 历史=持续跟踪）', body,
-        '<b>近端买点门禁</b>：现价可买 ' + _gk['可买'] + ' 只 · 小仓试 ' + _gk['微超'] + ' 只 · 等回踩 ' +
-        _gk['等回踩'] + ' 只 · 过热勿追 ' + _gk['过热勿追'] + ' 只（后两类结论已被引擎强制改为「等回踩(挂单价)」，' +
-        '不会给出买入建议）。双通道入选：强趋势（日均≥2%+4涨）与缓坡慢牛（斜率≥1.5%+20日涨≥8%）；' +
+      TR0.forEach(function (t) { var s = (t.entry || {}).entry_state || '无'; if (_gk[s] != null) _gk[s]++; });
+      var _gateNote = SA_REC_FILTER
+        ? ('<b>近端买点门禁</b>：现价可买 ' + _gk['可买'] + ' 只 · 小仓试 ' + _gk['微超'] + ' 只 · 等回踩 ' +
+          _gk['等回踩'] + ' 只' + (TRhidden ? '；已按「只看可介入」隐藏 ' + TRhidden + ' 只过热/破位票' : '') +
+          '。双通道入选：强趋势（日均≥2%+4涨）与缓坡慢牛（斜率≥1.5%+20日涨≥8%）；')
+        : ('<b>近端买点门禁</b>：现价可买 ' + _gk['可买'] + ' 只 · 小仓试 ' + _gk['微超'] + ' 只 · 等回踩 ' +
+          _gk['等回踩'] + ' 只 · 过热勿追 ' + _gk['过热勿追'] + ' 只（后两类结论已被引擎强制改为「等回踩(挂单价)」，不会给出买入建议）。双通道入选：强趋势（日均≥2%+4涨）与缓坡慢牛（斜率≥1.5%+20日涨≥8%）；');
+      h += card('📈 趋势主升 · 候选（' + TR.length + (TRhidden ? '，已隐藏 ' + TRhidden + ' 只' : '') + '，🆕=新入选 / 历史=持续跟踪）', body,
+        _gateNote +
         '🚀加速/🐢放缓标签看涨速变化，🏦标签为机构或主力资金介入证据（龙虎榜净买/大宗机构专用/板块主力净流入）');
     })();
     h += group('🔭 观察池 · 连板余波（' + (R.momentum || []).length + '）', R.momentum, 'momentum observe-group',
@@ -4423,6 +4446,7 @@
       var scOpts = ['all', 'sim', 'prepost', 'none'];
       function scLabel(s) { return (scopeMeta[s] && scopeMeta[s].label) || s; }
       // —— 收件人推送范围编辑器 ——
+      var _rt = (muRecallToken() || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;');
       var rows = recips.map(function (r) {
         var opts = scOpts.map(function (s) {
           return '<option value="' + s + '"' + (r.scope === s ? ' selected' : '') + '>' +
@@ -4442,7 +4466,7 @@
         (rows ? '<table class="pc-t"><thead><tr><th>接收人</th><th>通道</th><th>接收范围</th></tr></thead><tbody>' + rows + '</tbody></table>'
                : '<div class="empty">未检测到收件人配置（notify.json 为空）。</div>') +
         '<div class="pc-actions">' +
-        '<input class="pc-tok" id="pcTok" type="password" placeholder="GitHub 令牌（首次需粘贴，仅存本机会话，用于写回配置）" autocomplete="off">' +
+        '<input class="pc-tok" id="pcTok" type="password" value="' + _rt + '" placeholder="GitHub 令牌（已记住则无需再填，仅本机会话用于写回配置）" autocomplete="off">' +
         '<button class="mbtn mbtn-p" id="pcSaveBtn" type="button">💾 保存并设置</button>' +
         '<a class="mbtn mbtn-ghost" href="https://github.com/settings/tokens/new?scopes=repo&description=stock-analysis%20pushcenter" target="_blank" rel="noopener">去创建令牌</a>' +
         '</div>' +
@@ -4732,6 +4756,17 @@
           el.innerHTML = '<div class="card"><div class="body"><div class="empty">渲染出错：' + E(e.message) + '</div></div></div>';
         }
         done[k] = 1;
+      }
+      /* 推荐视图的「🎯 只看可介入」开关：点一下重新渲染，按新偏好过滤 */
+      if (k === 'rec') {
+        var rft = el.querySelector('#recFilterToggle');
+        if (rft) rft.addEventListener('click', function () {
+          var cur = true;
+          try { cur = localStorage.getItem('sa_rec_filter') !== '0'; } catch (e) {}
+          try { localStorage.setItem('sa_rec_filter', cur ? '0' : '1'); } catch (e) {}
+          delete done['rec'];
+          show('rec');
+        });
       }
       /* 切换视图：仅对存在的容器切换 .on，避免缺节点时整段崩溃 */
       Object.keys(views).forEach(function (x) {

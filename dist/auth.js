@@ -206,6 +206,19 @@
     return o;
   }
 
+  // 用一组候选 id 逐个试口令；第一个能解开的即认定身份。口令有效但 id 被管理员改过也能进。
+  function tryLogin(ids, pass) {
+    var i = 0;
+    function next() {
+      if (i >= ids.length) { forget(); return Promise.reject(new Error('口令不匹配')); }
+      var id = ids[i++];
+      return fetchBlob(id, pass)
+        .then(function () { window.__SA_USER__ = id; return id; })
+        .catch(function () { return next(); });
+    }
+    return next();
+  }
+
   function boot() {
     // 开发模式：明文 data.js 已被 index.html 加载
     if (window.__STOCK_DATA__) { return renderApp(); }
@@ -215,19 +228,20 @@
     }).then(function (meta) {
       if (!meta || !meta.length) throw new Error('nousers');
 
-      // 本机记住过口令就直接进；口令被管理员改过则自动清掉并回到登录框
+      // 本机记住过口令就直接进；即便管理员改过 users.json（存的 id 不在列表），也逐个试口令，能解开就进
       var saved = recall();
-      var known = saved && meta.some(function (m) { return m.id === saved.id; });
-      if (known) {
-        var sp = splash('正在解密数据…');
-        return fetchBlob(saved.id, saved.pass).then(function () {
-          sp.parentNode.removeChild(sp);
+      if (saved) {
+        var ids = meta.filter(function (m) { return m.id === saved.id; }).map(function (m) { return m.id; });
+        if (!ids.length) ids = meta.map(function (m) { return m.id; });
+        var sp = splash('正在用本机记住的口令自动进入…');
+        return tryLogin(ids, saved.pass).then(function (id) {
+          if (sp.parentNode) sp.parentNode.removeChild(sp);
           addSwitchButton();
-          window.__SA_USER__ = saved.id;   // 供站点顶栏判断是否显示「管理用户」入口
+          window.__SA_USER__ = id;   // 供站点顶栏判断是否显示「管理用户」入口
           return renderApp();
         }).catch(function () {
           forget();
-          sp.parentNode.removeChild(sp);
+          if (sp.parentNode) sp.parentNode.removeChild(sp);
           buildLogin(meta);
         });
       }
