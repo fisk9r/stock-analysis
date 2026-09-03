@@ -1045,17 +1045,22 @@ def run_buys(broker, mode, cfg, sigs, mkt=None, data=None):
             n_open = 0
         _max_pos = int(gate.cfg.get("max_positions", 4))
         if n_open >= _max_pos:
+            # 需求2：满仓时仍收集「真正到达买点」的票，收盘后去重提示 owner（scope=all/sim）。
+            # 若 data 可用，先用 refine_buy_zone 确认当前价在买区内，避免把"等回踩"的票误报为买点。
+            _is_buypoint = True
+            if data is not None:
+                _v, _why, _stop = refine_buy_zone(verdict, quote, data)
+                _is_buypoint = (_v == "BUY")
+            if _is_buypoint:
+                _full_blocked.append({
+                    "code": verdict["code"], "name": verdict.get("name"),
+                    "grade": sf["grade"], "open_gap": verdict.get("open_gap"),
+                    "price": (q or {}).get("price"), "reason": sf["reason"]})
             reason = "持仓已满 %d 只（上限 %d），不再开新仓" % (n_open, _max_pos)
             gate.record(verdict, "SKIP", 0, reason)
             _track(verdict["code"], verdict.get("name"), "SKIP", reason)
             lines.append("- %s(%s) %s" % (verdict["name"], verdict["code"], reason))
             _log("买入跳过 %s：%s" % (verdict["code"], reason))
-            # 需求2：满仓时仍收集到达买点的票（已通过决策线+分级+可买性，仅被持仓上限挡住），
-            # 收盘后去重提示 owner（scope=all/sim，接收人2 scope=none 不会收到）
-            _full_blocked.append({
-                "code": verdict["code"], "name": verdict.get("name"),
-                "grade": sf["grade"], "open_gap": verdict.get("open_gap"),
-                "price": (q or {}).get("price"), "reason": sf["reason"]})
             continue
         # Batch3 #13：买入区间精修（价在买区内才买，并带回止损位供 broker 记录）
         if data is not None:
