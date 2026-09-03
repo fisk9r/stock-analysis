@@ -2059,7 +2059,7 @@
     var h = '';
     h += '<div class="rec-filter-bar">' +
       '<button id="recFilterToggle" class="mbtn ' + (SA_REC_FILTER ? 'mbtn-p' : 'mbtn-ghost') + '">🎯 只看可介入：' + (SA_REC_FILTER ? '开' : '关') + '</button>' +
-      '<span class="muted" style="font-size:11.5px;margin-left:6px">开启后隐藏「过热勿追 / 已破位」的飞在天上的票，只留现价可买或等回踩的标的</span>' +
+      '<span class="muted" style="font-size:11.5px;margin-left:6px">开启后隐藏「过热勿追 / 已破位」的飞在天上的票，只留现价可买、小仓试与回踩买点的标的</span>' +
       '</div>';
     h += card('🧭 次日操作总纲', '<div class="grid g4" style="margin-bottom:14px">' +
       kpi('建议仓位', E(R.position || '—'), '基于情绪分 ' + f(st.score, 1)) +
@@ -2215,7 +2215,7 @@
           var gp = e.entry_gap_pct, nz = e.now_zone || [], pz = e.pull_zone || [];
           var col = (stt === '可买') ? C.up : (stt === '微超') ? C.gold : (stt === '等回踩') ? C.blue : C.gray;
           var head = (stt === '可买') ? '✅ 现价可买' : (stt === '微超') ? '🟡 略超·小仓试'
-            : (stt === '等回踩') ? '⏳ 等回踩别追' : '🚫 过热勿追';
+            : (stt === '等回踩') ? '⏳ 回踩买点' : '🚫 过热勿追';
           var s = '<span class="chip" style="border-color:' + col + ';color:' + col + ';font-weight:700">' +
             head + (gp != null ? ' ' + (gp >= 0 ? '+' : '') + f(gp, 1) + '%' : '') + '</span>';
           if (nz.length === 2 && nz[0] != null) {
@@ -2261,13 +2261,16 @@
           if (vd.expired || act0.indexOf('卖出') >= 0 || act0.indexOf('离场') >= 0) hlCls = ' wlx-hl-sell';
           else if (act0.indexOf('买入') >= 0) hlCls = ' wlx-hl-buy';
         }
-        /* 门禁降级的票（等回踩/过热）整卡降饱和度，视觉上就不像「现在可以买」 */
+        /* 门禁剔除的票（过热勿追/已破位）整卡降饱和度，视觉上就不像「现在可以买」；
+           回踩买点仍是有条件买点，不降饱和度。 */
         var _est = (t.entry || {}).entry_state;
-        if (_est === '等回踩' || _est === '过热勿追') hlCls += ' rec-gated';
+        if (_est === '过热勿追' || _est === '已破位') hlCls += ' rec-gated';
         var eBadge = (_est === '可买')
           ? '<span class="bd" style="margin-left:4px;font-size:11px;padding:0 4px;border-color:' + C.up + ';color:' + C.up + '">✅ 现价到位</span>'
-          : (_est === '等回踩' || _est === '过热勿追')
-          ? '<span class="bd" style="margin-left:4px;font-size:11px;padding:0 4px;border-color:' + C.gray + ';color:' + C.gray + '">⏳ 价高·等回踩</span>'
+          : (_est === '等回踩')
+          ? '<span class="bd" style="margin-left:4px;font-size:11px;padding:0 4px;border-color:' + C.blue + ';color:' + C.blue + '">⏳ 回踩买点</span>'
+          : (_est === '过热勿追' || _est === '已破位')
+          ? '<span class="bd" style="margin-left:4px;font-size:11px;padding:0 4px;border-color:' + C.gray + ';color:' + C.gray + '">🚫 价高·勿追</span>'
           : '';
         return '<div class="rec trend' + hlCls + '"><div class="rh"><span class="nm">' + stk(t.code, t.name) + '</span>' +
           (bm.band ? '<span class="bd ok" style="margin-left:4px;font-size:11px">' + E(bm.band) + '</span>' : '') +
@@ -2280,11 +2283,11 @@
       var _gk = { '可买': 0, '微超': 0, '等回踩': 0, '过热勿追': 0, '无': 0 };
       TR0.forEach(function (t) { var s = (t.entry || {}).entry_state || '无'; if (_gk[s] != null) _gk[s]++; });
       var _gateNote = SA_REC_FILTER
-        ? ('<b>近端买点门禁</b>：现价可买 ' + _gk['可买'] + ' 只 · 小仓试 ' + _gk['微超'] + ' 只 · 等回踩 ' +
+        ? ('<b>近端买点门禁</b>：现价可买 ' + _gk['可买'] + ' 只 · 小仓试 ' + _gk['微超'] + ' 只 · 回踩买点 ' +
           _gk['等回踩'] + ' 只' + (TRhidden ? '；已按「只看可介入」隐藏 ' + TRhidden + ' 只过热/破位票' : '') +
-          '。双通道入选：强趋势（日均≥2%+4涨）与缓坡慢牛（斜率≥1.5%+20日涨≥8%）；')
-        : ('<b>近端买点门禁</b>：现价可买 ' + _gk['可买'] + ' 只 · 小仓试 ' + _gk['微超'] + ' 只 · 等回踩 ' +
-          _gk['等回踩'] + ' 只 · 过热勿追 ' + _gk['过热勿追'] + ' 只（后两类结论已被引擎强制改为「等回踩(挂单价)」，不会给出买入建议）。双通道入选：强趋势（日均≥2%+4涨）与缓坡慢牛（斜率≥1.5%+20日涨≥8%）；');
+          '。回踩买点=挂单价到位即买（也是买点）；双通道入选：强趋势（日均≥2%+4涨）与缓坡慢牛（斜率≥1.5%+20日涨≥8%）；')
+        : ('<b>近端买点门禁</b>：现价可买 ' + _gk['可买'] + ' 只 · 小仓试 ' + _gk['微超'] + ' 只 · 回踩买点 ' +
+          _gk['等回踩'] + ' 只 · 过热勿追 ' + _gk['过热勿追'] + ' 只（回踩买点为有条件买点：挂单价到位即买；过热勿追才是被剔除的「在天上的票」）。双通道入选：强趋势（日均≥2%+4涨）与缓坡慢牛（斜率≥1.5%+20日涨≥8%）；');
       h += card('📈 趋势主升 · 候选（' + TR.length + (TRhidden ? '，已隐藏 ' + TRhidden + ' 只' : '') + '，🆕=新入选 / 历史=持续跟踪）', body,
         _gateNote +
         '🚀加速/🐢放缓标签看涨速变化，🏦标签为机构或主力资金介入证据（龙虎榜净买/大宗机构专用/板块主力净流入）');
@@ -4587,7 +4590,7 @@
          原生 SPA 渲染（替代 iframe），红=买入/优先、绿=卖出/回避，与全站配色一致。
          保留「↗ 打开完整报告」直链到 trend_buy_points.html 作全屏兜底。 */
       var bp = D.buy_points || null;
-      var _wait = (bp && bp.waiting) || [];
+      var _wait = (bp && bp.pullback) || [];
       var _skip = (bp && bp.skipped) || [];
       var _gate = (bp && bp.gate) || null;
       var total = bp ? (bp.accel.length + bp.others.length + bp.chanlun.length) : 0;
@@ -4600,10 +4603,10 @@
       if (_gate) {
         h += '<div class="bp-gate">🛡 <b>买点硬门禁已生效</b>：原始候选 ' + n2(_gate.raw || 0) +
           ' 只 → <b class="g-ok">现价可买 ' + n2(_gate.buyable || 0) + ' 只</b>，' +
-          '<b class="g-wait">等回踩 ' + n2(_gate.waiting || 0) + ' 只</b>（另列给挂单价），' +
+          '<b class="g-wait">回踩买点 ' + n2(_gate.pullback || 0) + ' 只</b>（给挂单价，回踩到位即买），' +
           '<b class="g-hot">过热勿追 / 已临卖点 ' + n2(_gate.skipped || 0) + ' 只已剔除</b>。' +
           '<span class="muted">判定：短线成本锚 ref=max(MA5,MA10)；现价≤ref×1.03 可买，≤1.06 小仓试，' +
-          '≤1.12 等回踩，再高即过热勿追；跌破止损→回避不接刀。</span></div>';
+          '≤1.12 回踩买点，再高即过热勿追；跌破止损→回避不接刀。</span></div>';
       }
       if (!bp || (!total && !_wait.length)) {
         h += card('🎯 买点候选',
@@ -4614,7 +4617,7 @@
       h += '<div class="grid g4" style="margin-bottom:16px">' +
         kpi('现价可买', n2((bp.accel.length + bp.others.length)), '✅ 通过买点门禁', (bp.accel.length + bp.others.length) ? 'up' : '') +
         kpi('趋势加速优先', n2(bp.accel.length), '🚀 主升加速中的买点', bp.accel.length ? 'up' : '') +
-        kpi('等回踩', n2(_wait.length), '⏳ 趋势可以但价高，挂单等', '') +
+        kpi('回踩买点', n2(_wait.length), '⏳ 挂单价到位即买', _wait.length ? 'up' : '') +
         kpi('已剔除', n2(_skip.length), '🚫 过热勿追 / 已临卖点', _skip.length ? 'down' : '') +
         '</div>';
 
@@ -4697,10 +4700,10 @@
           '上升结构中的回踩企稳 / 多头刚突破买点，现价已到位，按评分降序；买入=红。');
       }
       if (_wait.length) {
-        h += '<div class="bp-sec wait">③ 趋势可以但要等回踩 · 不是现在的买点（共 ' + _wait.length + ' 只 ⏳）</div>';
-        h += card('⏳ 等回踩挂单清单', table(cols, _wait.map(bpRow).join('')),
-          '这些票趋势结构没问题，但<b>现价已高出短线成本锚</b>，追进去就是「买在天上」。' +
-          '按「近端买点」列的挂单价挂单等回踩，回不来就不做——不追高是这套门禁的核心纪律。');
+        h += '<div class="bp-sec wait">③ 回踩买点 · 挂单价到位即买（共 ' + _wait.length + ' 只 ⏳）</div>';
+        h += card('⏳ 回踩买点（挂单价）', table(cols, _wait.map(bpRow).join('')),
+          '这些票趋势结构完好、<b>不是「在天上的票」</b>，只是现价略高于短线成本锚。' +
+          '按「近端买点」列的<b>挂单价</b>挂单等回踩，回踩到位即成为正式买点——不追高，但回踩到位要敢买。');
       }
       if (_skip.length) {
         var _skRows = _skip.slice(0, 30).map(function (r) {

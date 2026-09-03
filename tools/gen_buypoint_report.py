@@ -153,6 +153,7 @@ def _merge(data):
     for _src in (((data.get("recommend") or {}).get("trend") or []),
                  (data.get("bull") or []),
                  (data.get("strategies") or []),
+                 ((data.get("recommend") or {}).get("momentum") or []),
                  ((data.get("zones") or {}).get("items") or [])):
         for _x in _src:
             if not isinstance(_x, dict):
@@ -193,9 +194,11 @@ def build_data(data):
     # 买点硬门禁（2026-09-03 用户拍板：「我不希望再次看到没有达到买点的股票推荐，
     # 推荐给我一堆在天上的股票根本不切实际」）
     # ══════════════════════════════════════════════════════════════════
-    # 「买点候选」的定义收紧为：现价确实处于/贴近短线可执行买点（可买/微超）。
-    #   · 等回踩   → 移到 waiting 组（保留可见 + 明确挂单价，不混进买点）
-    #   · 过热勿追 → 移到 skipped 组（默认不展示、不推送）
+    # 「买点候选」的定义：
+    #   · 可买 / 微超 → 现价买点（现价就到的买点）
+    #   · 等回踩      → 回踩买点（趋势结构完好、现价略高，挂单等回踩到位即买；
+    #                   也是买点，只是触发条件是「价格回到挂单价」，而非当下追高）
+    #   · 过热勿追 / 已临卖点 → 移到 skipped 组（不展示、不推送）
     #   · 无 entry 数据 → 保守放行（不误杀），但标 entry_state=None
     # warn_sell（已临卖点）矛盾票一律不算买点，直接归 skipped。
     def _bucket(r):
@@ -205,12 +208,12 @@ def build_data(data):
         if st in ("可买", "微超"):
             return "buy"
         if st == "等回踩":
-            return "waiting"
+            return "pullback"
         if st == "过热勿追":
             return "skipped"
         return "buy"          # entry 缺失（数据不足）→ 不误杀
 
-    _by = {"buy": [], "waiting": [], "skipped": []}
+    _by = {"buy": [], "pullback": [], "skipped": []}
     for r in merged:
         _by[_bucket(r)].append(r)
 
@@ -221,26 +224,26 @@ def build_data(data):
     buy = sorted(_by["buy"], key=_sk)
     accel = [r for r in buy if r.get("accel_flag")]
     others = [r for r in buy if not r.get("accel_flag")]
-    waiting = sorted(_by["waiting"],
-                     key=lambda r: (r.get("wait_drop_pct") is None,
-                                    -(r.get("score") or 0)))
+    # 回踩买点：趋势结构完好、现价略高于短线成本锚，挂单等回踩到位即买。
+    # 深度现实性已在 entry_plan 保证（回踩幅度多在 5%~10%），此处按评分降序。
+    pullback = sorted(_by["pullback"], key=lambda r: -(r.get("score") or 0))
     skipped = sorted(_by["skipped"], key=lambda r: -(r.get("score") or 0))
     chan = [c for c in ((data.get("chanlun") or {}).get("buys") or []) if c.get("signal")]
     return {
         "date": date,
         "accel": accel,
         "others": others,
-        "waiting": waiting,        # 等回踩：给挂单价，不算买点
+        "pullback": pullback,      # 回踩买点：给挂单价，回踩到位即买（也是买点）
         "skipped": skipped,        # 过热勿追 / 已临卖点：默认不展示
         "chanlun": chan,
-        "total": len(buy) + len(chan),
+        "total": len(buy) + len(pullback) + len(chan),
         "accel_count": len(accel),
         "gate": {
             "buyable": len(buy),
-            "waiting": len(waiting),
+            "pullback": len(pullback),
             "skipped": len(skipped),
             "raw": len(merged),
-            "note": "买点候选=现价处于/贴近短线可执行买点；等回踩与过热勿追已剔除",
+            "note": "买点=现价可买/小仓试 + 回踩买点（挂单价到位即买）；过热勿追/已临卖点已剔除",
         },
     }
 
@@ -316,14 +319,14 @@ def _render(data, date):
     bd = build_data(data)
     accel = bd["accel"]
     others = bd["others"]
-    waiting = bd["waiting"]
+    pullback = bd["pullback"]
     skipped = bd["skipped"]
     gate = bd["gate"]
     chan = bd["chanlun"]
 
     rows_accel = "\n".join(_row_a(r) for r in accel)
     rows_others = "\n".join(_row_a(r) for r in others)
-    rows_wait = "\n".join(_row_a(r) for r in waiting)
+    rows_pull = "\n".join(_row_a(r) for r in pullback)
     rows_b = []
     for c in chan:
         zs = c.get("zhongshu")
@@ -393,10 +396,10 @@ tr.warn-row { background:rgba(255,207,92,0.07); }
   <b>非买卖建议</b>，仅作选股线索；介入仍需结合次日竞价（高开≥2%%才跟进、低开≤-2%%放弃）与量能确认。
 </div>
 <div class="gate">
-  <b>买点硬门禁已生效</b>：原始候选 %d 只 → <b>现价可买 %d 只</b>，等回踩 %d 只（给挂单价，另列），
+  <b>买点硬门禁已生效</b>：原始候选 %d 只 → <b>现价可买 %d 只</b>，回踩买点 %d 只（给挂单价，回踩到位即买），
   过热勿追 / 已临卖点 %d 只<b>已剔除</b>。<br>
   判定口径：短线成本锚 ref = max(MA5, MA10)；现价 ≤ ref×1.03 → 可买；≤ ref×1.06 → 微超（小仓试）；
-  ≤ ref×1.12 → 等回踩（挂单等）；再高 → 过热勿追。跌破止损 → 回避不接刀。
+  ≤ ref×1.12 → 回踩买点（挂单等回踩）；再高 → 过热勿追。跌破止损 → 回避不接刀。
 </div>
 
 <div class="sec accel">① 趋势加速优先 · 主升加速中的买点（共 %d 只 🚀）</div>
@@ -411,7 +414,7 @@ tr.warn-row { background:rgba(255,207,92,0.07); }
 %s
 </table>
 
-<div class="sec wait">③ 趋势可以但要等回踩 · 不是现在的买点（共 %d 只 ⏳）</div>
+<div class="sec wait">③ 回踩买点 · 挂单价到位即买（共 %d 只 ⏳）</div>
 <table>
 <tr><th>名称</th><th>代码</th><th>买点类型</th><th>现价</th><th>涨跌幅</th><th>量比</th><th>行业</th><th>距60高</th><th>评分</th><th>趋势状态</th><th>挂单价</th><th>关键特征</th></tr>
 %s
@@ -430,9 +433,9 @@ tr.warn-row { background:rgba(255,207,92,0.07); }
 </div>
 </body></html>
 """ % (date, date,
-       gate.get("raw", 0), gate.get("buyable", 0), gate.get("waiting", 0), len(skipped),
+       gate.get("raw", 0), gate.get("buyable", 0), gate.get("pullback", 0), len(skipped),
        len(accel), rows_accel, len(others), rows_others,
-       len(waiting), rows_wait,
+       len(pullback), rows_pull,
        len(chan), chan_rows, date)
     return html
 
@@ -462,8 +465,8 @@ def main():
     print("趋势加速优先 %d 只 | 其他买点 %d 只 | 缠论买点 %d 只"
           % (len(bd["accel"]), len(bd["others"]), len(bd["chanlun"])))
     g = bd["gate"]
-    print("门禁：原始 %d → 可买 %d / 等回踩 %d / 剔除 %d"
-          % (g["raw"], g["buyable"], g["waiting"], g["skipped"]))
+    print("门禁：原始 %d → 可买 %d / 回踩买点 %d / 剔除 %d"
+          % (g["raw"], g["buyable"], g["pullback"], g["skipped"]))
     print("Top5:", ", ".join("%s(%.1f)" % (r["name"], r["score"]) for r in _merge(d)[:5]))
 
 

@@ -1964,9 +1964,9 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
             _oth_rows.append("…（趋势多头买点共 %d 只，列评分前 %d；完整清单见站点「买点候选」视图）"
                              % (len(_all_oth), len(_oth_bp)))
         _sec("📈 买点候选 · 其他（趋势多头）", _oth_rows)
-    # ---- 等回踩清单（2026-09-03 用户拍板：没到买点的票不混进买点候选，
-    #      但也不能凭空消失——单列一段给明确挂单价，到价才动手）----
-    _wait_bp = (_bp.get("waiting") or [])[:8]
+    # ---- 回踩买点（2026-09-04 用户拍板：回踩股票也是买点，加入推荐）----
+    #      趋势结构完好、现价略高，挂单等回踩到位即买；单列一段给明确挂单价。
+    _wait_bp = (_bp.get("pullback") or [])[:8]
     if _wait_bp:
         _wrows = []
         for b in _wait_bp:
@@ -1978,9 +1978,9 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
                    _wp or 0, abs(_e.get("wait_drop_pct") or 0.0),
                    b.get("btype") or "", b.get("score") or 0))
         _gate = _bp.get("gate") or {}
-        _wrows.append("> 趋势没问题但**现价高于短线买点**，不追高：到价成交才算买点。"
-                      "本次共剔除 %d 只过热/已临卖点票。" % (_gate.get("skipped") or 0))
-        _sec("⏳ 趋势可以但要等回踩（挂单价）", _wrows)
+        _wrows.append("> **回踩买点**：趋势结构完好但现价高于短线买点，挂单等回踩到位即买（也是买点，"
+                      "只是触发条件是价格回到挂单价，而非当下追高）。本次共剔除 %d 只过热/已临卖点票。" % (_gate.get("skipped") or 0))
+        _sec("⏳ 回踩买点（挂单价，回踩到位即买）", _wrows)
     # ---- 自选/持仓操作结论（P1/P4：跟着做）----
     _wr = rec.get("watch_reco")
     if _wr and _wr.get("items") and _on("rec"):
