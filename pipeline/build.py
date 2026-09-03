@@ -1815,7 +1815,18 @@ def run(date_override=None, dedup_close=False):
             days = simrev.get("days") or {}
             if days:
                 skeys = sorted(days.keys())
-                dlast = days[skeys[-1]]
+                # #440（2026-09-03 修复）：执行器在无账号时每天仍写一个「空占位日」
+                # （total=初始资金、market_value=0、0 成交），若直接取 skeys[-1] 会取到空日，
+                # 把真实有交易的日子（如 8/25-8/29）整体遮掉，导致「模拟盘买了多少/盈利多少」永远空白。
+                # 改为：优先取「最近一个有实际活动的交易日」；全场皆空才退回到最后一天。
+                def _active(dd):
+                    return (len(dd.get("trades") or []) > 0
+                            or len(dd.get("holding_plans") or []) > 0
+                            or (dd.get("market_value") or 0) > 0
+                            or (dd.get("n_holding") or 0) > 0
+                            or len(dd.get("closed") or []) > 0)
+                _act = [k for k in skeys if _active(days[k])]
+                dlast = days[_act[-1] if _act else skeys[-1]]
                 # 累计收益曲线（按日）
                 curve = [{"d": k, "total": days[k].get("total"),
                           "pct": days[k].get("total_pct"),

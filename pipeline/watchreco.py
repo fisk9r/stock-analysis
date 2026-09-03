@@ -174,7 +174,16 @@ def _fallback_replaces(item, rec, tol=1.15):
             "market_type": "连板" if _st >= 1 else "趋势",
             "tag": (x.get("tag") or x.get("channel") or ""),
         })
-    cand.sort(key=lambda x: -x["worth"])
+    # 2026-09-03 优化：用户要「能买的票」，优先推「现价就在买点附近」的票，
+    # 而不是距离买区还有 8~12% 才能买到的远端票。先按「距买区上沿的溢出百分比」
+    # 升序（越小越近、≤0 即已在买区内），再按价值分降序。
+    def _gap(x):
+        bz = x.get("buy_zone") or [None, None]
+        try:
+            return (float(x["close"]) / float(bz[1]) - 1) * 100
+        except Exception:
+            return 999.0
+    cand.sort(key=lambda x: (max(0.0, _gap(x)), -x["worth"]))
     return cand[:2]
 
 
