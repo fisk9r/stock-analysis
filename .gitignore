@@ -28,6 +28,7 @@ dist/data.js
 dist/data.js.bak
 dist/push_log.jsonl
 dist/push_panel.html
+dist/push_center.json
 dist/last_push_*.md
 archive/
 news.json

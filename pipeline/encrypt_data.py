@@ -190,7 +190,39 @@ def main():
     print("[encrypt] 共 %d 个用户，已写出 dist/users.json" % len(meta))
 
     _write_admin_blob(users, out_dir)
+    _write_push_center_blob(users, out_dir)
     return 0
+
+
+def _write_push_center_blob(users, out_dir):
+    """把 tools/gen_push_center.py 生成的 dist/push_center.json（推送历史 + 收件人 scope 配置）
+    用 owner 口令加密为 data/push_center.bin。
+
+    与 _admin.bin 同级安全：公网可下载，但只有 owner 口令能解，非 owner 看不到推送中心内容。
+    owner 登录后由站内「推送中心」视图用本人口令解密渲染（交互改 scope 写回
+    config/recipients_runtime.json，下次构建即生效）。
+
+    文件不存在（未运行 gen_push_center）或找不到 owner -> 跳过（best-effort，不影响主流程）。
+    """
+    src = os.path.join(DIST, "push_center.json")
+    if not os.path.exists(src):
+        print("[encrypt] 未找到 dist/push_center.json（推送中心数据），跳过 push_center.bin 生成。")
+        return
+    owner = next((u for u in users if (u.get("id") or "").strip() == "owner"), None)
+    if owner is None:
+        owner = next((u for u in users if u.get("id") and u.get("pass")), None)
+    if not owner or not owner.get("pass"):
+        sys.stderr.write("[encrypt] 未找到可用的 owner，跳过 push_center.bin（推送中心将不可用）。\n")
+        return
+    try:
+        payload = open(src, "rb").read()
+        blob = encrypt_user(payload, owner["pass"])
+        with open(os.path.join(out_dir, "push_center.bin"), "wb") as f:
+            f.write(blob)
+        print("[encrypt] 已写出 data/push_center.bin（owner=%s，供推送中心视图）"
+              % owner.get("id"))
+    except Exception as e:
+        sys.stderr.write("[encrypt] push_center.bin 生成失败（跳过，不影响主流程）：%r\n" % e)
 
 
 def _write_admin_blob(users, out_dir):

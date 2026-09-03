@@ -2617,3 +2617,15 @@ if __name__ == "__main__":
         _mod.main()
     except Exception as _e:
         print("[build] 推送面板生成跳过：%r" % _e)
+    # 2026-09-03 推送中心数据：生成 dist/push_center.json（随后由 encrypt_data.py 加密为
+    # data/push_center.bin，供站点内 owner「推送中心」视图解密渲染）。best-effort。
+    try:
+        import importlib.util as _ilu
+        _tools = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools")
+        _spec = _ilu.spec_from_file_location(
+            "gen_push_center", os.path.join(_tools, "gen_push_center.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _mod.main()
+    except Exception as _e:
+        print("[build] 推送中心数据生成跳过：%r" % _e)

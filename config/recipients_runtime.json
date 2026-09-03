@@ -1,0 +1,8 @@
+{
+  "_note": "非密钥可编辑层（不入库密钥，可提交）。notifier/runner 运行时按 name 叠加到 NOTIFY_JSON 的 scope。文件缺失 / JSON 损坏 / 异常 = 视为全量推送（安全阀：明天推送与今天完全一致，绝不劣化现有两人全收行为）。scope 取值：all(全部) / sim(仅模拟盘) / prepost(仅盘前盘后) / none(不接收)。",
+  "_updated_at": "2026-09-03T16:54:00",
+  "recipients": [
+    {"name": "我", "scope": "all", "user": "owner"},
+    {"name": "接收人2", "scope": "all"}
+  ]
+}

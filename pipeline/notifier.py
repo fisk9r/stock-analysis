@@ -115,16 +115,71 @@ def load_config():
 
     云端运行时仓库里不该存在明文 notify.json，靠 Secrets 注入；
     本地开发仍然读文件，两边互不干扰。
+
+    末尾叠加 config/recipients_runtime.json 的按人 scope 覆盖层
+    （推送中心交互编辑器的落点）。文件缺失 / 损坏 / 异常 -> 原样返回（安全阀）。
     """
     env_cfg = _env_config()
     if env_cfg:
-        return env_cfg
-    if os.path.exists(CFG_PATH):
+        cfg = env_cfg
+    elif os.path.exists(CFG_PATH):
         try:
-            return json.load(open(CFG_PATH, encoding="utf-8"))
+            cfg = json.load(open(CFG_PATH, encoding="utf-8"))
         except Exception:
-            return {}
-    return {}
+            cfg = {}
+    else:
+        cfg = {}
+    return _apply_runtime_scopes(cfg)
+
+
+def _apply_runtime_scopes(cfg):
+    """把 config/recipients_runtime.json 的 {name: scope} 覆盖层叠加到各通道条目。
+
+    这是「推送中心」交互编辑器（站点内 owner 改某人收什么内容）的运行时落点。
+    设计铁律（用户底线：改动绝不能让明天推送出问题）：
+      · 文件缺失            -> 返回原 cfg（等于全量推送，与今完全一致）
+      · JSON 损坏 / 异常    -> 返回原 cfg（no-op，绝不抛错中断推送）
+      · 某 name 不在覆盖层  -> 该人 scope 不变（沿用 NOTIFY_JSON 中的设定）
+    覆盖层结构：{"recipients":[{"name":"我","scope":"all"}, ...]}
+    scope 只接受 all/sim/prepost/none，其它值忽略（不污染配置）。
+    """
+    if not cfg:
+        return cfg
+    try:
+        p = os.path.join(ROOT, "config", "recipients_runtime.json")
+        if not os.path.exists(p):
+            return cfg
+        with open(p, encoding="utf-8") as fh:
+            rt = json.load(fh)
+        ov = {}
+        for r in (rt.get("recipients") or []):
+            if not isinstance(r, dict):
+                continue
+            name = (r.get("name") or "").strip()
+            scope = r.get("scope")
+            if name and scope in ("all", "sim", "prepost", "none"):
+                ov[name] = scope
+        if not ov:
+            return cfg
+        import copy
+        c = copy.deepcopy(cfg)
+        for ch in ("wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"):
+            cc = c.get(ch)
+            if not isinstance(cc, dict):
+                continue
+            for field in ("sendkey", "sendkeys", "token", "keys"):
+                items = cc.get(field)
+                if not isinstance(items, list):
+                    continue
+                for x in items:
+                    if isinstance(x, dict):
+                        nm = (x.get("name") or "").strip()
+                        if nm in ov:
+                            x["scope"] = ov[nm]
+        return c
+    except Exception:
+        # 任何异常都回退到原始配置，保证推送流水线不被覆盖层逻辑打断
+        return cfg
 
 
 def _opener(direct):

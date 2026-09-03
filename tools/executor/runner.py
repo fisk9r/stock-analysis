@@ -293,20 +293,79 @@ def _md2html(title, text):
 
 def _notify_cfg():
     """读取 notify 配置（与 pipeline/notifier.py 同构）：优先 NOTIFY_JSON 环境变量
-    （CI 场景密钥走 Secrets 注入），否则回落项目根 config/notify.json。"""
+    （CI 场景密钥走 Secrets 注入），否则回落项目根 config/notify.json。
+
+    末尾叠加 config/recipients_runtime.json 的按人 scope 覆盖层
+    （推送中心交互编辑器的落点）。文件缺失 / 损坏 / 异常 -> 原样返回（安全阀：
+    明天推送与今天完全一致，绝不劣化现有两人全收行为）。
+    """
     raw = os.environ.get("NOTIFY_JSON", "").strip()
     if raw:
         try:
-            return json.loads(raw)
+            cfg = json.loads(raw)
         except Exception:
-            pass
-    rp = os.path.join(ROOT, "config", "notify.json")
-    if os.path.exists(rp):
-        try:
-            return json.load(open(rp, encoding="utf-8"))
-        except Exception:
-            pass
-    return {}
+            cfg = None
+    else:
+        cfg = None
+    if cfg is None:
+        rp = os.path.join(ROOT, "config", "notify.json")
+        if os.path.exists(rp):
+            try:
+                cfg = json.load(open(rp, encoding="utf-8"))
+            except Exception:
+                cfg = None
+    if cfg is None:
+        cfg = {}
+    return _apply_runtime_scopes(cfg)
+
+
+def _apply_runtime_scopes(cfg):
+    """把 config/recipients_runtime.json 的 {name: scope} 覆盖层叠加到各通道条目。
+
+    与 pipeline/notifier.py._apply_runtime_scopes 同语义：按 name 改各通道条目的 scope。
+    设计铁律（用户底线：改动绝不能让明天推送出问题）：
+      · 文件缺失            -> 返回原 cfg（等于全量推送，与今完全一致）
+      · JSON 损坏 / 异常    -> 返回原 cfg（no-op，绝不抛错中断推送）
+      · 某 name 不在覆盖层  -> 该人 scope 不变
+    覆盖层结构：{"recipients":[{"name":"我","scope":"all"}, ...]}
+    scope 只接受 all/sim/prepost/none，其它值忽略。
+    """
+    if not cfg:
+        return cfg
+    try:
+        p = os.path.join(ROOT, "config", "recipients_runtime.json")
+        if not os.path.exists(p):
+            return cfg
+        with open(p, encoding="utf-8") as fh:
+            rt = json.load(fh)
+        ov = {}
+        for r in (rt.get("recipients") or []):
+            if not isinstance(r, dict):
+                continue
+            name = (r.get("name") or "").strip()
+            scope = r.get("scope")
+            if name and scope in ("all", "sim", "prepost", "none"):
+                ov[name] = scope
+        if not ov:
+            return cfg
+        import copy
+        c = copy.deepcopy(cfg)
+        for ch in ("wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"):
+            cc = c.get(ch)
+            if not isinstance(cc, dict):
+                continue
+            for field in ("sendkey", "sendkeys", "token", "keys"):
+                items = cc.get(field)
+                if not isinstance(items, list):
+                    continue
+                for x in items:
+                    if isinstance(x, dict):
+                        nm = (x.get("name") or "").strip()
+                        if nm in ov:
+                            x["scope"] = ov[nm]
+        return c
+    except Exception:
+        return cfg
 
 
 def _iter_notify_pp():

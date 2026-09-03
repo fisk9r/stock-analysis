@@ -157,6 +157,8 @@
       try { data = JSON.parse(txt); } catch (e) { throw new Error('口令错误（无法解密）'); }
       if (!data || !data.meta) throw new Error('口令错误（数据损坏）');
       window.__STOCK_DATA__ = data;
+      // 暴露 owner 口令，供「推送中心」视图解密 data/push_center.bin（仅内存，不落盘）
+      window.__SA_PASS__ = pass;
       return data;
     });
   }
@@ -245,4 +247,7 @@
   } else {
     boot();
   }
+
+  // 暴露解密函数，供站内「推送中心」视图解密 data/push_center.bin（同一算法，owner 口令）
+  window.__SA_DECRYPT__ = decrypt;
 })();

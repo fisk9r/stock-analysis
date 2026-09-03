@@ -4155,6 +4155,14 @@
         _mb.addEventListener('click', openUserMgr);
         _tb.parentNode.insertBefore(_mb, _tb);
       }
+      /* owner 专属：顶部 tab「📡 推送中心」——查看推送历史 + 按接收人自定义推送范围 */
+      var _tabs = document.getElementById('tabs');
+      if (_tabs) {
+        var _pcTab = document.createElement('button');
+        _pcTab.type = 'button'; _pcTab.dataset.v = 'pushcenter';
+        _pcTab.textContent = '📡 推送中心';
+        _tabs.appendChild(_pcTab);
+      }
     }
     initBackdrop();
     startFreshnessWatch();
@@ -4310,7 +4318,180 @@
       }
       return h;
     }
-    var views = { overview: viewOverview, watch: viewWatch, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings, buypoint: viewBuypoint, sim: viewSim };
+    /* 📡 推送中心（owner 专属）：解密 data/push_center.bin，渲染推送历史 + 按接收人自定义推送范围。
+       改动写回 config/recipients_runtime.json（GitHub Contents API），再 dispatch 重建。 */
+    function viewPushCenter() {
+      var el = document.getElementById('v-pushcenter');
+      setTimeout(function () { loadPushCenter(el); }, 0);
+      return card('📡 推送中心',
+        '<div class="empty" id="pcLoading">正在解密推送中心数据…</div>',
+        '管理员视图 · 查看每日推送历史、按接收人自定义「谁接收什么内容」。改动经 GitHub 写回，下次构建（约 2 分钟）生效。');
+    }
+    function loadPushCenter(el) {
+      if (!el) return;
+      var pass = window.__SA_PASS__ || '';
+      if (!pass) {
+        el.innerHTML = card('📡 推送中心',
+          '<div class="empty">未拿到管理员口令，无法解密推送中心（请以 owner 身份重新登录）。</div>', '');
+        return;
+      }
+      fetch('data/push_center.bin?t=' + Math.floor(Date.now() / 60000))
+        .then(function (r) { if (!r.ok) throw new Error('推送中心数据尚未生成（本次构建未包含）'); return r.arrayBuffer(); })
+        .then(function (buf) { return window.__SA_DECRYPT__(new Uint8Array(buf), pass); })
+        .then(function (txt) {
+          var data; try { data = JSON.parse(txt); } catch (e) { throw new Error('解密后的数据无法解析'); }
+          renderPushCenter(el, data);
+          done['pushcenter'] = 0;  // 每次进入都重新拉取最新数据（历史/范围可能已变）
+        })
+        .catch(function (e) {
+          el.innerHTML = card('📡 推送中心', '<div class="empty">加载失败：' + saEsc(e.message || e) + '</div>', '');
+          done['pushcenter'] = 0;
+        });
+    }
+    function renderPushCenter(el, data) {
+      var recips = data.recipients || [];
+      var scopeMeta = data.scope_meta || {};
+      var modeMeta = data.mode_meta || {};
+      var modeScope = data.mode_scope || {};
+      var history = data.history || [];
+      var scOpts = ['all', 'sim', 'prepost', 'none'];
+      function scLabel(s) { return (scopeMeta[s] && scopeMeta[s].label) || s; }
+      // —— 收件人推送范围编辑器 ——
+      var rows = recips.map(function (r) {
+        var opts = scOpts.map(function (s) {
+          return '<option value="' + s + '"' + (r.scope === s ? ' selected' : '') + '>' +
+            saEsc(scLabel(s)) + (scopeMeta[s] && scopeMeta[s].desc ? ' · ' + saEsc(scopeMeta[s].desc) : '') + '</option>';
+        }).join('');
+        var ch = (r.channels || []).map(function (c) { return '<span class="chip r">' + saEsc(c) + '</span>'; }).join('');
+        var ownerTag = (r.user === 'owner') ? ' <span class="tag">管理员</span>' : '';
+        return '<tr>' +
+          '<td class="nm">' + saEsc(r.name) + ownerTag + '</td>' +
+          '<td class="ch">' + (ch || '<span class="muted">—</span>') + '</td>' +
+          '<td class="sc"><select class="pc-sel" data-name="' + saEsc(r.name) + '">' + opts + '</select></td>' +
+          '</tr>';
+      }).join('');
+      var editor = '<div class="card"><div class="head"><h2>🎚 收件人推送范围</h2>' +
+        '<span class="sub">为每个人设定接收范围；保存后下次构建生效（当前推送流水线不被打断）</span></div>' +
+        '<div class="body">' +
+        (rows ? '<table class="pc-t"><thead><tr><th>接收人</th><th>通道</th><th>接收范围</th></tr></thead><tbody>' + rows + '</tbody></table>'
+               : '<div class="empty">未检测到收件人配置（notify.json 为空）。</div>') +
+        '<div class="pc-actions">' +
+        '<input class="pc-tok" id="pcTok" type="password" placeholder="GitHub 令牌（首次需粘贴，仅存本机会话，用于写回配置）" autocomplete="off">' +
+        '<button class="mbtn mbtn-p" id="pcSaveBtn" type="button">💾 保存并设置</button>' +
+        '<a class="mbtn mbtn-ghost" href="https://github.com/settings/tokens/new?scopes=repo&description=stock-analysis%20pushcenter" target="_blank" rel="noopener">去创建令牌</a>' +
+        '</div>' +
+        '<div class="pc-note" id="pcNote"></div>' +
+        '</div></div>';
+      // —— 推送历史 ——
+      function modeBadge(m) {
+        var m0 = modeMeta[m] || { label: m, color: '#64748b' };
+        return '<span class="badge" style="background:' + m0.color + '">' + saEsc(m0.label) + '</span>';
+      }
+      var histHtml = history.slice(0, 120).map(function (h, i) {
+        var recChips = (h.recipients || []).map(function (rc) {
+          return '<span class="chip r' + (rc.personalized ? ' star' : '') + '">' + saEsc(rc.name || '?') + '·' +
+            saEsc((rc.channel || '').replace('wechat_', '')) + '</span>';
+        }).join('');
+        return '<div class="pc-card" data-i="' + i + '">' +
+          '<div class="pc-chead" data-toggle="' + i + '">' + modeBadge(h.mode) +
+          '<span class="ttl">' + saEsc(h.title || '') + '</span>' +
+          '<span class="ts">' + saEsc((h.ts || '').replace('T', ' ')) + '</span>' +
+          '<span class="arrow">▶</span></div>' +
+          (recChips ? '<div class="chips">' + recChips + '</div>' : '') +
+          '<div class="pc-body" id="pcb' + i + '"></div>' +
+          '</div>';
+      }).join('');
+      var histSection = '<div class="card"><div class="head"><h2>📜 推送历史（共 ' + history.length + ' 条）</h2>' +
+        '<span class="sub">来自 dist/push_log.jsonl 与 executor 模拟盘账本，按时间倒序</span></div>' +
+        '<div class="body"><div class="pc-wrap">' + (histHtml || '<div class="empty">暂无推送记录。</div>') + '</div></div></div>';
+      var pcCss = '<style>' +
+        '.pc-t{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:6px}' +
+        '.pc-t th{background:var(--panel2,#0a1120);color:var(--dim,#8aa0c8);font-weight:600;font-size:11.5px;text-align:left;padding:8px 10px;border-bottom:1px solid var(--line,#1e2a44)}' +
+        '.pc-t td{padding:9px 10px;border-bottom:1px solid var(--line2,#16203a);vertical-align:middle}' +
+        '.pc-t .nm{color:var(--txt,#e8eefc);font-weight:600}' +
+        '.pc-sel{background:var(--panel2,#0a1120);border:1px solid var(--line,#243453);color:var(--txt,#e8eefc);border-radius:7px;padding:7px 9px;font-family:inherit;font-size:13px;outline:none;min-width:230px}' +
+        '.pc-sel:focus{border-color:var(--cyan,#19c3d6)}' +
+        '.pc-actions{display:flex;flex-wrap:wrap;gap:9px;align-items:center;margin-top:12px}' +
+        '.pc-tok{flex:1;min-width:260px;background:var(--panel2,#0a1120);border:1px solid var(--line,#243453);color:var(--txt,#e8eefc);border-radius:7px;padding:9px 11px;font-family:inherit;font-size:13px;outline:none}' +
+        '.pc-tok:focus{border-color:var(--cyan,#19c3d6)}' +
+        '.pc-note{margin-top:10px;font-size:12.5px;min-height:16px;color:var(--dim,#8aa0c8)}' +
+        '.pc-note.info{color:#7dd3fc}.pc-note.ok{color:#34d399}.pc-note.err{color:#f87171}' +
+        '.pc-card{background:var(--panel,#111722);border:1px solid var(--line,#1e2a44);border-radius:11px;margin-bottom:11px;overflow:hidden;transition:.15s}' +
+        '.pc-card:hover{border-color:#2b3d54}' +
+        '.pc-chead{display:flex;align-items:center;gap:10px;padding:11px 14px;cursor:pointer}' +
+        '.pc-chead .ttl{font-weight:700;color:var(--txt,#eaf2ff);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+        '.pc-chead .ts{color:var(--dim,#8aa0c8);font-size:11.5px;font-variant-numeric:tabular-nums}' +
+        '.pc-chead .arrow{color:var(--dim,#8aa0c8);transition:.2s;font-size:11px}' +
+        '.pc-card.open .arrow{transform:rotate(90deg)}' +
+        '.pc-body{display:none;padding:4px 14px 14px;border-top:1px solid var(--line,#1e2a44);max-height:55vh;overflow:auto}' +
+        '.pc-card.open .pc-body{display:block}' +
+        '.pc-text{font-size:13px;line-height:1.7;color:var(--txt,#c7d2e0);white-space:normal}' +
+        '.pc-wrap{margin-top:4px}' +
+        '</style>';
+      el.innerHTML = pcCss + editor + histSection;
+      // 历史卡片展开（懒渲染正文，避免一次性塞大段 HTML）
+      el.querySelectorAll('.pc-chead').forEach(function (hd) {
+        hd.addEventListener('click', function () {
+          var i = hd.getAttribute('data-toggle');
+          var card0 = hd.parentNode, body = document.getElementById('pcb' + i);
+          if (!body) return;
+          if (card0.classList.contains('open')) { card0.classList.remove('open'); body.innerHTML = ''; return; }
+          card0.classList.add('open');
+          var h = history[+i] || {};
+          body.innerHTML = '<div class="pc-text">' + (h.text ? saEsc(h.text).replace(/\n/g, '<br>') : '<span class="muted">（无正文）</span>') + '</div>';
+        });
+      });
+      var saveBtn = document.getElementById('pcSaveBtn');
+      if (saveBtn) saveBtn.addEventListener('click', function () {
+        var newRecips = recips.map(function (r) {
+          var sel = el.querySelector('.pc-sel[data-name="' + cssEscape(r.name) + '"]');
+          return { name: r.name, scope: sel ? sel.value : r.scope, user: r.user };
+        });
+        savePushCenter(el, newRecips);
+      });
+    }
+    function cssEscape(s) { return (s || '').replace(/["\\]/g, '\\$&'); }
+    function pcNote(el, msg, type) {
+      var n = el && el.querySelector('#pcNote');
+      if (n) { n.textContent = msg; n.className = 'pc-note ' + (type || ''); }
+    }
+    function savePushCenter(el, recipients) {
+      var tok = muRecallToken();
+      var inlineTok = document.getElementById('pcTok');
+      if (!tok && inlineTok && inlineTok.value.trim()) {
+        tok = inlineTok.value.trim();
+        MU.token = tok;
+        try { sessionStorage.setItem(MU_TOKEN_KEY, tok); } catch (e) {}
+      }
+      if (!tok) { pcNote(el, '请先粘贴 GitHub 令牌（用于写回 config/recipients_runtime.json，仅本机会话保存）。', 'err'); return; }
+      pcNote(el, '正在读取当前 config/recipients_runtime.json…', 'info');
+      var repo = muRepo();
+      muGh('GET', '/repos/' + repo + '/contents/config/recipients_runtime.json')
+        .then(function (j) {
+          if (!j || !j.sha) throw new Error('读取不到文件 sha');
+          var payload = {
+            _note: '非密钥可编辑层（不入库密钥，可提交）。notifier/runner 运行时按 name 叠加到 NOTIFY_JSON 的 scope。文件缺失 / JSON 损坏 / 异常 = 视为全量推送（安全阀）。scope 取值：all(全部) / sim(仅模拟盘) / prepost(仅盘前盘后) / none(不接收)。',
+            _updated_at: new Date().toISOString().slice(0, 19),
+            recipients: recipients
+          };
+          var json = JSON.stringify(payload, null, 1);
+          var content = btoa(unescape(encodeURIComponent(json)));
+          return muGh('PUT', '/repos/' + repo + '/contents/config/recipients_runtime.json',
+            { message: '推送中心：更新收件人 scope', content: content, sha: j.sha });
+        })
+        .then(function () {
+          pcNote(el, '已写回配置，正在触发云端重建（约 2 分钟生效）…', 'info');
+          return muDispatchBuild();
+        })
+        .then(function () {
+          pcNote(el, '✅ 已提交，云端重建中，约 2 分钟后生效。改动将体现在下次推送的接收范围上。', 'ok');
+        })
+        .catch(function (e) {
+          pcNote(el, '失败：' + ((e && e.message) || e), 'err');
+        });
+    }
+
+    var views = { overview: viewOverview, watch: viewWatch, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings, buypoint: viewBuypoint, sim: viewSim, pushcenter: viewPushCenter };
     function viewBuypoint() {
       /* 买点候选为每日构建注入 data["buy_points"] 的结构化数据（趋势加速优先），
          原生 SPA 渲染（替代 iframe），红=买入/优先、绿=卖出/回避，与全站配色一致。
