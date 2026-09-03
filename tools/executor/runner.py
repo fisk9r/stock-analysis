@@ -970,6 +970,20 @@ def run_buys(broker, mode, cfg, sigs, mkt=None, data=None):
             lines.append("- %s(%s) 已持仓，跳过重复建仓" % (verdict["name"], verdict["code"]))
             _log("买入跳过 %s：%s" % (verdict["code"], reason))
             continue
+        # 2026-09-03 仓位重构：最多同时持仓 max_positions 只（用户拍板 3331/3322 分仓）。
+        # 几千块的小仓位对 10 万本金涨跌无意义，单票按总资产百分比建仓。
+        try:
+            n_open = len(broker.positions(open_only=True) or [])
+        except Exception:
+            n_open = 0
+        _max_pos = int(gate.cfg.get("max_positions", 4))
+        if n_open >= _max_pos:
+            reason = "持仓已满 %d 只（上限 %d），不再开新仓" % (n_open, _max_pos)
+            gate.record(verdict, "SKIP", 0, reason)
+            _track(verdict["code"], verdict.get("name"), "SKIP", reason)
+            lines.append("- %s(%s) %s" % (verdict["name"], verdict["code"], reason))
+            _log("买入跳过 %s：%s" % (verdict["code"], reason))
+            continue
         # Batch3 #13：买入区间精修（价在买区内才买，并带回止损位供 broker 记录）
         if data is not None:
             _v, _why, _stop = refine_buy_zone(verdict, quote, data)
@@ -982,16 +996,30 @@ def run_buys(broker, mode, cfg, sigs, mkt=None, data=None):
                 continue
             if _stop:
                 verdict = dict(verdict, stop=_stop)
-        amount = int((gate.cfg["max_trade_amount"]) * sf["weight"] * caution_cut)
+        # 2026-09-03 仓位重构（用户拍板：10万本金按 3331/3322 分仓、最多 4 只，
+        # 几千块小仓位涨跌无意义）：金额 = 总资产 × 基础仓位% × 分级权重 × 谨慎系数，
+        # 再受 单笔硬顶 / 单票上限 / 可用现金 三重封顶。A/B级≈30%、T/C级≈15%。
+        base_pct = gate.cfg.get("base_position_pct", 0.30)
         if total:
-            amount = int(min(amount, total * gate.cfg["max_position_pct"]))
+            amount = int(total * base_pct * sf["weight"] * caution_cut)
+            try:
+                _cash = float((bal or {}).get("cash") or 0)
+            except Exception:
+                _cash = 0
+            amount = int(min(amount, gate.cfg["max_trade_amount"],
+                             total * gate.cfg["max_position_pct"],
+                             _cash * 0.95 if _cash > 0 else amount))
+        else:
+            amount = int(gate.cfg["max_trade_amount"] * sf["weight"] * caution_cut)
         # Batch3 #13：总仓位系数（热度/情绪退潮时压减新仓金额，与 market_gate 互补）
         if data is not None:
             _pc = position_cap(data)
             if _pc < 1.0:
                 amount = int(amount * _pc)
                 _log("总仓位系数 %.2f → 新仓金额 %d" % (_pc, amount))
-        chk = gate.check(verdict, total)
+        # 最多持仓只数约束（3331/3322 分仓总闸）
+        cur_pos = len(broker.positions(open_only=True) or []) if hasattr(broker, "positions") else 0
+        chk = gate.check(verdict, total, cur_pos)
         if not chk["ok"]:
             gate.record(verdict, "REJECT", 0, chk["reason"])
             if hasattr(broker, "record_reject"):
@@ -1011,8 +1039,9 @@ def run_buys(broker, mode, cfg, sigs, mkt=None, data=None):
         # 操作前推送：说明为什么买（用户要求：每次操作前推送+理由）
         _act_notify(cfg,
                     "🔔 操作前确认：买入 %s(%s) [%s级]" % (verdict["name"], verdict["code"], sf["grade"]),
-                    "**买入理由**：%s\n\n- 高开 %.2f%%｜实时价 %.2f｜金额 %d 元\n- 大盘环境：%s\n- 纪律依据：竞价决策线（高开≥2%% 胜率 67.4%%/期望 +4.08%%）+ 最优变体分级，先推送后执行"
-                    % (sf["reason"], verdict["open_gap"] or 0, price, amount, mkt["reason"]))
+                    "**买入理由**：%s\n\n- 高开 %.2f%%｜实时价 %.2f｜金额 %d 元（占总资产约 %.1f%%）\n- 大盘环境：%s\n- 纪律依据：竞价决策线（高开≥2%% 胜率 67.4%%/期望 +4.08%%）+ 最优变体分级，先推送后执行"
+                    % (sf["reason"], verdict["open_gap"] or 0, price, amount,
+                       100.0 * amount / total if total else 0, mkt["reason"]))
         r = broker.buy_limit(verdict["code"], price, amount, sig=dict(
             verdict, reason="%s｜实时价%.2f成交" % (sf["reason"], price)))
         ok = "✓" if r.get("ok") else "✗ %s" % r.get("reason")
@@ -1353,15 +1382,27 @@ def _tail_buys(broker, cfg, sigs, mkt, data=None):
                 continue
             if _zstop:
                 v = dict(v, stop=_zstop)
-        amount = int(gate.cfg["max_trade_amount"] * 0.5 * cut)
+        # 2026-09-03：与开仓通道统一仓位口径（之前尾盘用 max_trade_amount×0.5 旧公式）
+        base_pct = gate.cfg.get("base_position_pct", 0.25)
         if total:
-            amount = int(min(amount, total * gate.cfg["max_position_pct"]))
+            amount = int(total * base_pct * sf["weight"] * cut)
+            try:
+                _cash = float((bal or {}).get("cash") or 0)
+            except Exception:
+                _cash = 0
+            amount = int(min(amount,
+                             gate.cfg["max_trade_amount"],
+                             total * gate.cfg["max_position_pct"],
+                             _cash * 0.95 if _cash > 0 else amount))
+        else:
+            amount = int(gate.cfg["max_trade_amount"] * sf["weight"] * cut)
         # Batch3 #13：总仓位系数（热度/情绪退潮时压减新仓金额）
         if data is not None:
             _pc = position_cap(data)
             if _pc < 1.0:
                 amount = int(amount * _pc)
-        chk = gate.check(v, total)
+        cur_pos = len(broker.positions(open_only=True) or []) if hasattr(broker, "positions") else 0
+        chk = gate.check(v, total, cur_pos)
         if not chk["ok"]:
             if "幂等" in chk["reason"]:
                 continue  # 早盘已买，正常
@@ -1372,12 +1413,13 @@ def _tail_buys(broker, cfg, sigs, mkt, data=None):
         if price <= 0:
             continue
         _act_notify(cfg,
-                    "🌇 尾盘确认买入 %s(%s) [%s级·半仓]" % (v["name"], v["code"], sf["grade"]),
+                    "🌇 尾盘确认买入 %s(%s) [%s级]" % (v["name"], v["code"], sf["grade"]),
                     "**尾盘确认理由**：%s\n\n- 开盘 %.2f%%｜14:45 现价 %.2f（较开盘 +%.2f%% 微红横盘）\n"
                     "- 实证依据：高开+微红横盘桶次日 +3.01%%/红盘率 62.9%%（14个月全正）\n"
-                    "- 金额 %d 元（尾盘半仓）｜环境：%s"
+                    "- 金额 %d 元（占总资产约 %.1f%%）｜环境：%s"
                     % (v["reason"], v.get("open_gap") or 0, price,
-                       v.get("day_fade") or 0, amount, mkt.get("reason", "")))
+                       v.get("day_fade") or 0, amount,
+                       100.0 * amount / total if total else 0, mkt.get("reason", "")))
         r = broker.buy_limit(v["code"], price, amount, sig=dict(
             v, reason="尾盘确认｜%s" % v["reason"]))
         ok = "✓" if r.get("ok") else "✗ %s" % r.get("reason")

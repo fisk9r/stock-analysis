@@ -274,12 +274,13 @@ def can_sell(quote: dict, code: str) -> dict:
 def strategy_filter(sig: dict, quote: dict,流通市值亿: float = None) -> dict:
     """买入端最优变体过滤（回测 62.2%/+2.71% 那条）。
 
-    优先级：
-      A级：gap>5% + st≥3 + 流通市值 60-150 亿  → 全额
-      B级：st≥3 + 60-150 亿（不限 gap）        → 全额（胜率 61.8%）
-      C级：gap>5% + 60-150 亿                  → 半仓（胜率 55.5%）
+    优先级（weight 表示占「单票基础仓=总资产 25%」的比例，10万本金→A/B/T=2.5万、C=1.5万）：
+      A级：gap>5% + st≥3 + 流通市值 60-150 亿  → weight 1.0（满仓 25%）
+      B级：st≥3 + 60-150 亿（不限 gap）        → weight 1.0（满仓 25%，胜率 61.8%）
+      T级：趋势票（平开微红/尾盘确认）          → weight 1.0（满仓 25%，用入场时机控风险）
+      C级：gap>5% + 60-150 亿                  → weight 0.6（15%，胜率 55.5%）
       其他 → 放弃（全样本 48.7%/+0.37% 不值得占用仓位）
-    流通市值未知时按 B 级 st≥3 兜底。
+    流通市值未知时按 B 级 st≥3 兜底。最多同时持仓受 risk_gate.max_positions（默认4）约束。
     """
     gap = sig.get("open_gap") or 0
     st = int(sig.get("streak") or 0)
@@ -295,16 +296,15 @@ def strategy_filter(sig: dict, quote: dict,流通市值亿: float = None) -> dic
                 "reason": "B级：st%d+市值%s（61.8%%/+2.53%%）"
                           % (st, ("%.0f亿" % mc) if mc else "?")}
     if gap > 5 and mc_ok:
-        return {"grade": "C", "weight": 0.5,
-                "reason": "C级：gap%.1f%%+市值%s 半仓（55.5%%/+1.53%%）"
+        return {"grade": "C", "weight": 0.6,
+                "reason": "C级：gap%.1f%%+市值%s（55.5%%/+1.53%%）"
                           % (gap, ("%.0f亿" % mc) if mc else "?")}
-    # 2026-09-01 T级（用户要求：模拟盘什么票都可以买，不只连板票）：
-    # st=0 趋势/动量票走趋势专用决策线（平开微红或尾盘微红横盘确认），一律半仓——
-    # 趋势票套用涨停竞价纪律会追在高开溢价最贵处（实证 920087 st=0 高开 2.2%
-    # 跟进次日 -6.03%），故降仓位。
+    # 2026-09-03 修正：T（趋势票）不再压成 0.5。趋势票的风险用「入场时机」
+    # 控制（平开微红/尾盘确认），而非砍仓位——否则 10 万本金只买几千块毫无意义。
+    # weight 表示「占单票基础仓（总资产 25%）的比例」：A/B/T=满仓 25%，C=15%。
     if sig.get("market_type") == "trend" and mc_ok:
-        return {"grade": "T", "weight": 0.5,
-                "reason": "T级：趋势票半仓（开盘%+.1f%%／平开微红或尾盘确认，非涨停竞价体系）"
+        return {"grade": "T", "weight": 1.0,
+                "reason": "T级：趋势票满仓（开盘%+.1f%%／平开微红或尾盘确认，非涨停竞价体系）"
                           % gap}
     return {"grade": "X", "weight": 0.0,
             "reason": "不满足最优变体（gap%.1f%%/st%d/市值%s），全样本口径仅48.7%%/+0.37%%"

@@ -15,10 +15,12 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(ROOT, "risk_state.json")
 
 DEFAULTS = {
-    "max_position_pct": 0.15,     # 单票最大仓位占总资金比例
-    "max_orders_per_day": 6,      # 单日最大委托笔数
-    "min_trade_amount": 1000,     # 单笔最小金额（元）
-    "max_trade_amount": 20000,    # 单笔最大金额（元）——模拟盘/初期实盘硬顶
+    "max_position_pct": 0.35,     # 单票最大仓位占总资金比例（硬顶，防御用）
+    "max_positions": 4,           # 最多同时持仓只数（2026-09-03 用户拍板：10万本金按 3331/3322 分仓，最多 4 只）
+    "base_position_pct": 0.25,    # 单票基础仓位（占总资金）：A/B/T 级=25%（10万→2.5万/笔），C 级×0.6=15%
+    "max_orders_per_day": 6,      # 单日最大委托笔数（>max_positions 以便卖出后回补/换仓）
+    "min_trade_amount": 3000,     # 单笔最小金额（元）——低于此不买（防几千块的无效小仓）
+    "max_trade_amount": 40000,    # 单笔绝对硬顶（元）——防御兜底，正常按仓位百分比算
     "daily_loss_stop_pct": -3.0,  # 当日组合亏损熔断线（%）
     "enabled": True,              # 总开关（False = 只记录不下单）
 }
@@ -83,8 +85,13 @@ class RiskGate:
         self.state["circuit_break"] = None
         _save_state(self.state)
 
-    def check(self, sig: dict, total_asset: float = None) -> dict:
-        """检查一条 BUY 信号。返回 {ok: bool, reason: str, amount: int}。"""
+    def check(self, sig: dict, total_asset: float = None,
+               current_positions: int = None) -> dict:
+        """检查一条 BUY 信号。返回 {ok: bool, reason: str, amount: int}。
+
+        current_positions：当前已持仓只数（不含本笔）。传了就强制 max_positions 约束，
+        达到上限直接拒单（这是 3331/3322 分仓的总闸，之前只查 orders_per_day 形同虚设）。
+        """
         if not self.cfg.get("enabled"):
             return {"ok": False, "reason": "闸门总开关关闭（enabled=false）", "amount": 0}
         if self.tripped:
@@ -97,6 +104,11 @@ class RiskGate:
         today_trades = [t for t in self.state["trades"] if t.get("date") == self.state["day"]]
         if any(t.get("code") == code for t in today_trades):
             return {"ok": False, "reason": "幂等拒绝：%s 今日已委托" % code, "amount": 0}
+        # 最多持仓只数（3331/3322 分仓上限）
+        if current_positions is not None and current_positions >= self.cfg["max_positions"]:
+            return {"ok": False,
+                    "reason": "已达最大持仓只数 %d（3331/3322 分仓上限），本笔拒绝"
+                              % self.cfg["max_positions"], "amount": 0}
         if self.state["orders_today"] >= self.cfg["max_orders_per_day"]:
             self.trip("单日委托数超限 %d" % self.cfg["max_orders_per_day"])
             return {"ok": False, "reason": "单日委托数已达上限", "amount": 0}
