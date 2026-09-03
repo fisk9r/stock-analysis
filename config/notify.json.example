@@ -5,8 +5,15 @@
     "ServerChan(serverchan)": "https://sct.ftqq.com 用微信扫码登录拿 SendKey，填到 wechat_serverchan.sendkey。",
     "PushPlus(pushplus)": "https://www.pushplus.plus 注册拿 token，填到 wechat_pushplus.token。"
   },
-  "wechat_serverchan": {"sendkey": "SCTxxxxxxxxxxxxxxxx"},
-  "wechat_pushplus":   {"token": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"},
+  "_推送分级(scope，用户需求5)": "每个 sendkey/token 条目可加 scope 字段控制接收范围：all=全部信息(默认) / sim=仅模拟盘操作 / prepost=仅盘前盘后 / none=不接收。user 字段绑定到 allowed_users.json 的某用户（用于个性化复盘）。用 tools/manage_notify.py 自助管理。",
+  "wechat_serverchan": {"sendkey": [
+    {"key": "SCTxxxxxxxxxxxxxxxx", "name": "我", "user": "owner", "scope": "all"},
+    {"key": "SCTyyyyyyyyyyyyyyyy", "name": "接收人2", "scope": "none"}
+  ]},
+  "wechat_pushplus":   {"token": [
+    {"token": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", "name": "我", "user": "owner", "scope": "all"},
+    {"token": "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy", "name": "接收人2", "scope": "none"}
+  ]},
   "wecom":             {"webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"},
   "telegram":          {"bot_token": "123456789:AAExxxxxxx", "chat_id": "-1001234567890"},
   "email":             {"smtp_host":"smtp.qq.com","smtp_port":465,"user":"you@qq.com","pass":"邮箱授权码(非密码)","to":"you@qq.com"}

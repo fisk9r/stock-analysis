@@ -288,6 +288,68 @@ def _iter_pushplus(cfg):
     return out
 
 
+def _entry_scope(entry):
+    """读取通道条目的 scope 字段（推送分级，用户需求5）。
+    取值：all（全部）/ sim（仅模拟盘）/ prepost（仅盘前盘后）/ none（不接收）。
+    缺省视为 all（兼容旧配置）；无效值回退 all。"""
+    if isinstance(entry, dict):
+        s = (entry.get("scope") or "all")
+        if s in ("all", "sim", "prepost", "none"):
+            return s
+    return "all"
+
+
+# mode → 允许接收的 scope 集合。不在集合内的 scope 不接收该 mode：
+#   prepost 类：盘前/竞价/收盘/复盘/周末
+#   all-only 类：盘中异动/竞价异动/恐慌/妖股/止损（仅 scope=all 接收）
+# runner 模拟盘操作类推送不走 notifier.push，由 runner.py 自行按 {all, sim} 过滤。
+MODE_SCOPE = {
+    "preauction":   {"all", "prepost"},
+    "auction":      {"all", "prepost"},
+    "close":        {"all", "prepost"},
+    "close_again":  {"all", "prepost"},
+    "weekend":      {"all", "prepost"},
+    "anomaly":      {"all"},
+    "open_anomaly": {"all"},
+    "panic":        {"all"},
+    "yaogu":        {"all"},
+    "stoploss":     {"all"},
+}
+
+
+def _scope_filter_channel(chan_cfg, allowed):
+    """返回通道配置副本，仅保留 scope∈allowed 的条目；无匹配则移除该字段（上层视为未配置）。"""
+    if not chan_cfg or not isinstance(chan_cfg, dict):
+        return chan_cfg
+    out = dict(chan_cfg)
+    changed = False
+    for field in ("sendkey", "sendkeys", "token"):
+        v = chan_cfg.get(field)
+        if v is None:
+            continue
+        items = v if isinstance(v, list) else [v]
+        kept = [x for x in items if _entry_scope(x) in allowed]
+        out[field] = kept
+        changed = True
+    if changed:
+        for field in ("sendkey", "sendkeys", "token"):
+            if field in out and not out[field]:
+                out.pop(field)
+    return out
+
+
+def _scope_filter_all(cfg, allowed):
+    """对整个 notify 配置按 scope 过滤（所有通道）。"""
+    if not cfg:
+        return cfg
+    import copy
+    c = copy.deepcopy(cfg)
+    for ch in ("wechat_serverchan", "wechat_pushplus", "wecom", "telegram", "email"):
+        if ch in c and c[ch]:
+            c[ch] = _scope_filter_channel(c[ch], allowed)
+    return c
+
+
 def send_wechat_serverchan(cfg, title, text):
     keys = _iter_sendkeys(cfg)
     if not keys:
@@ -1116,6 +1178,10 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
     except Exception:
         pass
     cfg = load_config()
+    # 2026-09-03 推送分级（用户需求5）：按 mode 映射的 scope 过滤所有通道，
+    # 只把消息发给 scope 匹配的接收人（owner=all 全收；scope=none 不收；prepost 仅盘前盘后）。
+    _allowed = MODE_SCOPE.get(mode, {"all"})
+    cfg = _scope_filter_all(cfg, _allowed)
     # 用户级个性化：按各人『专属通道 + 本人持仓』给每个人发专属复盘（盘面 + 其本人持仓跟踪）。
     # 规则：
     #  - 仅当某用户配置了 专属通道(sc/pp) 且 有持仓 时，才从『共享广播』剔除其密钥，

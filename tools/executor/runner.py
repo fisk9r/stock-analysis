@@ -290,48 +290,111 @@ def _md2html(title, text):
     return ('<style>%s%s</style>%s' % (body_css, dark_css, "".join(parts)))
 
 
-def _notify_now(cfg, title, text):
+def _notify_cfg():
+    """读取 notify 配置（与 pipeline/notifier.py 同构）：优先 NOTIFY_JSON 环境变量
+    （CI 场景密钥走 Secrets 注入），否则回落项目根 config/notify.json。"""
+    raw = os.environ.get("NOTIFY_JSON", "").strip()
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+    rp = os.path.join(ROOT, "config", "notify.json")
+    if os.path.exists(rp):
+        try:
+            return json.load(open(rp, encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _iter_notify_pp():
+    """返回 [(token, scope)]；scope 缺省视为 all（兼容旧配置）。"""
+    out = []
+    pp = (_notify_cfg().get("wechat_pushplus") or {}).get("token") or []
+    for x in (pp if isinstance(pp, list) else [pp]):
+        if isinstance(x, dict):
+            t = (x.get("token") or x.get("key") or "").strip()
+            sc = (x.get("scope") or "all")
+            if t:
+                out.append((t, sc))
+        elif isinstance(x, str) and x.strip():
+            out.append((x.strip(), "all"))
+    return out
+
+
+def _iter_notify_sc():
+    """返回 [(key, scope)]；scope 缺省视为 all。"""
+    out = []
+    sc = _notify_cfg().get("wechat_serverchan") or {}
+    for fld in ("sendkey", "sendkeys"):
+        v = sc.get(fld)
+        for x in (v if isinstance(v, list) else [v] if v else []):
+            if isinstance(x, dict):
+                k = (x.get("key") or x.get("sendkey") or "").strip()
+                scp = (x.get("scope") or "all")
+                if k:
+                    out.append((k, scp))
+            elif isinstance(x, str) and x.strip():
+                out.append((x.strip(), "all"))
+    return out
+
+
+def _serverchan_key_filtered(ncfg, allowed):
+    """ServerChan sendkey 三级查找 + scope 过滤（2026-09-03 推送分级）：
+    cfg.notify.serverchan_key（旧式→视为 all）> NOTIFY_JSON/config notify wechat_serverchan（按 scope）。
+    只返回第一个 scope∈allowed 或 all 的 key。"""
+    def _norm(k):
+        if isinstance(k, list):
+            k = k[0] if k else ""
+        return (str(k).strip() if k else "")
+    if "all" in allowed:
+        k = _norm(ncfg.get("serverchan_key") or "")
+        if k:
+            return k
+    for kk, sc in _iter_notify_sc():
+        if sc in allowed or sc == "all":
+            return kk
+    return ""
+
+
+def _notify_now(cfg, title, text, allowed=None):
     """实际执行推送（原 _notify 主体）。
     2026-09-01 推送加固（用户底线：不允许「跑了却没收到」）：
       · PushPlus 改走 https（原 http 明文，可能被中间设备拦截）；
       · 单 token 3 次尝试 + 退避重试（此前单次失败即丢）；
       · PushPlus 全部失败（或未配置）时自动回落 ServerChan 兜底——
-        SC 每日 5 条额度紧张，仅在主通道全灭时才消耗。"""
+        SC 每日 5 条额度紧张，仅在主通道全灭时才消耗。
+    2026-09-03 推送分级（用户需求5）：推送按 scope 过滤——模拟盘操作类推送
+      （本函数所有调用）只发给 scope∈{all, sim} 的通道；scope=none（如接收人2）
+      或 scope=prepost 的通道不接收；owner（scope=all）始终接收。
+    """
+    if allowed is None:
+        allowed = {"all", "sim"}   # runner 推送均为模拟盘操作类
     results = []
     ncfg = cfg.get("notify") or {}
-    # --- PushPlus ---
-    pp_tokens = ncfg.get("pushplus_tokens") or []
-    if isinstance(pp_tokens, str):
-        pp_tokens = [pp_tokens]
-    if not pp_tokens:
-        # 2026-08-30 CI 托管：GitHub Actions 无 config/notify.json，凭据走
-        # Secrets 注入的 NOTIFY_JSON 环境变量（与 pipeline/notifier.py 同结构）。
-        env_ncfg = os.environ.get("NOTIFY_JSON", "").strip()
-        if env_ncfg:
-            try:
-                _env = json.loads(env_ncfg)
-                _pp = (_env.get("wechat_pushplus") or {}).get("token") or []
-                for x in (_pp if isinstance(_pp, list) else [_pp]):
-                    if isinstance(x, dict) and x.get("token"):
-                        pp_tokens.append(x["token"])
-                    elif isinstance(x, str) and x.strip():
-                        pp_tokens.append(x.strip())
-            except Exception as e:
-                _log("NOTIFY_JSON 解析失败：%r" % e)
-    if not pp_tokens:
-        # 回落：复用 pipeline/config/notify.json 里的 wechat_pushplus 配置（多接收人）
-        try:
-            root_ncfg = os.path.join(ROOT, "config", "notify.json")
-            if os.path.exists(root_ncfg):
-                with open(root_ncfg, encoding="utf-8") as f:
-                    pp = (json.load(f).get("wechat_pushplus") or {}).get("token") or []
-                    for x in (pp if isinstance(pp, list) else [pp]):
-                        if isinstance(x, dict) and x.get("token"):
-                            pp_tokens.append(x["token"])
-                        elif isinstance(x, str) and x.strip():
-                            pp_tokens.append(x.strip())
-        except Exception:
-            pass
+    # --- PushPlus（按 scope 过滤）---
+    pp_candidates = []  # (token, scope)
+    # 1) config.json notify.pushplus_tokens（旧式，无 scope → 视为 all）
+    _legacy = ncfg.get("pushplus_tokens") or []
+    if isinstance(_legacy, str):
+        _legacy = [_legacy]
+    for _t in _legacy:
+        _t = (_t or "").strip()
+        if _t:
+            pp_candidates.append((_t, "all"))
+    # 2) notify.json / NOTIFY_JSON（带 scope）
+    for _t, _sc in _iter_notify_pp():
+        pp_candidates.append((_t, _sc))
+    # 去重 + 按 scope 过滤（none / prepost 排除）
+    _seen, pp_tokens = set(), []
+    for _t, _sc in pp_candidates:
+        if _t in _seen:
+            continue
+        if _sc not in allowed and _sc != "all":
+            continue
+        _seen.add(_t)
+        pp_tokens.append(_t)
     pp_ok = 0
     if pp_tokens:
         try:
@@ -370,7 +433,7 @@ def _notify_now(cfg, title, text):
     # 2026-09-01 语义变更：仅当 PushPlus 全部失败（或未配置）时才发送——
     # SC 每日 5 条额度留给异动/强晋级推送，正常情况不再双通道重复消耗。
     if pp_ok == 0:
-        key = _serverchan_key(ncfg)
+        key = _serverchan_key_filtered(ncfg, allowed)
         if key:
             try:
                 import urllib.request
@@ -901,6 +964,10 @@ def run_buys(broker, mode, cfg, sigs, mkt=None, data=None):
         if hasattr(broker, "record_decision"):
             broker.record_decision(code, action, reason, name or "", price)
 
+    # 需求2：满仓时仍收集「到达买点但被持仓上限挡住」的票，收盘后去重提示 owner
+    _full_blocked = []
+    _max_pos = int(gate.cfg.get("max_positions", 4))
+
     for s in sigs:
         verdict = auction_gate(s, quote)
         if verdict["verdict"] != "BUY":
@@ -983,6 +1050,12 @@ def run_buys(broker, mode, cfg, sigs, mkt=None, data=None):
             _track(verdict["code"], verdict.get("name"), "SKIP", reason)
             lines.append("- %s(%s) %s" % (verdict["name"], verdict["code"], reason))
             _log("买入跳过 %s：%s" % (verdict["code"], reason))
+            # 需求2：满仓时仍收集到达买点的票（已通过决策线+分级+可买性，仅被持仓上限挡住），
+            # 收盘后去重提示 owner（scope=all/sim，接收人2 scope=none 不会收到）
+            _full_blocked.append({
+                "code": verdict["code"], "name": verdict.get("name"),
+                "grade": sf["grade"], "open_gap": verdict.get("open_gap"),
+                "price": (q or {}).get("price"), "reason": sf["reason"]})
             continue
         # Batch3 #13：买入区间精修（价在买区内才买，并带回止损位供 broker 记录）
         if data is not None:
@@ -996,12 +1069,13 @@ def run_buys(broker, mode, cfg, sigs, mkt=None, data=None):
                 continue
             if _stop:
                 verdict = dict(verdict, stop=_stop)
-        # 2026-09-03 仓位重构（用户拍板：10万本金按 3331/3322 分仓、最多 4 只，
-        # 几千块小仓位涨跌无意义）：金额 = 总资产 × 基础仓位% × 分级权重 × 谨慎系数，
-        # 再受 单笔硬顶 / 单票上限 / 可用现金 三重封顶。A/B级≈30%、T/C级≈15%。
-        base_pct = gate.cfg.get("base_position_pct", 0.30)
+        # 2026-09-03 仓位重构（用户拍板：情况好可梭哈1支/分仓2支，不再死守3331/3322）：
+        # 单票目标仓位按评级定（grade_pct），强信号可集中到 65%、弱信号 30%；
+        # 仍受 单笔硬顶 / 单票上限 / 可用现金 三重封顶；最多同时持仓 max_positions 只。
+        _gp = gate.cfg.get("grade_pct") or {"A": 0.65, "B": 0.55, "T": 0.50, "C": 0.30}
+        _pct = _gp.get(sf["grade"], 0.25)
         if total:
-            amount = int(total * base_pct * sf["weight"] * caution_cut)
+            amount = int(total * _pct * caution_cut)
             try:
                 _cash = float((bal or {}).get("cash") or 0)
             except Exception:
@@ -1010,7 +1084,7 @@ def run_buys(broker, mode, cfg, sigs, mkt=None, data=None):
                              total * gate.cfg["max_position_pct"],
                              _cash * 0.95 if _cash > 0 else amount))
         else:
-            amount = int(gate.cfg["max_trade_amount"] * sf["weight"] * caution_cut)
+            amount = int(gate.cfg["max_trade_amount"] * _pct * caution_cut)
         # Batch3 #13：总仓位系数（热度/情绪退潮时压减新仓金额，与 market_gate 互补）
         if data is not None:
             _pc = position_cap(data)
@@ -1059,6 +1133,18 @@ def run_buys(broker, mode, cfg, sigs, mkt=None, data=None):
             _track(verdict["code"], verdict.get("name"), "SKIP",
                    "委托失败：%s" % r.get("reason"))
             _log("买入失败 %s：%s" % (verdict["code"], r.get("reason")))
+    # 需求2：满仓时到达买点但被持仓上限挡住的票，去重提示 owner（scope=all/sim）。
+    # 接收人2 scope=none 不会收到；每日同 key 只推一次，避免重复轰炸。
+    if _full_blocked:
+        _fb_lines = []
+        for b in _full_blocked:
+            _fb_lines.append("- 🟢 **买点** %s(%s) [%s级] 高开%.2f%% 实时价%.2f ｜ %s"
+                             % (b["name"], b["code"], b["grade"],
+                                b["open_gap"] or 0, b["price"] or 0, b["reason"]))
+        _fb_text = ("**持仓已满 %d 只，但以下股票今日到达买点（无法新建仓，供你手动关注 / 换仓参考）：**\n\n%s"
+                    % (_max_pos, "\n".join(_fb_lines)))
+        _act_notify(cfg, "🔔 满仓买点提示（%d 只）" % len(_full_blocked), _fb_text,
+                    dedup_key="full_buypoint_%s" % time.strftime("%Y-%m-%d"))
     return lines, n_buy
 
 
@@ -1382,10 +1468,11 @@ def _tail_buys(broker, cfg, sigs, mkt, data=None):
                 continue
             if _zstop:
                 v = dict(v, stop=_zstop)
-        # 2026-09-03：与开仓通道统一仓位口径（之前尾盘用 max_trade_amount×0.5 旧公式）
-        base_pct = gate.cfg.get("base_position_pct", 0.25)
+        # 2026-09-03：与开仓通道统一仓位口径（按评级 grade_pct 定单票目标仓位，允许强信号集中）
+        _gp = gate.cfg.get("grade_pct") or {"A": 0.65, "B": 0.55, "T": 0.50, "C": 0.30}
+        _pct = _gp.get(sf["grade"], 0.25)
         if total:
-            amount = int(total * base_pct * sf["weight"] * cut)
+            amount = int(total * _pct * cut)
             try:
                 _cash = float((bal or {}).get("cash") or 0)
             except Exception:
@@ -1395,7 +1482,7 @@ def _tail_buys(broker, cfg, sigs, mkt, data=None):
                              total * gate.cfg["max_position_pct"],
                              _cash * 0.95 if _cash > 0 else amount))
         else:
-            amount = int(gate.cfg["max_trade_amount"] * sf["weight"] * cut)
+            amount = int(gate.cfg["max_trade_amount"] * _pct * cut)
         # Batch3 #13：总仓位系数（热度/情绪退潮时压减新仓金额）
         if data is not None:
             _pc = position_cap(data)

@@ -15,12 +15,13 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(ROOT, "risk_state.json")
 
 DEFAULTS = {
-    "max_position_pct": 0.35,     # 单票最大仓位占总资金比例（硬顶，防御用）
-    "max_positions": 4,           # 最多同时持仓只数（2026-09-03 用户拍板：10万本金按 3331/3322 分仓，最多 4 只）
-    "base_position_pct": 0.25,    # 单票基础仓位（占总资金）：A/B/T 级=25%（10万→2.5万/笔），C 级×0.6=15%
+    "max_position_pct": 0.70,     # 单票最大仓位占总资金比例（硬顶，防御用；2026-09-03 放松：允许强信号集中到 65%）
+    "max_positions": 4,           # 最多同时持仓只数（安全上限，非刚性分仓；情况好可梭哈1支或分仓2支）
+    "base_position_pct": 0.25,    # 单票基础仓位（兼容旧公式；新公式改用 grade_pct）
+    "grade_pct": {"A": 0.65, "B": 0.55, "T": 0.50, "C": 0.30},  # 2026-09-03 用户拍板：按评级定单票目标仓位（不再死守3331/3322），强信号可集中
     "max_orders_per_day": 6,      # 单日最大委托笔数（>max_positions 以便卖出后回补/换仓）
-    "min_trade_amount": 3000,     # 单笔最小金额（元）——低于此不买（防几千块的无效小仓）
-    "max_trade_amount": 40000,    # 单笔绝对硬顶（元）——防御兜底，正常按仓位百分比算
+    "min_trade_amount": 1000,     # 单笔最小金额（元）——低于此不买（防几千块的无效小仓）
+    "max_trade_amount": 60000,    # 单笔绝对硬顶（元）——防御兜底，正常按仓位百分比算
     "daily_loss_stop_pct": -3.0,  # 当日组合亏损熔断线（%）
     "enabled": True,              # 总开关（False = 只记录不下单）
 }
@@ -107,7 +108,7 @@ class RiskGate:
         # 最多持仓只数（3331/3322 分仓上限）
         if current_positions is not None and current_positions >= self.cfg["max_positions"]:
             return {"ok": False,
-                    "reason": "已达最大持仓只数 %d（3331/3322 分仓上限），本笔拒绝"
+                    "reason": "已达最大持仓只数 %d（安全上限，非刚性分仓），本笔拒绝"
                               % self.cfg["max_positions"], "amount": 0}
         if self.state["orders_today"] >= self.cfg["max_orders_per_day"]:
             self.trip("单日委托数超限 %d" % self.cfg["max_orders_per_day"])
