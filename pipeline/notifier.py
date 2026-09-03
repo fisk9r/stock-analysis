@@ -1210,6 +1210,26 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
     _strip_personal = bool(_uids) and mode in (
         "close", "close_again", "preauction", "auction", "weekend") \
         and any(_effective_watch(_users_by_id[u]) for u in _uids)
+    # 收件人维度（供推送面板可视化：谁收到、走哪个通道、是否含本人自选跟踪）。
+    # 取自 scope 过滤后的共享广播配置 + 个性化复盘专属通道（持仓用户）。
+    _recips = []
+    def _collect(ch_name, cc):
+        if not cc or not isinstance(cc, dict):
+            return
+        for fld in ("sendkey", "sendkeys", "token"):
+            items = cc.get(fld)
+            if not items:
+                continue
+            items = items if isinstance(items, list) else [items]
+            for x in items:
+                if isinstance(x, dict):
+                    _recips.append({"channel": ch_name, "name": x.get("name"),
+                                    "scope": x.get("scope", "all"), "user": x.get("user")})
+    _collect("serverchan", cfg_shared.get("wechat_serverchan"))
+    _collect("pushplus", cfg_shared.get("wechat_pushplus"))
+    for _u in _users_with_pos:
+        _recips.append({"channel": "专属通道", "name": _u.get("name"),
+                        "scope": "all", "personalized": True})
     title = summary.get("title", "A股盘后复盘")
     text = summary.get("text", "")
     results = []
@@ -1341,6 +1361,7 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
                                     "telegram", "email")) and "失败" not in r]
             _append_ledger({"ts": _ts, "mode": mode, "title": title,
                             "text": text, "channels": _ch,
+                            "recipients": _recips,
                             "codes": list(codes) if codes else [],
                             "adate": analysis_date if mode in ("close", "close_again") else None})
         except Exception as e:

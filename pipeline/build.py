@@ -2606,3 +2606,14 @@ if __name__ == "__main__":
         push_yaogu()
     else:
         run(d)
+    # 2026-09-03 推送面板：构建/推送完成后自动刷新 dist/push_panel.html（best-effort，失败不影响主流程）
+    try:
+        import importlib.util
+        _tools = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools")
+        _spec = importlib.util.spec_from_file_location(
+            "gen_push_panel", os.path.join(_tools, "gen_push_panel.py"))
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _mod.main()
+    except Exception as _e:
+        print("[build] 推送面板生成跳过：%r" % _e)

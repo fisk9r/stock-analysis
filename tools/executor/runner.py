@@ -39,6 +39,7 @@ import sys
 import time
 import atexit
 import urllib.request
+from datetime import datetime, timezone, timedelta
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -309,22 +310,23 @@ def _notify_cfg():
 
 
 def _iter_notify_pp():
-    """返回 [(token, scope)]；scope 缺省视为 all（兼容旧配置）。"""
+    """返回 [(token, scope, name)]；scope 缺省视为 all（兼容旧配置）。"""
     out = []
     pp = (_notify_cfg().get("wechat_pushplus") or {}).get("token") or []
     for x in (pp if isinstance(pp, list) else [pp]):
         if isinstance(x, dict):
             t = (x.get("token") or x.get("key") or "").strip()
             sc = (x.get("scope") or "all")
+            nm = x.get("name") or "?"
             if t:
-                out.append((t, sc))
+                out.append((t, sc, nm))
         elif isinstance(x, str) and x.strip():
-            out.append((x.strip(), "all"))
+            out.append((x.strip(), "all", "?"))
     return out
 
 
 def _iter_notify_sc():
-    """返回 [(key, scope)]；scope 缺省视为 all。"""
+    """返回 [(key, scope, name)]；scope 缺省视为 all。"""
     out = []
     sc = _notify_cfg().get("wechat_serverchan") or {}
     for fld in ("sendkey", "sendkeys"):
@@ -333,17 +335,18 @@ def _iter_notify_sc():
             if isinstance(x, dict):
                 k = (x.get("key") or x.get("sendkey") or "").strip()
                 scp = (x.get("scope") or "all")
+                nm = x.get("name") or "?"
                 if k:
-                    out.append((k, scp))
+                    out.append((k, scp, nm))
             elif isinstance(x, str) and x.strip():
-                out.append((x.strip(), "all"))
+                out.append((x.strip(), "all", "?"))
     return out
 
 
 def _serverchan_key_filtered(ncfg, allowed):
     """ServerChan sendkey 三级查找 + scope 过滤（2026-09-03 推送分级）：
     cfg.notify.serverchan_key（旧式→视为 all）> NOTIFY_JSON/config notify wechat_serverchan（按 scope）。
-    只返回第一个 scope∈allowed 或 all 的 key。"""
+    只返回第一个 scope∈allowed 或 all 的 key。返回 (key, name, scope) 三元组。"""
     def _norm(k):
         if isinstance(k, list):
             k = k[0] if k else ""
@@ -351,11 +354,41 @@ def _serverchan_key_filtered(ncfg, allowed):
     if "all" in allowed:
         k = _norm(ncfg.get("serverchan_key") or "")
         if k:
-            return k
-    for kk, sc in _iter_notify_sc():
+            return (k, "?", "all")
+    for kk, sc, nm in _iter_notify_sc():
         if sc in allowed or sc == "all":
-            return kk
-    return ""
+            return (kk, nm, sc)
+    return ("", "", "")
+
+
+def _sim_push_log_path():
+    """模拟盘推送独立账本（随 Release 资产跨 run 累积，与 notifier 的
+    dist/push_log.jsonl 合并后由 tools/gen_push_panel.py 可视化）。"""
+    ex = os.path.dirname(os.path.abspath(__file__))
+    d = os.path.join(ex, "state")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(d, "sim_push_log.jsonl")
+
+
+def _log_sim_push(title, text, recipients, channels):
+    """追加一条模拟盘推送记录（best-effort，失败不影响推送）。"""
+    try:
+        rec = {
+            "ts": (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S"),
+            "mode": "sim",
+            "title": title,
+            "text": (text or "")[:1500],
+            "channels": channels,
+            "recipients": recipients,
+            "scope": "all",
+        }
+        with open(_sim_push_log_path(), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def _notify_now(cfg, title, text, allowed=None):
@@ -373,8 +406,10 @@ def _notify_now(cfg, title, text, allowed=None):
         allowed = {"all", "sim"}   # runner 推送均为模拟盘操作类
     results = []
     ncfg = cfg.get("notify") or {}
+    _recips = []   # 收件人维度（供推送面板可视化）：[{channel,name,scope}]
+    _ch = []       # 实际选用的通道
     # --- PushPlus（按 scope 过滤）---
-    pp_candidates = []  # (token, scope)
+    pp_candidates = []  # (token, scope, name)
     # 1) config.json notify.pushplus_tokens（旧式，无 scope → 视为 all）
     _legacy = ncfg.get("pushplus_tokens") or []
     if isinstance(_legacy, str):
@@ -382,19 +417,27 @@ def _notify_now(cfg, title, text, allowed=None):
     for _t in _legacy:
         _t = (_t or "").strip()
         if _t:
-            pp_candidates.append((_t, "all"))
+            pp_candidates.append((_t, "all", "?"))
     # 2) notify.json / NOTIFY_JSON（带 scope）
-    for _t, _sc in _iter_notify_pp():
-        pp_candidates.append((_t, _sc))
+    for _t, _sc, _nm in _iter_notify_pp():
+        pp_candidates.append((_t, _sc, _nm))
     # 去重 + 按 scope 过滤（none / prepost 排除）
-    _seen, pp_tokens = set(), []
-    for _t, _sc in pp_candidates:
+    _seen, pp_tokens, _pp_names = set(), [], {}
+    for _t, _sc, _nm in pp_candidates:
         if _t in _seen:
             continue
         if _sc not in allowed and _sc != "all":
             continue
         _seen.add(_t)
         pp_tokens.append(_t)
+        _pp_names[_t] = (_sc, _nm)
+    # 收件人维度：基于「通过 scope 过滤的意向收件人」记录（与是否真送达解耦，
+    # 弱网失败时仍能在面板看到本应推给谁）。实际送达通道另行记录到 results。
+    for tk in pp_tokens:
+        _sc, _nm = _pp_names.get(tk, ("all", "?"))
+        _recips.append({"channel": "pushplus", "name": _nm, "scope": _sc})
+    if pp_tokens:
+        _ch.append("pushplus")
     pp_ok = 0
     if pp_tokens:
         try:
@@ -433,7 +476,7 @@ def _notify_now(cfg, title, text, allowed=None):
     # 2026-09-01 语义变更：仅当 PushPlus 全部失败（或未配置）时才发送——
     # SC 每日 5 条额度留给异动/强晋级推送，正常情况不再双通道重复消耗。
     if pp_ok == 0:
-        key = _serverchan_key_filtered(ncfg, allowed)
+        key, sc_name, sc_scope = _serverchan_key_filtered(ncfg, allowed)
         if key:
             try:
                 import urllib.request
@@ -442,12 +485,18 @@ def _notify_now(cfg, title, text, allowed=None):
                 urllib.request.urlopen(
                     "https://sctapi.ftqq.com/%s.send" % key, data=data, timeout=15)
                 results.append("ServerChan ok（兜底）")
+                _ch.append("serverchan")
+                _recips.append({"channel": "serverchan", "name": sc_name, "scope": sc_scope})
             except Exception as e:
                 results.append("ServerChan兜底失败:%r" % e)
     if not results:
         _log("（未配置任何推送通道，跳过推送）")
     else:
         _log("已推送 %s：%s" % (" + ".join(results), title))
+    # 2026-09-03 推送面板：模拟盘操作类推送写入独立账本（随 Release 资产跨 run 累积），
+    # 与 pipeline/notifier.py 的 dist/push_log.jsonl 合并后由 tools/gen_push_panel.py 可视化。
+    if _recips:
+        _log_sim_push(title, text, _recips, _ch)
 
 
 def pick_broker(cfg):
@@ -490,6 +539,8 @@ _EXEC_STATE_MEMBERS = [
     # stock.yml 冗余触发链；多触发源必然产生重复 dispatch，幂等必须内建在执行器，
     # 而不是靠触发端的去重文件（触发端去重挡不住手动 dispatch 和 PC 计划任务）。
     "state/task_ledger.json",
+    # 2026-09-03 推送面板：模拟盘操作类推送账本（随状态包跨 run 累积，供可视化面板读取）
+    "state/sim_push_log.jsonl",
 ]
 
 
