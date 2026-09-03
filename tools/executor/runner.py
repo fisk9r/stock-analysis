@@ -1867,7 +1867,11 @@ def run_review(cfg=None, push=True, force=False):
         holding_plans.append({
             "code": p["code"], "name": p["name"],
             "avg_price": p["avg_price"],
-            "price": q.get("price"), "pnl_pct": round(pnl_pct, 2) if pnl_pct is not None else None,
+            "volume": p.get("volume"),
+            "price": q.get("price"),
+            "market_value": round((q.get("price") or 0) * (p.get("volume") or 0), 0)
+            if (q.get("price") and p.get("volume")) else None,
+            "pnl_pct": round(pnl_pct, 2) if pnl_pct is not None else None,
             "verdict": dec["verdict"], "plan": plan,
         })
 
@@ -1905,10 +1909,12 @@ def run_review(cfg=None, push=True, force=False):
         lines.append("")
         lines.append("**明日计划（持仓 %d 笔）**" % len(holding_plans))
         for hp in holding_plans:
-            lines.append("- %s(%s) 成本%.2f 浮盈%s｜%s"
+            _mv = (" ｜ 持仓%d股·%.0f元" % (hp.get("volume") or 0, hp.get("market_value") or 0)) \
+                if hp.get("market_value") else ""
+            lines.append("- %s(%s) 成本%.2f 浮盈%s｜%s%s"
                          % (hp["name"], hp["code"], hp["avg_price"],
                             ("%.2f%%" % hp["pnl_pct"]) if hp["pnl_pct"] is not None else "—",
-                            hp["plan"]))
+                            hp["plan"], _mv))
 
     # 区块3.5：明日竞价关注清单（2026-08-31 升级）
     # 当日因低开/平开/分级/风控没上车的 st≥3 高度票——高度溢价单调

@@ -2531,6 +2531,20 @@ def push_weekend():
     return notifier.push(summary, mode="weekend")
 
 
+def push_weekattr():
+    """每周胜率归因推送（#4，2026-09-03）：纯本地归因（rec_picks 全量实证），零网络依赖，
+    周日定时触发。即便没有当日 data.js 也能跑（归因只依赖 DB）。"""
+    data = load_existing_data() or {}
+    con = None
+    try:
+        from pipeline import store
+        con = store.connect()
+    except Exception:
+        con = None
+    summary = notifier.format_weekattr_summary(data, con=con, url=_deploy_url())
+    return notifier.push(summary, mode="weekattr")
+
+
 def push_close_again():
     """收盘后补发（如 20:00）：重新跑分析以拿到最完整数据（龙虎榜、封单等盘后增量），
     若推送正文与当日『收盘后』推送完全相同则跳过，节省 ServerChan 额度留给异动/强晋级。"""
@@ -2557,6 +2571,8 @@ if __name__ == "__main__":
             action = "close_again"
         elif a == "--weekend-push":
             action = "weekend"
+        elif a == "--weekattr-push":
+            action = "weekattr"
         elif a == "--yaogu-push":
             action = "yaogu"
     if action == "preauction":
@@ -2573,6 +2589,8 @@ if __name__ == "__main__":
         push_close_again()
     elif action == "weekend":
         push_weekend()
+    elif action == "weekattr":
+        push_weekattr()
     elif action == "yaogu":
         push_yaogu()
     else:

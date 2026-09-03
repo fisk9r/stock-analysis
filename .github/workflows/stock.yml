@@ -33,7 +33,7 @@ on:
         required: true
         default: 'build'
         type: choice
-        options: [build, preauction, auction, open_anomaly, anomaly, close_again, weekend, yaogu]
+        options: [build, preauction, auction, open_anomaly, anomaly, close_again, weekend, weekattr, yaogu]
 
   schedule:
     - cron: '50 0 * * 1-5'   # 北京 08:50 周一至周五 —— 盘前预判（前移：原 09:02，尽量早到）
@@ -303,6 +303,26 @@ jobs:
         run: |
           sleep 30  # 等 CF Pages CDN 生效
           python tools/verify_site.py https://stock-analysis-8zm.pages.dev
+
+      # ---------- 9. 发布归因报告与盘中异动片段（Batch3 #11/#12）----------
+      # 自动生成的 reports/rec_attr_<月>.html 与盘中异动片段 data/intraday_latest.json
+      # 提交回仓库，使其可被查看（发布），并跨 CI 运行留存（喂 T+1）。
+      - name: 发布归因报告与盘中异动片段
+        if: steps.task.outputs.task == 'build'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/rec_attr_*.html data/intraday_latest.json 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "无报告/异动变更，跳过提交"
+          else
+            git commit -m "chore: 自动归因报告/盘中异动片段 $(date +%F)"
+            git push https://x-access-token:${GH_TOKEN}@github.com/fisk9r/stock-analysis.git HEAD:main
+            echo "✅ 已发布归因报告与盘中异动片段"
+          fi
 
       # ---------- 8. 失败可诊断 ----------
       - name: 失败时保留现场

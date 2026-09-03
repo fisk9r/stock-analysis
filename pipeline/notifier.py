@@ -1051,7 +1051,7 @@ def push(summary, dry_run=False, mode="close", codes=None, analysis_date=None, d
     # 若不拦，节假日会连日把「节前那根K线」当『今日复盘』推出去，既误导又白烧
     # ServerChan 额度（5 条/天）。weekend 模式本就在周末推，豁免。
     # 逃生阀：设环境变量 SA_FORCE_PUSH=1 可强制推送（手工补发/测试用）。
-    if (not dry_run and mode != "weekend" and trade_calendar is not None
+    if (not dry_run and mode not in ("weekend", "weekattr") and trade_calendar is not None
             and os.environ.get("SA_FORCE_PUSH") != "1"
             and not trade_calendar.is_trade_day()):
         print("[notifier][%s] %s（%s），跳过推送——避免把节前数据当『今日』发出"
@@ -2145,6 +2145,32 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
                 _rows.append("今日：开/加%d笔 ｜ 平仓%d笔 ｜ 被拒%d笔" % (_nt, _nc, _nr))
             if _sl.get("summary_line"):
                 _rows.append(_sl["summary_line"])
+            # #440（2026-09-03）：持仓/成交/平仓明细——让用户看清买了哪几只、成本、数量、实时盈亏
+            _hp = _sl.get("holding_plans") or []
+            _trd = _sl.get("trades") or []
+            _cls = _sl.get("closed") or []
+            if _hp:
+                _rows.append("**持仓明细（%d 只）**" % len(_hp))
+                for hp in _hp[:8]:
+                    _mv = (" ｜ %d股·%.0f元" % (hp.get("volume") or 0, hp.get("market_value") or 0)) \
+                        if hp.get("market_value") else ""
+                    _rows.append("- %s(%s) 成本%.2f→现%.2f %s%s"
+                                 % (hp.get("name") or hp.get("code"), hp.get("code"),
+                                    hp.get("avg_price") or 0, hp.get("price") or 0,
+                                    ("浮盈%+.2f%%" % hp["pnl_pct"]) if hp.get("pnl_pct") is not None else "浮盈—",
+                                    _mv))
+            if _trd:
+                _rows.append("**今日成交（%d 笔）**" % len(_trd))
+                for t in _trd[:6]:
+                    _act = "🟢买" if t.get("action") == "BUY" else "🔴卖"
+                    _rows.append("- %s %s(%s) %.2f×%d股"
+                                 % (_act, t.get("name") or t.get("code"), t.get("code"),
+                                    t.get("price") or 0, t.get("volume") or 0))
+            if _cls:
+                _rows.append("**今日平仓（%d 笔）**" % len(_cls))
+                for c in sorted(_cls, key=lambda x: -(x.get("pnl_pct") or 0))[:6]:
+                    _rows.append("- %s(%s) %+.2f%%" % (c.get("name") or c.get("code"),
+                                                       c.get("code"), c.get("pnl_pct") or 0))
             _sec("🤖 模拟盘战绩", _rows)
     except Exception:
         pass
@@ -2395,7 +2421,8 @@ def watchreco_lines(data, n=6, compact=False):
             from pipeline import watchreco as _wc
         except Exception:
             return []
-    out = _wc.lines(wr, n=n, compact=compact)
+    # 2026-09-03：把推荐池一并传入（replace 候选被过滤清空时，用连板计划兜底补上可买的票）
+    out = _wc.lines(wr, n=n, compact=compact, rec=(data.get("recommend") or {}))
     if out and not compact:
         out.insert(0, "> 持仓给卖出/加仓/持有动作，自选给买入时机；完整买卖区见看板。")
     return out
@@ -3368,6 +3395,66 @@ def format_weekend_summary(data, url="", news_items=None):
     if url:
         sc.append("看板：%s" % url)
     return {"title": "周一前瞻 · 周末要闻 %s" % date, "text": "\n".join(L),
+            "sc_text": "\n".join(sc)}
+
+
+def format_weekattr_summary(data, con=None, url=""):
+    """每周胜率归因推送（#4，2026-09-03）：基于 rec_picks 全量实证做多维归因，
+    给出「哪些信号类型真正赚钱、哪些该收手」，附近90日标签级胜率。
+    纯本地、零网络依赖（区别于周末前瞻的「需有要闻才发」）；周日定时推送。"""
+    m = (data or {}).get("meta", {}) or {}
+    date = m.get("date", "")
+    L = []
+    L.append("## 📊 每周胜率归因 · 信号实测（截至 %s）" % date)
+    L.append("")
+    L.append("> 数据源：rec_picks 全量实证（推荐次日真实涨跌幅）。样本<8 不统计，避免小样本误导。")
+    L.append("")
+    if con is None:
+        try:
+            from pipeline import store
+            con = store.connect()
+        except Exception:
+            con = None
+    if con is not None:
+        # 1) 标签级胜率（近90日）
+        tw = tag_winrate(con, days=90, min_n=8)
+        if tw:
+            L.append("### 一、信号类型次日收红率（近90日）")
+            for k, v in tw.items():
+                _flag = " ⚠️**低于45%该收手**" if v["win_rate"] < 45 else ""
+                L.append("- **%s**：胜率 **%.0f%%**（n=%d，均值%+.2f%%）%s"
+                         % (k, v["win_rate"], v["n"], v["avg_pct"], _flag))
+            L.append("")
+        else:
+            L.append("> 近90日暂无足够样本，归因暂不可见。")
+            L.append("")
+        # 2) 多维归因（recattr：st=2 开盘溢价分桶 / 特征 / 盘中路径）
+        try:
+            from pipeline import recattr
+            _ra = recattr.build(con)
+            if _ra:
+                for ln in recattr.summary_lines(_ra):
+                    if ln:
+                        L.append(ln)
+                L.append("")
+        except Exception as e:
+            L.append("> 多维归因生成失败：%r" % e)
+            L.append("")
+    else:
+        L.append("> 数据库未就绪，跳过归因。")
+        L.append("")
+    if url:
+        L.append("---")
+        L.append("完整看板（含逐标签历史曲线）：%s" % url)
+    # ServerChan 精简版（8K 上限）
+    sc = ["## 每周胜率归因 %s" % date]
+    if con is not None:
+        tw = tag_winrate(con, days=90, min_n=8)
+        for k, v in list(tw.items())[:10]:
+            sc.append("- %s %.0f%%(n=%d)" % (k, v["win_rate"], v["n"]))
+    if url:
+        sc.append("看板：%s" % url)
+    return {"title": "每周胜率归因 %s" % date, "text": "\n".join(L),
             "sc_text": "\n".join(sc)}
 
 

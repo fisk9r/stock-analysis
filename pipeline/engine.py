@@ -1970,7 +1970,7 @@ def compute_regime(hist_rows, picks_rows, bars_series=None):
     hit = sum(1 for p in valid if p[6] == 1)
     hit_rate = round(hit / len(valid) * 100, 1) if valid else None
     by_tag = {}
-    for tag in ("核心龙头", "主线接力", "低位潜伏", "高位风险"):
+    for tag in ("核心龙头", "主线接力", "无合力首板", "低位潜伏", "高位风险"):
         sub = [p for p in valid if p[5] == tag]
         if sub:
             by_tag[tag] = round(sum(1 for p in sub if p[6] == 1) / len(sub) * 100, 1)
@@ -2358,10 +2358,13 @@ def recommend(limit_ups, risks, demons, sectors, sent, cyc, stats, auction_map=N
     # 首板无板块合力且 sc<40 不落任何桶，给「观察」中性标签，前端不再显示空白。
     for it in items:
         if it.get("tag") is None:
-            it["tag"] = "观察"
-            # 2026-08-31 月度归因确诊：无标签首板（无板块合力、sc<40）n=123，
-            # 次日胜率仅 39.8%/均值+0.18%，是全部标签中最弱一桶（近乎噪声）。
-            # 弱票降权 15% 自然靠后，避免挤占有合力确认的主推；仍保留可见（观察）。
+            if (it.get("streak", 0) or 0) == 1:
+                # #5（2026-09-03）：首板无合力、sc<40 也归到「无合力首板」做独立归因
+                # （历史胜率仅~40%，全部标签中最弱一桶），与上方 sc>=40 的分支合并为同一条通道。
+                it["tag"] = "无合力首板"
+            else:
+                it["tag"] = "观察"
+            # 弱票降权 15% 自然靠后，避免挤占有合力确认的主推；仍保留可见（观察/无合力首板）。
             if (it.get("score") or 0) > 0:
                 it["score"] = round((it.get("score") or 0) * 0.85, 1)
     # ── 分桶内重排序（2026-08-28 用户反馈排序错乱）──

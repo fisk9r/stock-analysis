@@ -128,7 +128,57 @@ def distill(zones_data, holding_codes=None, watch_names=None, topn=14, watch_cod
     }
 
 
-def lines(wr, n=6, compact=False):
+def _fallback_replaces(item, rec, tol=1.15):
+    """replace 候选被「现价远超买区」过滤清空、或 zones 本就没给（如止盈/离场）时的兜底：
+    从推荐池补真正可买的票。用户 2026-09-03 拍板：提示卖出/割肉的票必须同时给出可以买入
+    的票，不能只留「观望」让人无所适从。
+
+    候选来源：推荐池全量（core/relay/ambush/all/trend）+ 连板计划，要求『现价就在买点附近』
+    （close ≤ 买区上沿×tol），按价值分排序，排除原票，最多 2 只。
+    注意：连板计划（ladder_plans）多为高位续强票，现价常远超买区上沿被过滤——所以主源
+    改为带买区的推荐池本身，连板计划只作为补充。"""
+    if not rec:
+        return []
+    sold = str(item.get("code") or "")
+    cand = []
+    seen = set()
+    _pools = []
+    for k in ("core", "relay", "ambush", "all", "trend"):
+        _pools.extend(rec.get(k) or [])
+    _pools.extend(rec.get("ladder_plans") or [])
+    for x in _pools:
+        c = str(x.get("code") or "")
+        if not c or c in seen or c == sold:
+            continue
+        bz = x.get("buy_zone") or [None, None]
+        if not (bz and bz[1]):
+            continue
+        pr = x.get("close")
+        if pr is None:
+            continue
+        try:
+            pr = float(pr)
+        except Exception:
+            continue
+        if pr > float(bz[1]) * tol:
+            continue
+        seen.add(c)
+        _st = (x.get("streak") or x.get("entry_streak") or 0)
+        cand.append({
+            "code": c, "name": x.get("name") or c,
+            "industry": x.get("industry"),
+            "buy_zone": bz, "sell_zone": x.get("sell_zone"),
+            "stop": x.get("stop"), "close": round(pr, 2),
+            "streak": _st,
+            "worth": x.get("worth_score") or 0,
+            "market_type": "连板" if _st >= 1 else "趋势",
+            "tag": (x.get("tag") or x.get("channel") or ""),
+        })
+    cand.sort(key=lambda x: -x["worth"])
+    return cand[:2]
+
+
+def lines(wr, n=6, compact=False, rec=None):
     """推送行：'- 持仓 **XX** 14.20 浮盈+8.2% → 加仓 ｜ 买点5.12~5.30 ／ 卖点6.10~6.30'
 
     2026-08-31 升级（用户要求：关注的股票操作必须提示买点和卖点）：
@@ -158,6 +208,20 @@ def lines(wr, n=6, compact=False):
             pts.append("止损%.2f" % it["stop"])
         if pts:
             seg += " ｜ " + " ／ ".join(pts)
+        # 2026-09-03（用户：给了一堆观望让我做什么）——「观望」必须给可执行的距离信息：
+        # 现价距买区上沿 ≤5% 可买 / 5~20% 回踩关注 / >20% 建议放弃跟踪（别空等）。
+        if (it.get("action") or "") in ("观望", "不追（已过买点）") and bz[0] and bz[1] and it.get("close"):
+            try:
+                _gap = (float(it["close"]) / float(bz[1]) - 1) * 100
+            except Exception:
+                _gap = None
+            if _gap is not None:
+                if _gap <= 5:
+                    seg += " ｜ 🔴 距买点仅 %.1f%%，可挂单 %.2f~%.2f" % (_gap, bz[0], float(bz[1]))
+                elif _gap <= 20:
+                    seg += " ｜ 距买点 %.1f%%，回落至 %.2f 再关注" % (_gap, float(bz[1]))
+                else:
+                    seg += " ｜ 距买点 %.1f%%（短期难到，建议放弃跟踪）" % _gap
         note = it.get("rotate_reason") or it.get("reason") or ""
         if note and not compact:
             seg += "（%s）" % note[:28]
@@ -172,13 +236,25 @@ def lines(wr, n=6, compact=False):
             # 现价距买区上沿超过 5% 的票（买区远低于现价，根本等不到）不推；
             # 先过滤再取前 2，避免无效候选占掉名额。
             _n = 0
-            for rp in (it.get("replace") or []):
+            # 2026-09-03（用户：给了一堆观望让我做什么）：卖出/割肉必须给可买票。
+            # 合并 zones 自带 replace（已带买卖区）+ 推荐池兜底（_fallback_replaces 从全量
+            # 推荐池挑现价在买点附近的票），去重后最多给 2 只真正可买的票。
+            _merged = []
+            _seen = set()
+            for _rp0 in (list(it.get("replace") or []) + _fallback_replaces(it, rec)):
+                _c0 = str(_rp0.get("code") or "")
+                if _c0 in _seen:
+                    continue
+                _seen.add(_c0)
+                _merged.append(_rp0)
+            for rp in _merged:
                 _rp_close, _rp_bz = rp.get("close"), (rp.get("buy_zone") or [None, None])
-                if _rp_close and _rp_bz[1] and _rp_close > float(_rp_bz[1]) * 1.05:
+                if _rp_close and _rp_bz[1] and _rp_close > float(_rp_bz[1]) * 1.15:
                     continue
                 if _n >= 2:
                     break
                 _n += 1
+                _gap = ((_rp_close / float(_rp_bz[1]) - 1) * 100) if (_rp_close and _rp_bz[1]) else None
                 mt = rp.get("market_type") or ("连板" if (rp.get("streak") or 0) >= 1 else "趋势")
                 if mt == "连板":
                     mtag = "连板" + ("%d板" % rp["streak"] if rp.get("streak") else "票")
@@ -196,5 +272,11 @@ def lines(wr, n=6, compact=False):
                     rseg += " 卖%.2f~%.2f" % (sz2[0], sz2[1])
                 elif rp.get("stop"):
                     rseg += " 止损%.2f" % rp["stop"]
+                # 距离买点多少（现价 vs 买区上沿）：可买直接标，需回踩标回落幅度
+                if _gap is not None:
+                    if _gap <= 0:
+                        rseg += " ｜ ✅现价在买区内"
+                    else:
+                        rseg += " ｜ 需回落%.1f%%到买区" % _gap
                 out.append(rseg)
     return out
