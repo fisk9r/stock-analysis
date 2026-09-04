@@ -4584,7 +4584,98 @@
         });
     }
 
-    var views = { overview: viewOverview, watch: viewWatch, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings, buypoint: viewBuypoint, sim: viewSim, pushcenter: viewPushCenter };
+    /* ---------------- 今日推送（三段式，与每日推送同款）---------------- */
+    function viewPushMode() {
+      var H = D.holdings_ops || [];
+      var BC = D.buy_candidates || { ladder: [], trend: [], band: [], ladder_warn: null };
+      var BS = D.board_strength || {};
+      var h = '';
+      h += '<div class="bp-bar"><span>📲 今日推送 · 持仓操作 → 只推当下买点 → 板块强弱（与每日推送同款三段式）</span></div>';
+
+      /* ① 持仓今日操作 */
+      if (H.length) {
+        var hrows = H.map(function (x) {
+          var bz = x.buy_zone || [], sz = x.sell_zone || [];
+          var zn = (bz.length === 2 && bz[0] != null) ? (f(bz[0], 2) + '~' + f(bz[1], 2)) : '—';
+          var sn = (sz.length === 2 && sz[0] != null) ? (f(sz[0], 2) + '~' + f(sz[1], 2)) : '—';
+          var pnl = (x.pnl != null) ? ('<span class="' + (x.pnl >= 0 ? 'up' : 'down') + '">' + (x.pnl >= 0 ? '+' : '') + f(x.pnl) + '%</span>') : '—';
+          var dcls = (x.decision && (x.decision.indexOf('卖出') >= 0 || x.decision.indexOf('割肉') >= 0)) ? 'hot'
+            : ((x.decision && x.decision.indexOf('加仓') >= 0) ? 'ok' : 'hold');
+          var reasons = (x.reasons || []).slice(0, 2).map(function (r) { return E(r); }).join('；');
+          var rot = (x.rotate && x.rotate.length) ? ('<div class="note" style="margin-top:4px">换股：' + x.rotate.map(function (rp) { return stk(rp.code, rp.name); }).join('、') + '</div>') : '';
+          return '<tr>' +
+            '<td>' + (x.emoji || '') + ' ' + stk(x.code, x.name) + '</td>' +
+            '<td><span class="ent ' + dcls + '">' + E(x.decision || '') + '</span></td>' +
+            '<td class="num">' + pnl + '</td>' +
+            '<td class="num" style="color:var(--up)">' + zn + '</td>' +
+            '<td class="num" style="color:var(--down)">' + sn + '</td>' +
+            (x.stop != null ? '<td class="num">' + f(x.stop, 2) + '</td>' : '<td class="muted">—</td>') +
+            '<td class="muted">' + reasons + rot + '</td>' +
+            '</tr>';
+        }).join('');
+        h += card('💼 持仓今日操作', table([
+          { t: '个股' }, { t: '动作' }, { t: '浮盈', a: 'num' }, { t: '买区', a: 'num' }, { t: '卖区', a: 'num' }, { t: '止损', a: 'num' }, { t: '依据' }
+        ], hrows), '实盘持仓每日操作结论：卖出/换股/加仓/格局持有；附买卖区与止损，跟着做即可。');
+      } else {
+        h += card('💼 持仓今日操作', '<div class="empty">未配置持仓（在「持股监测」页添加）</div>', '');
+      }
+
+      /* ② 买点候选：合并连板/趋势/波段，按综合分排序，只列可买/微超 */
+      var all = [];
+      (BC.ladder || []).forEach(function (c) { all.push(c); });
+      (BC.trend || []).forEach(function (c) { all.push(c); });
+      (BC.band || []).forEach(function (c) { all.push(c); });
+      all.sort(function (a, b) { return (b.score || 0) - (a.score || 0); });
+      if (all.length) {
+        var crows = all.map(function (c) {
+          var bz = c.buy_zone || [], sz = c.sell_zone || [];
+          var zn = (bz.length === 2 && bz[0] != null) ? (f(bz[0], 2) + '~' + f(bz[1], 2)) : '—';
+          var sn = (sz.length === 2 && sz[0] != null) ? (f(sz[0], 2) + '~' + f(sz[1], 2)) : '—';
+          var kcol = c.kind === '连板' ? C.gold : C.up;
+          var score = c.score || 0;
+          var scol = score >= 70 ? 'var(--up)' : (score >= 55 ? 'var(--gold)' : 'var(--muted)');
+          var bb = (c.board_bonus != null && c.board_bonus !== 0) ? ('<span class="' + (c.board_bonus > 0 ? 'up' : 'down') + '">' + (c.board_bonus > 0 ? '+' : '') + f(c.board_bonus, 0) + '</span>') : '<span class="muted">—</span>';
+          return '<tr>' +
+            '<td><span class="bd" style="border-color:' + kcol + ';color:' + kcol + '">' + E(c.kind) + '</span> ' + stk(c.code, c.name) + '</td>' +
+            '<td>' + E(c.board || '—') + '</td>' +
+            '<td class="num">' + f(c.close != null ? c.close : 0, 2) + '</td>' +
+            '<td class="num" style="color:var(--up)">' + zn + '</td>' +
+            '<td class="num" style="color:var(--down)">' + sn + '</td>' +
+            '<td class="num" style="color:' + scol + ';font-weight:700">' + f(score, 0) + '</td>' +
+            '<td class="num">' + bb + '</td>' +
+            '<td>' + E(c.entry_state || '') + '</td>' +
+            '</tr>';
+        }).join('');
+        h += card('🎯 买点候选（只推当下是买点的票）', table([
+          { t: '类型/个股' }, { t: '板块' }, { t: '现价', a: 'num' }, { t: '买区(近端)', a: 'num' }, { t: '卖区', a: 'num' }, { t: '综合分', a: 'num' }, { t: '板块加成', a: 'num' }, { t: '买点状态' }
+        ], crows), '收拢连板/趋势/波段三池，只留「可买/微超」；综合分=基础分+板块强度加权（今日强势板块自动加分）。给卖点无意义，故只列当下可介入区间。');
+      } else {
+        h += card('🎯 买点候选', '<div class="empty">今日无明确买点候选</div>', '');
+      }
+
+      /* ③ 板块强弱 + 竞价强弱 */
+      var bsKeys = Object.keys(BS).sort(function (a, b) { return BS[b] - BS[a]; });
+      var bsRows = bsKeys.map(function (k) {
+        var v = BS[k];
+        var col = v > 0 ? 'var(--up)' : (v < 0 ? 'var(--down)' : 'var(--muted)');
+        var w = Math.min(100, Math.abs(v) * 5);
+        return '<tr><td>' + E(k) + '</td>' +
+          '<td class="num" style="color:' + col + ';font-weight:700">' + (v > 0 ? '+' : '') + f(v, 0) + '</td>' +
+          '<td style="width:40%"><div style="height:8px;background:var(--card-2);border-radius:4px;overflow:hidden"><div style="width:' + w + '%;height:100%;background:' + col + '"></div></div></td></tr>';
+      }).join('');
+      if (bsRows) h += card('📊 板块强弱（综合打分依据）', table([{ t: '板块' }, { t: '强度', a: 'num' }, { t: '强弱' }], bsRows), '融合主线/强势板块 + 主力净流入/流出；强度越高，该板块内推荐票综合分加成越大。');
+      var PP = D.preopen_plan || {};
+      if (PP && typeof PP === 'object') {
+        var bits = [];
+        if (PP.tone) bits.push('竞价定调：' + E(PP.tone));
+        if (PP.auction_read) bits.push('竞价解读：' + E(PP.auction_read));
+        if (bits.length) h += card('⚡ 竞价强弱', '<div class="note">' + bits.join('<br>') + '</div>', '盘前竞价强弱，给开盘定调；完整盘前计划在当日盘前推送。');
+      }
+      if (!bsRows && !(PP && (PP.tone || PP.auction_read))) h += card('📊 板块/竞价', '<div class="empty">暂无板块强弱数据</div>', '');
+      return h;
+    }
+
+    var views = { overview: viewOverview, watch: viewWatch, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings, buypoint: viewBuypoint, sim: viewSim, pushcenter: viewPushCenter, pushmode: viewPushMode };
     function viewBuypoint() {
       /* 买点候选为每日构建注入 data["buy_points"] 的结构化数据（趋势加速优先），
          原生 SPA 渲染（替代 iframe），红=买入/优先、绿=卖出/回避，与全站配色一致。
