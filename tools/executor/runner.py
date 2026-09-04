@@ -47,9 +47,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from exec_core import (fetch_user_data, extract_signals, realtime_quote,
                        auction_gate, late_gate, market_gate, SITE,
                        apply_seat_avoid, apply_ladder_avoid, refine_buy_zone,
-                       position_cap, late_session_maps,
-                       assert_data_fresh, data_date)
+                       refine_sell_zone, position_cap, late_session_maps,
+                       chase_gate, assert_data_fresh, data_date)
 from risk_gate import RiskGate
+import risk_gate
 import broker_sim
 import strategy
 
@@ -463,6 +464,12 @@ def _notify_now(cfg, title, text, allowed=None):
     """
     if allowed is None:
         allowed = {"all", "sim"}   # runner 推送均为模拟盘操作类
+    # 2026-09-05 测试隔离红线：EXE_NO_PUSH=1（离线测试）时拦截一切真实外发推送
+    # ——此前只挡 sim_review 仓库回传，_act_notify/_notify 仍会真实外发
+    # （2026-09-05 实证：_scan_buys 单测触发「盘中机动买入」推送到真实接收人）。
+    if os.environ.get("EXE_NO_PUSH"):
+        _log("EXE_NO_PUSH=1，拦截真实推送（测试模式）：%s" % title)
+        return
     results = []
     ncfg = cfg.get("notify") or {}
     _recips = []   # 收件人维度（供推送面板可视化）：[{channel,name,scope}]
@@ -666,9 +673,11 @@ def _ledger_mark(task):
 
 
 def _ledger_missing(date=None):
-    """当日缺失的必备任务（用于复盘时自检「调度缺口」并上报）。"""
+    """当日缺失的必备任务（用于复盘时自检「调度缺口」并上报）。
+    2026-09-05 #484：补 tail——14:45 尾盘确认通道此前不在自检清单里，
+    漏投递时复盘只报 now/scan 缺口，尾盘静默落空无从发现。"""
     d = date or time.strftime("%Y-%m-%d")
-    miss = [t for t in ("now", "scan") if not _ledger_done(t, date=d)]
+    miss = [t for t in ("now", "scan", "tail") if not _ledger_done(t, date=d)]
     return miss
 
 
@@ -1371,25 +1380,39 @@ def run_once(cfg, force=False):
 
 def _daily_loss_check(broker, cfg, gate=None, label=""):
     """当日亏损熔断检查（2026-08-31 修复：risk_gate.check_daily_loss 从未被调用，
-    -3% 熔断线形同虚设）。用总资产相对初始资金回撤口径近似当日组合亏损；
-    触发即写入 risk_state.json 熔断，之后所有 BUY 被 check() 拦截（SELL 不受限，
-    持仓仍按卖出策略独立裁决——熔断保护的是开仓，不是把持仓锁死在亏损里）。"""
+    -3% 熔断线形同虚设）。触发即写入 risk_state.json 熔断，之后所有 BUY 被
+    check() 拦截（SELL 不受限，持仓仍按卖出策略独立裁决——熔断保护的是
+    开仓，不是把持仓锁死在亏损里）。
+
+    2026-09-05 #482 口径修复（致命）：旧实现用「总资产/初始资金-1」（累计收益）
+    当「当日组合亏损」喂入——模拟盘累计回撤 3%（跨数日累积形成）即触发熔断，
+    且当时熔断永不自动复位 → 模拟盘永久停摆。正确口径：
+      当日亏损 = 现总资产 / 当日开盘基准 - 1
+    当日开盘基准在「当日首次调用本函数」时落盘（risk_state.day_base），
+    之后所有轮次共用；跨日由 RiskGate.__init__ 自动作废重置。"""
     try:
         bal = broker.balance()
-        init = broker_sim._initial_cash()
-        if not init or not bal.get("total"):
+        total = bal.get("total")
+        if not total:
             return None
-        pnl_pct = (bal["total"] / init - 1) * 100
+        base = risk_gate.day_base()
+        if base is None or base <= 0:
+            # 当日首次：以当前总资产为当日基准（开盘后首轮巡逻即锚定；
+            # 此后当日亏损就是相对该锚的回撤——正是「当日组合亏损」的语义）
+            risk_gate.set_day_base(total)
+            base = total
+            _log("当日开盘基准已锚定：%.0f 元" % total)
+        pnl_pct = (total / base - 1) * 100
         if gate is None:
             gate = RiskGate((cfg.get("risk") or {}))
         was = gate.tripped
         gate.check_daily_loss(pnl_pct)
         if gate.tripped and not was:
-            _act_notify(cfg, "🛑 熔断触发：%s（组合回撤 %.2f%%）" % (label, pnl_pct),
-                        "**当日组合回撤 %.2f%% 已触发熔断线 %.2f%%**\n\n"
+            _act_notify(cfg, "🛑 熔断触发：%s（当日组合亏损 %.2f%%）" % (label, pnl_pct),
+                        "**当日组合亏损 %.2f%% 已触发熔断线 %.2f%%**\n\n"
                         "- 今日剩余时段不再开新仓（BUY 全部拦截）\n"
                         "- 持仓卖出裁决不受影响，止损照常执行\n"
-                        "- 恢复方式：人工删除 risk_state.json 的 circuit_break"
+                        "- 熔断为当日熔断：次日自动复位（连亏纪律另行约束）"
                         % (pnl_pct, (cfg.get("risk") or {}).get("daily_loss_stop_pct", -3.0)))
         return pnl_pct
     except Exception as e:
@@ -1644,19 +1667,22 @@ def _in_trading_window():
 
 
 def run_scan(cfg, force=False):
-    """盘中巡逻通道（2026-08-31 用户需求：模拟盘不只三个时点，全时段都可操作）。
+    """盘中巡逻通道（2026-08-31 用户需求：模拟盘不只三个时点，全时段都可操作；
+    2026-09-05 #481 升级：巡逻通道加机动买入——交易日交易时段全时段可根据
+    判断买入卖出）。
 
-    在交易时段内被反复触发（executor.yml 每 30 分钟一轮 cron）：
+    在交易时段内被反复触发（executor.yml 每 20-30 分钟一轮 cron）：
       A. 持仓卖出裁决：复用 sell_decision 全规则（断板卖/高开低走锁定/日内+5%
-         落袋/-3% 止损/3 日清仓）——盘中触发比等 14:45 少承受一段回撤；
-      B. 当日买入炸板保护：今日买入的票若盘中炸板（现价较开盘跌 ≥3%）即时止损
-         （与 tailgate 深亏止损同口径，但时点提前到盘中任意时刻）；
-      C. 熔断监控：_daily_loss_check 每轮喂组合回撤，越线立即熔断拦截后续开仓。
+         落袋/统一硬止损-3%/3 日清仓）+ 区间止损止盈第二道闸——盘中触发比等
+         14:45 少承受一段回撤；
+      B. 盘中机动买入（2026-09-05）：chase_gate 盘中形态确认（微红横盘）+
+         auction_gate 开盘纪律 + 全链风控，竞价判 WATCH 的票盘中走出确认形态
+         即可上车，金额 0.7 折控敞口；
+      C. 熔断监控：_daily_loss_check 每轮喂**当日**组合亏损（2026-09-05 口径
+         修复：当日开盘基准锚定，不再拿累计回撤误熔断），越线当日熔断。
 
-    降噪原则：无动作轮次只写 CI 日志留痕，不推送（推送杂乱是用户明确反对的）；
-    有 SELL 成交才推「盘中巡逻回报」。开仓不在巡逻轮做——竞价决策线是开盘时点
-    信号（gap 以开盘价计），盘中重跑会拿现价当开盘价误判，入场仍由 09:25 通道
-    与 14:45 尾盘确认两个回测过的时点负责。
+    降噪原则：无动作轮次只写 CI 日志留痕，不推送（用户红线：不要重复的
+    「卖0买0」消息）；有成交动作才推「盘中巡逻回报」。每笔操作先推后执行。
     """
     acc = cfg.get("account") or {}
     if not acc.get("user_id") or not acc.get("passwd"):
@@ -1680,17 +1706,224 @@ def run_scan(cfg, force=False):
         exec_state_save()
 
 
+# ---------------- 盘中巡逻数据缓存（2026-09-05 #481）----------------
+# 线上 data（fetch+解密 200k 次 PBKDF2，CPU 数秒）+ 实时行情每轮巡逻都重复
+# 拉一遍既慢又多一重 403 风险。缓存当日 data 到进程内（同轮卖出+买入共用），
+# 行情按需实时拉（价格必须最新）。cron 每 20-30 分钟一轮、每轮新进程 →
+# 缓存即「本轮内复用」，跨轮天然过期，无需 TTL。
+_SCAN_CACHE = {"date": None, "data": None}
+
+
+def _scan_data_load(cfg, force=False):
+    """拉线上数据（巡逻通道用，带当日缓存）。返回 (data, sigs, mkt, data_ok)。
+
+    与 _run_once_inner 同链：fetch → assert_data_fresh → extract_signals →
+    market_gate。失败返回 (None, [], NORMAL, False)——巡逻买入顺延，卖出照常。
+    """
+    acc = cfg.get("account") or {}
+    if not (acc.get("user_id") and acc.get("passwd")):
+        return None, [], {"mode": "NORMAL", "reason": ""}, False
+    today = time.strftime("%Y-%m-%d")
+    if _SCAN_CACHE.get("date") == today and _SCAN_CACHE.get("data"):
+        d = _SCAN_CACHE["data"]
+        return d, extract_signals(d), market_gate(d), True
+    try:
+        d = fetch_user_data(acc["user_id"], acc["passwd"])
+        assert_data_fresh(d, force=force)
+        _SCAN_CACHE.update({"date": today, "data": d})
+        _log("巡逻数据就绪：%s（信号 %d 条）" % (data_date(d) or "?", len(extract_signals(d))))
+        return d, extract_signals(d), market_gate(d), True
+    except Exception as e:
+        _log("巡逻数据拉取失败（买入顺延，卖出照常）：%r" % e)
+        _SCAN_CACHE.update({"date": None, "data": None})
+        return None, [], {"mode": "NORMAL", "reason": ""}, False
+
+
+def _scan_buys(broker, cfg, sigs, mkt, data=None):
+    """盘中机动买入（2026-09-05 #481：用户需求「交易日交易时段全时段都可根据
+    判断买入」）。
+
+    决策链与 09:25 开仓通道同构，但形态门换用 chase_gate（盘中微红横盘确认，
+    与尾盘 late_gate 同口径回测）：
+      auction_gate（开盘 gap 纪律：涨停体系须高开≥2%/st2 须≥5%，低开≤-2% 回避；
+                   趋势票平开微红才 BUY、高开 WATCH——正好把接力留给本通道）
+      → chase_gate（盘中形态：fade≤-3% 不接飞刀 / fade>5% 不追透支 /
+                    0~+2% 微红横盘确认 BUY）
+      → 席位/梯队回避 → strategy_filter 分级 → can_buy 可成交性
+      → 持仓幂等 → refine_buy_zone 区间精修 → 仓位（grade_pct × intraday_cut 0.7）
+      → RiskGate.check → buy_limit 实时价成交
+
+    与 09:25 通道的分工：09:25 只做竞价时点信号（gap 以开盘价计的强高开跟进）；
+    本通道接「竞价判 WATCH 的票盘中形态确认」——平开/微高开的票等盘中走出
+    微红横盘再上，不追开盘溢价，也不接盘中走弱的飞刀。
+    降噪：无成交轮次只留痕不推送；每笔成交前 _act_notify 先推后买（用户纪律）。
+    """
+    lines, n_buy = [], 0
+    if mkt.get("mode") == "FREEZE":
+        _log("巡逻买入：大盘环境 FREEZE，本轮不开新仓")
+        return ["- 🧊 巡逻 FREEZE：%s" % mkt.get("reason", "")], 0
+    if not sigs:
+        return lines, 0
+    codes = [s["code"] for s in sigs]
+    try:
+        quote = realtime_quote(codes)
+    except Exception as e:
+        _log("巡逻买入行情失败：%r" % e)
+        return lines, 0
+    if not quote:
+        return lines, 0
+    gate = RiskGate((cfg.get("risk") or {}))
+    bal = broker.balance() if hasattr(broker, "balance") else {}
+    total = bal.get("total")
+    # 盘中机动买入仓位折扣：形态确认时点晚于竞价时点，隔夜溢价空间已被
+    # 吃掉一部分 → 金额打 0.7 折（config 可调 intraday_cut）
+    intraday_cut = float((cfg.get("risk") or {}).get("intraday_cut") or 0.7)
+    caution_cut = 0.5 if mkt.get("mode") == "CAUTION" else 1.0
+
+    def _track(code, name, action, reason):
+        if hasattr(broker, "record_decision"):
+            broker.record_decision(code, action, reason, name or "")
+
+    for s in sigs:
+        # ① 竞价纪律（开盘 gap）：低开≤-2% 回避；涨停体系高开≥2 的票 09:25
+        #    已处理过（BUY 或买不进），此处 WATCH 才进②；趋势票高开也 WATCH 进②
+        av = auction_gate(s, quote)
+        if av["verdict"] == "ABORT":
+            _track(av["code"], av.get("name"), "SKIP", "巡逻:" + av["reason"])
+            continue
+        # ② 盘中形态门
+        v = chase_gate(s, quote)
+        if v["verdict"] != "BUY":
+            _track(v["code"], v.get("name"), "WATCH", "巡逻:" + v["reason"])
+            continue
+        # ③ 席位/梯队回避
+        if data is not None:
+            _sk, _sw = apply_seat_avoid(v, data)
+            if _sk:
+                _track(v["code"], v.get("name"), "SKIP", "巡逻席位回避:" + _sw)
+                continue
+            _lk, _lw = apply_ladder_avoid(v, data)
+            if _lk:
+                _track(v["code"], v.get("name"), "SKIP", "巡逻梯队回避:" + _lw)
+                continue
+        # ④ 分级
+        q = quote.get(v["code"]) or {}
+        sf = strategy.strategy_filter(v, q, q.get("float_mv") or None)
+        if sf["grade"] == "X":
+            _track(v["code"], v.get("name"), "SKIP", "巡逻分级过滤:%s" % sf["reason"])
+            continue
+        # ⑤ 可成交性（盘中封板买不进）
+        cb = strategy.can_buy(q, v["code"])
+        if not cb["ok"]:
+            _track(v["code"], v.get("name"), "SKIP", "巡逻买不进:%s" % cb["reason"])
+            continue
+        # ⑥ 持仓幂等（数据库层）
+        try:
+            held = [p for p in (broker.positions(open_only=True) or [])
+                    if p.get("code") == v["code"]]
+        except Exception:
+            held = []
+        if held:
+            _track(v["code"], v.get("name"), "SKIP",
+                   "巡逻持仓幂等：已持有未平仓，不重复建仓")
+            continue
+        # ⑦ 区间精修
+        if data is not None:
+            _zv, _zw, _zstop = refine_buy_zone(v, quote, data)
+            if _zv != "BUY":
+                _track(v["code"], v.get("name"), "WATCH", "巡逻区间精修:" + _zw)
+                continue
+            if _zstop:
+                v = dict(v, stop=_zstop)
+        # ⑧ 仓位（grade_pct × intraday_cut × caution_cut）
+        _gp = gate.cfg.get("grade_pct") or {"A": 0.65, "B": 0.55, "T": 0.50, "C": 0.30}
+        _pct = _gp.get(sf["grade"], 0.25)
+        if total:
+            amount = int(total * _pct * intraday_cut * caution_cut)
+            try:
+                _cash = float((bal or {}).get("cash") or 0)
+            except Exception:
+                _cash = 0
+            amount = int(min(amount, gate.cfg["max_trade_amount"],
+                             total * gate.cfg["max_position_pct"],
+                             _cash * 0.95 if _cash > 0 else amount))
+        else:
+            amount = int(gate.cfg["max_trade_amount"] * _pct * intraday_cut * caution_cut)
+        # ⑨ 总仓位系数
+        if data is not None:
+            _pc = position_cap(data)
+            if _pc < 1.0:
+                amount = int(amount * _pc)
+        # ⑩ 风控闸门
+        cur_pos = len(broker.positions(open_only=True) or []) if hasattr(broker, "positions") else 0
+        chk = gate.check(v, total, cur_pos)
+        if not chk["ok"]:
+            if "幂等" in chk["reason"]:
+                continue  # 09:25 已买，正常
+            _track(v["code"], v.get("name"), "SKIP", "巡逻风控拒绝:%s" % chk["reason"])
+            continue
+        price = q.get("price") or 0
+        if price <= 0:
+            continue
+        # 操作前推送（先推后买）
+        _act_notify(cfg,
+                    "🛰 盘中机动买入 %s(%s) [%s级]" % (v.get("name"), v["code"], sf["grade"]),
+                    "**盘中买入理由**：%s\n\n- 开盘 %+.2f%%｜盘中较开盘 %+.2f%%（微红横盘确认）\n"
+                    "- 实时价 %.2f｜金额 %d 元（占总资产约 %.1f%%）\n"
+                    "- 实证口径：微红横盘桶次日 +3.01%%/红盘率 62.9%%；盘中金额按 0.7 折控敞口\n"
+                    "- 触发通道：盘中巡逻（%s 北京时间）"
+                    % (v["reason"], v.get("open_gap") or 0, v.get("day_fade") or 0,
+                       price, amount,
+                       100.0 * amount / total if total else 0,
+                       time.strftime("%H:%M")))
+        r = broker.buy_limit(v["code"], price, amount, sig=dict(
+            v, reason="盘中机动｜%s" % v["reason"]))
+        ok = "✓" if r.get("ok") else "✗ %s" % r.get("reason")
+        gate.record(v, "BUY", amount, "巡逻:" + ok)
+        if r.get("ok"):
+            n_buy += 1
+            lines.append("- **盘中BUY %s**(%s) %s 开盘%+.2f%% 盘中%+.2f%% 实时价%.2f %d 元"
+                         % (v.get("name"), v["code"], sf["grade"],
+                            v.get("open_gap") or 0, v.get("day_fade") or 0,
+                            price, amount))
+            _log("巡逻买入 %s %s：开盘%+.2f 盘中%+.2f"
+                 % (v["code"], sf["grade"], v.get("open_gap") or 0, v.get("day_fade") or 0))
+        else:
+            _track(v["code"], v.get("name"), "SKIP", "巡逻委托失败:%s" % r.get("reason"))
+    return lines, n_buy
+
+
 def _run_scan_inner(cfg):
     broker, mode = pick_broker(cfg)
     _log("=" * 30 + " 盘中巡逻 %s " % time.strftime("%H:%M") + "=" * 30)
+
+    # ---- B. 盘中机动买入（2026-09-05 #481：全时段可买）----
+    buy_lines, n_buy = [], 0
+    data, sigs, mkt, data_ok = _scan_data_load(cfg)
+    if data_ok and sigs:
+        _log("=" * 30 + " 巡逻机动买入 " + "=" * 30)
+        try:
+            buy_lines, n_buy = _scan_buys(broker, cfg, sigs, mkt, data)
+        except Exception as e:
+            _log("巡逻买入异常（不阻断卖出）：%r" % e)
+    elif data_ok:
+        _log("巡逻买入：无信号")
+    else:
+        _log("巡逻买入：数据未就绪，本轮顺延")
+
+    # ---- A. 持仓卖出裁决 ----
     try:
         poss = broker.positions(open_only=True)
     except Exception as e:
         _log("巡逻：持仓读取失败：%r" % e)
+        _daily_loss_check(broker, cfg, label="盘中巡逻")
         return
     if not poss:
         _log("巡逻：无持仓，仅做熔断监控")
-        _daily_loss_check(broker, cfg, label="盘中巡逻")
+        pnl = _daily_loss_check(broker, cfg, label="盘中巡逻")
+        if not n_buy:
+            _log("巡逻：本轮无动作（无持仓，组合当日 %s）"
+                 % (("%.2f%%" % pnl) if pnl is not None else "n/a"))
         return
 
     codes = [p["code"] for p in poss]
@@ -1717,13 +1950,17 @@ def _run_scan_inner(cfg):
         except Exception as e:
             _log("巡逻：策略异常 %s：%r" % (p["code"], e))
             continue
+        # 区间止损/止盈第二道闸（data 可用时；策略 HOLD 时再补一刀）
+        if data is not None and dec.get("verdict") not in ("SELL",):
+            try:
+                _zv, _zp, _zr = refine_sell_zone(p, q, data)
+                if _zv == "SELL":
+                    dec = {"verdict": "SELL", "price": _zp, "reason": _zr}
+                    _log("巡逻区间增强卖出 %s：%s" % (p["code"], _zr))
+            except Exception as e:
+                _log("巡逻区间增强异常 %s：%r" % (p["code"], e))
         pnl_pct = ((q.get("price") / p["avg_price"] - 1) * 100) \
             if (q and q.get("price") and p.get("avg_price")) else None
-        # 2026-09-01 T+1 修复：今日买入的票（buy_date==today）已由 sell_decision
-        # 顶部 T+1 守卫锁住（返回 HOLD），此处的「炸板保护」若对今日买入票强卖，
-        # 就是 T+1 违规（用户实证：楚天龙/勤上股份 09:26 买入当日被卖）。
-        # 原逻辑：今日买入票炸板（较开盘跌≥3%）→ 即时止损——已移除（A 股 T+1
-        # 当日买不可卖）。炸板票最早明日按 sell_decision 规则裁决。
         if dec["verdict"] == "SELL" and dec.get("price"):
             cs = strategy.can_sell(q, p["code"])
             if not cs["ok"]:
@@ -1734,12 +1971,15 @@ def _run_scan_inner(cfg):
                 act_lines.append("- ⛔ %s(%s) 拟卖被拒：%s"
                                  % (p.get("name"), p["code"], cs["reason"]))
                 continue
+            # 2026-09-05 #484 降噪：跌停顺延等被拒场景每轮巡逻会重复出现，
+            # 推送按 票+日 去重（同票同日只推一次被拒提醒）
             _act_notify(cfg,
                         "🔔 操作前确认：盘中卖出 %s(%s)" % (p.get("name"), p["code"]),
                         "**卖出理由**：%s\n\n- 现价 %.2f｜成本 %.2f｜浮盈 %s\n- 触发通道：盘中巡逻（%s 北京时间）"
                         % (dec["reason"], dec["price"], p["avg_price"],
                            ("%.2f%%" % pnl_pct) if pnl_pct is not None else "—",
-                           time.strftime("%H:%M")))
+                           time.strftime("%H:%M")),
+                        dedup_key="scan_sell_reject_%s_%s" % (p["code"], today))
             r = broker.sell_limit(p["code"], dec["price"], sig={
                 "name": p.get("name"), "reason": dec["reason"], "source": "scan"})
             if r.get("ok"):
@@ -1757,15 +1997,21 @@ def _run_scan_inner(cfg):
                                        "巡逻复核：%s" % dec["reason"],
                                        p.get("name") or "", dec.get("price") or 0, pnl_pct)
 
-    # 熔断监控每轮必跑（含无动作轮）
+    # ---- C. 熔断监控 ----
     pnl = _daily_loss_check(broker, cfg, label="盘中巡逻")
 
-    if n_sold:
-        _notify(cfg, "🛰 盘中巡逻回报（卖出 %d 笔）" % n_sold,
+    # ---- 推送：有动作才推（SELL 成交 / 盘中买入），无动作只留痕 ----
+    if n_sold or n_buy:
+        parts = []
+        if n_sold:
+            parts.append("**卖出（%d 笔）**\n%s" % (n_sold, "\n".join(act_lines)))
+        if n_buy:
+            parts.append("**盘中机动买入（%d 笔）**\n%s" % (n_buy, "\n".join(buy_lines)))
+        _notify(cfg, "🛰 盘中巡逻回报（卖%d 买%d）" % (n_sold, n_buy),
                 "**%s 北京时间盘中巡逻**\n\n%s" % (time.strftime("%H:%M"),
-                                                  "\n".join(act_lines)))
+                                                    "\n\n".join(parts)))
     else:
-        _log("巡逻：本轮无动作（持仓 %d 笔，组合回撤 %s）"
+        _log("巡逻：本轮无成交动作（持仓 %d 笔，组合当日 %s）"
              % (len(poss), ("%.2f%%" % pnl) if pnl is not None else "n/a"))
 
 
@@ -2240,7 +2486,7 @@ def run_review(cfg=None, push=True, force=False):
     try:
         miss = _ledger_missing()
         if miss:
-            name = {"now": "09:25 开仓通道", "scan": "盘中巡逻"}
+            name = {"now": "09:25 开仓通道", "scan": "盘中巡逻", "tail": "14:45 尾盘确认"}
             lines.append("")
             lines.append("**⚠ 调度缺口**：今日 %s 未执行（cron 未送达或容器故障），"
                          "模拟盘的「无成交」不代表无信号——请核对 Actions 运行记录。"

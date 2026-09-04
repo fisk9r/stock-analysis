@@ -28,7 +28,8 @@ DEFAULTS = {
 
 
 def _default_state():
-    return {"trades": [], "circuit_break": None, "day": "", "orders_today": 0}
+    return {"trades": [], "circuit_break": None, "day": "", "orders_today": 0,
+            "day_base": None}
 
 
 def _load_state():
@@ -60,6 +61,42 @@ def _save_state(st):
     json.dump(st, open(STATE_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
 
+def day_base():
+    """当日开盘基准总资产（2026-09-05 #482：熔断口径从「累计回撤」改「当日亏损」）。
+
+    旧口径 bug：_daily_loss_check 用 total/init_cash-1（累计收益）当「当日组合
+    亏损」喂 check_daily_loss——模拟盘累计回撤 3%（可能由数日累积、甚至某日
+    亏损后一直没恢复）即触发熔断，且熔断永不自动复位 → 永久停摆。
+    正确口径：当日亏损 = 现总资产 / 当日开盘基准 - 1。
+    基准在「当日首次查询」时落盘（risk_state.day_base），当日内所有轮次共用，
+    次日 RiskGate.__init__ 跨日重置 day 时同步作废。
+    """
+    st = _load_state()
+    today = time.strftime("%Y-%m-%d")
+    base = st.get("day_base") or {}
+    val = base.get("total") if (base or {}).get("date") == today else None
+    if val is None or val <= 0:
+        # 首次查询：落盘当日基准（不覆盖已有当日值——并发轮次安全）
+        st["day_base"] = {"date": today, "total": float(val or 0)}
+        # 调用方先写真实基准：见 set_day_base；这里读不到就返回 None
+        b = st.get("day_base") or {}
+        v2 = b.get("total") if (b or {}).get("date") == today else None
+        if not v2 or v2 <= 0:
+            return None
+        return float(v2)
+    return float(val)
+
+
+def set_day_base(total: float):
+    """记录当日开盘基准总资产（当日已有值则保留，幂等）。"""
+    st = _load_state()
+    today = time.strftime("%Y-%m-%d")
+    base = st.get("day_base") or {}
+    if base.get("date") != today or not base.get("total"):
+        st["day_base"] = {"date": today, "total": float(total)}
+        _save_state(st)
+
+
 class RiskGate:
     def __init__(self, config=None):
         cfg = dict(DEFAULTS)
@@ -70,6 +107,18 @@ class RiskGate:
         if self.state.get("day") != today:
             self.state["day"] = today
             self.state["orders_today"] = 0
+            # 2026-09-05 #482 修复（熔断跨日不自动复位）：daily_loss_stop 的语义
+            # 是「当日组合亏损熔断线」——当日熔断当日止。旧实现 trip() 后永不
+            # 自动复位（恢复需人工删 risk_state.json 的 circuit_break），
+            # 纯云端托管下用户不开电脑 → 一旦熔断（甚至误熔断，见下）模拟盘
+            # 永久停摆。跨日时自动清除熔断：每日开闸一次，熔断保护的是
+            # 「当日剩余时段不再开新仓」，不是「从此永不再开仓」。
+            # （连亏纪律 loss_streak ≥3 暂停开新仓的跨日约束仍然生效，兜底仍在。）
+            if self.state.get("circuit_break"):
+                self.state["circuit_break"] = None
+            # 2026-09-05 #482：当日开盘基准同步作废（跨日重置）
+            if (self.state.get("day_base") or {}).get("date") != today:
+                self.state["day_base"] = None
             _save_state(self.state)
 
     @property
@@ -77,7 +126,9 @@ class RiskGate:
         return self.state.get("circuit_break") is not None
 
     def trip(self, reason: str):
-        """熔断：写盘 + 不再自动复位。恢复需人工删 risk_state.json 里的 circuit_break。"""
+        """熔断：写盘。当日剩余时段拦截所有 BUY（SELL 不受限）。
+        2026-09-05 #482：跨日由 __init__ 自动复位（当日熔断当日止），
+        不再需要人工删 risk_state.json 的 circuit_break。"""
         self.state["circuit_break"] = {
             "at": time.strftime("%Y-%m-%d %H:%M:%S"), "reason": reason}
         _save_state(self.state)
@@ -101,10 +152,17 @@ class RiskGate:
                     "reason": "熔断中（%s：%s），人工恢复后才可交易"
                               % (cb["at"], cb["reason"]), "amount": 0}
         code = sig.get("code")
-        # 幂等：同 code 当日已委托则拒绝
-        today_trades = [t for t in self.state["trades"] if t.get("date") == self.state["day"]]
+        # 幂等：同 code 当日已**委托买入**则拒绝。
+        # 2026-09-05 #481 修复（幂等误杀）：旧实现查「当日 trades 里出现该 code 的
+        # 任何记录」——WATCH/SKIP/REJECT 也算。后果：09:25 竞价判 WATCH（平开观望）
+        # 的票，14:45 尾盘确认或盘中巡逻轮到达买点时被「今日已委托」误拒，静默
+        # 跳过——多时点机动买入形同虚设。幂等的语义边界是「已真实买入的票不再买」，
+        # 观望/放弃留痕不锁单（等形态确认后各通道仍可买）。
+        today_trades = [t for t in self.state["trades"]
+                        if t.get("date") == self.state["day"]
+                        and t.get("verdict") == "BUY"]
         if any(t.get("code") == code for t in today_trades):
-            return {"ok": False, "reason": "幂等拒绝：%s 今日已委托" % code, "amount": 0}
+            return {"ok": False, "reason": "幂等拒绝：%s 今日已买入" % code, "amount": 0}
         # 最多持仓只数（3331/3322 分仓上限）
         if current_positions is not None and current_positions >= self.cfg["max_positions"]:
             return {"ok": False,
@@ -138,7 +196,9 @@ class RiskGate:
         _save_state(self.state)
 
     def check_daily_loss(self, pnl_pct: float):
-        """盘中组合亏损检查（由 runner 定期喂当日浮盈 %）。"""
+        """盘中组合亏损检查（由 runner 定期喂**当日**浮亏 %——非累计口径，
+        2026-09-05 #482：累计收益当当日亏损喂入会把「历史回撤」误判成
+        「今日爆亏」，触发不必要的熔断且永不复位）。"""
         if pnl_pct <= self.cfg["daily_loss_stop_pct"] and not self.tripped:
             self.trip("当日组合亏损 %.2f%% 触发熔断线 %.2f%%"
                       % (pnl_pct, self.cfg["daily_loss_stop_pct"]))

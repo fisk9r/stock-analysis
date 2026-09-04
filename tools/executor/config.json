@@ -23,7 +23,9 @@
   "max_trade_amount": 60000,
   "daily_loss_stop_pct": -3.0,
   "enabled": true,
-  "grade_pct": {"A": 0.65, "B": 0.55, "T": 0.50, "C": 0.30}
+  "grade_pct": {"A": 0.65, "B": 0.55, "T": 0.50, "C": 0.30},
+  "intraday_cut": 0.7,
+  "_hint2": "intraday_cut：盘中机动买入金额折扣（形态确认晚于竞价时点，隔夜溢价已被部分吃掉 → 0.7 折控敞口；1.0 = 与 09:25 同仓）"
  },
  "schedule": {
   "auction_time": "09:26",

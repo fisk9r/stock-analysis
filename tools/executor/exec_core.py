@@ -571,6 +571,50 @@ def position_cap(data):
     return 1.0
 
 
+def chase_gate(sig: dict, quote: dict) -> dict:
+    """盘中机动买入形态门（2026-09-05 #481：用户需求「交易日交易时段全时段
+    都可以根据判断买入卖出」）。
+
+    巡逻通道（--scan）对候选票做的盘中形态裁决——语义与 late_gate「微红横盘
+    确认」同口径，时点从 14:45 提前到盘中任意巡逻轮：
+      · fade（现价较当日开盘偏移）≤ -3% → ABORT（盘中走弱/炸板，不接飞刀；
+        与尾盘深亏桶同源：过夜次日 -0.31%/红盘率 44.9%）
+      · fade > +5% → WATCH（盘中强拉透支，不追；与尾盘强拉桶同源 +0.62%）
+      · 0 ≤ fade ≤ +2% → BUY（微红横盘不回补，最强过夜形态的盘中版：
+        尾盘口径次日 +3.01%/红盘率 62.9%，盘中确认越早越贴近该桶）
+      · 其余（-3~0 / +2~5）→ WATCH（形态未确认，等下一轮巡逻再看）
+
+    趋势票（market_type=trend）同口径——趋势延续的确认形态就是「当日微红
+    横盘」，与 late_gate trend 分支完全一致；区别只在于趋势票不要求开盘溢价
+    （由调用方控制：涨停体系票须先过 auction_gate 的 gap≥2 门槛，趋势票
+    只须 auction_gate 非 ABORT——低开≤-2% 回避）。
+
+    返回 {code, name, verdict, open_gap, day_fade, reason}。
+    """
+    q = quote.get(sig["code"]) or {}
+    prev_close = q.get("prev_close") or sig.get("close") or 0
+    opn = q.get("open") or 0
+    cur = q.get("price") or 0
+    if not prev_close or not opn or not cur:
+        return dict(sig, verdict="ABORT", open_gap=None, day_fade=None,
+                    reason="无有效行情")
+    gap = (opn / prev_close - 1) * 100
+    fade = (cur / opn - 1) * 100
+    base = dict(sig, open_gap=round(gap, 2), day_fade=round(fade, 2))
+    if fade <= -3:
+        return dict(base, verdict="ABORT",
+                    reason="盘中走弱（较开盘%.2f%%），不接飞刀" % fade)
+    if 0 <= fade <= 2:
+        return dict(base, verdict="BUY",
+                    reason="盘中微红%.2f%%横盘确认 · 最强过夜形态（尾盘口径62.9%%）"
+                           % fade)
+    if fade > 5:
+        return dict(base, verdict="WATCH",
+                    reason="盘中强拉+%.2f%% · 溢价透支，不追" % fade)
+    return dict(base, verdict="WATCH",
+                reason="盘中较开盘%+.2f%% · 形态未确认，观望" % fade)
+
+
 def late_session_maps(data):
     """返回 (watch_codes:set, warn_codes:set) 来自 data['late_session']。
 

@@ -340,6 +340,217 @@ if _ok_intra:
     ck("落库写入 intraday_alerts", _nrow == 1, "rows=%d" % _nrow)
     shutil.rmtree(_tmp2, ignore_errors=True)
 
+# ============ 8. #481/#482：盘中机动买入 + 熔断双漏洞修复（2026-09-05） ============
+print("\n[8] 盘中机动买卖 + 熔断修复（#481/#482/#484）")
+
+# ---- 8.1 chase_gate 盘中形态门 ----
+_cg_sig = {"code": "600111", "name": "形态票", "streak": 3, "close": 10.0,
+           "market_type": "limitup"}
+# 微红横盘（开盘10.0 现价10.1 → fade +1.0%）→ BUY
+_r = exec_core.chase_gate(_cg_sig, {"600111": {"open": 10.0, "price": 10.1, "prev_close": 9.9}})
+ck("chase_gate 微红横盘→BUY", _r["verdict"] == "BUY" and abs(_r["day_fade"] - 1.0) < 0.01, str(_r))
+# 盘中走弱（fade -3.5%）→ ABORT（不接飞刀）
+_r = exec_core.chase_gate(_cg_sig, {"600111": {"open": 10.0, "price": 9.65, "prev_close": 9.9}})
+ck("chase_gate 走弱→ABORT", _r["verdict"] == "ABORT", str(_r))
+# 盘中强拉（fade +5.5%）→ WATCH（不追透支）
+_r = exec_core.chase_gate(_cg_sig, {"600111": {"open": 10.0, "price": 10.55, "prev_close": 9.9}})
+ck("chase_gate 强拉→WATCH", _r["verdict"] == "WATCH", str(_r))
+# 中性（fade -1.5%）→ WATCH
+_r = exec_core.chase_gate(_cg_sig, {"600111": {"open": 10.0, "price": 9.85, "prev_close": 9.9}})
+ck("chase_gate 中性→WATCH", _r["verdict"] == "WATCH", str(_r))
+# 无行情 → ABORT
+_r = exec_core.chase_gate(_cg_sig, {})
+ck("chase_gate 无行情→ABORT", _r["verdict"] == "ABORT", str(_r))
+
+# ---- 8.2 RiskGate 幂等修复：WATCH 留痕不锁单，BUY 才锁 ----
+import importlib as _il
+import risk_gate as _rg
+risk_gate = _rg
+# 用临时状态文件隔离测试
+import tempfile as _tf2
+_tfdir = _tf2.mkdtemp(prefix="risk_")
+_orig = _rg.STATE_PATH
+_rg.STATE_PATH = os.path.join(_tfdir, "risk_state.json")
+_il.reload(_rg)
+# 写入一条 WATCH 记录（模拟 09:25 竞价判观望留痕）
+_rg._save_state({"trades": [{"date": time.strftime("%Y-%m-%d"), "code": "600111",
+                              "verdict": "WATCH", "amount": 0}],
+                 "circuit_break": None, "day": time.strftime("%Y-%m-%d"),
+                 "orders_today": 0, "day_base": None})
+_g = _rg.RiskGate({})
+_chk = _g.check({"code": "600111"}, 100000.0, 1)
+ck("幂等修复：WATCH留痕不锁单", _chk["ok"], str(_chk))
+# BUY 记录才锁单
+_rg._save_state({"trades": [{"date": time.strftime("%Y-%m-%d"), "code": "600111",
+                              "verdict": "BUY", "amount": 10000}],
+                 "circuit_break": None, "day": time.strftime("%Y-%m-%d"),
+                 "orders_today": 1, "day_base": None})
+_g2 = _rg.RiskGate({})
+_chk2 = _g2.check({"code": "600111"}, 100000.0, 1)
+ck("幂等修复：BUY留痕锁单", (not _chk2["ok"]) and "已买入" in _chk2["reason"], str(_chk2))
+# 隔日 BUY 记录不锁今日单（date != today）
+_rg._save_state({"trades": [{"date": "2026-01-01", "code": "600111",
+                              "verdict": "BUY", "amount": 10000}],
+                 "circuit_break": None, "day": time.strftime("%Y-%m-%d"),
+                 "orders_today": 0, "day_base": None})
+_g3 = _rg.RiskGate({})
+_chk3 = _g3.check({"code": "600111"}, 100000.0, 1)
+ck("幂等修复：隔日BUY不锁今日", _chk3["ok"], str(_chk3))
+
+# ---- 8.3 熔断跨日自动复位 ----
+_rg._save_state({"trades": [], "circuit_break": {"at": "2026-09-04 14:00:00",
+                                                  "reason": "昨日熔断"},
+                 "day": "2026-09-04", "orders_today": 3, "day_base": None})
+_g4 = _rg.RiskGate({})   # 构造时跨日 → 自动清熔断
+ck("熔断跨日自动复位", (not _g4.tripped), "state=%s" % _rg._load_state())
+# 当日熔断仍生效（未跨日）
+_rg._save_state({"trades": [], "circuit_break": {"at": time.strftime("%Y-%m-%d %H:%M"),
+                                                  "reason": "当日熔断"},
+                 "day": time.strftime("%Y-%m-%d"), "orders_today": 1,
+                 "day_base": None})
+_g5 = _rg.RiskGate({})
+ck("当日熔断仍生效", _g5.tripped, str(_rg._load_state()))
+
+# ---- 8.4 day_base 当日基准 + 当日口径 ----
+_rg._save_state({"trades": [], "circuit_break": None, "day": time.strftime("%Y-%m-%d"),
+                 "orders_today": 0, "day_base": None})
+ck("day_base 首查None", _rg.day_base() is None)
+_rg.set_day_base(100000.0)
+ck("day_base 落盘", abs(_rg.day_base() - 100000.0) < 1e-9, str(_rg.day_base()))
+_rg.set_day_base(99999.0)   # 当日已有值 → 幂等保留
+ck("day_base 幂等不覆盖", abs(_rg.day_base() - 100000.0) < 1e-9)
+# 当日亏损 -3.1% → 触发熔断（当日口径）
+_g6 = _rg.RiskGate({})
+_g6.check_daily_loss(-3.1)
+ck("当日亏损触发熔断", _g6.tripped)
+# 当日亏损 -2.9% → 不触发
+_rg._save_state({"trades": [], "circuit_break": None, "day": time.strftime("%Y-%m-%d"),
+                 "orders_today": 0, "day_base": {"date": time.strftime("%Y-%m-%d"),
+                                                  "total": 100000.0}})
+_g7 = _rg.RiskGate({})
+_g7.check_daily_loss(-2.9)
+ck("未越线不熔断", not _g7.tripped)
+# 累计回撤但当日不亏（total=97000 基准 97500 当日 +0.5%）→ 不熔断（旧口径必误熔断）
+_g7.check_daily_loss(0.5)
+ck("当日盈利不熔断", not _g7.tripped)
+
+# 还原 risk_gate 状态文件路径（防污染真实 risk_state.json）
+_rg.STATE_PATH = _orig
+_il.reload(_rg)
+shutil.rmtree(_tfdir, ignore_errors=True)
+
+# ---- 8.5 _scan_buys 集成：盘中微红横盘确认买入 ----
+# 临时 sim.db + 隔离 risk_state
+_scbak = _rg.STATE_PATH
+_tfdir2 = _tf2.mkdtemp(prefix="scanbuy_")
+_rg.STATE_PATH = os.path.join(_tfdir2, "risk_state.json")
+_il.reload(_rg)
+import broker_sim as _bs
+_tmpdb2 = os.path.join(_tfdir2, "sim.db")
+_bs.DB_PATH = _tmpdb2
+_bb = _bs.SimBroker()
+# 构造候选：st=3 高开 2.2%（竞价 BUY 线）+ 盘中微红 +0.8%（chase BUY）
+_sigs = [{"code": "600500", "name": "中化国际", "streak": 3, "close": 9.80,
+          "market_type": "limitup", "source": "core", "tag": "core",
+          "auction_rule": ""}]
+def _fake_quote(codes, **kw):
+    return {"600500": {"name": "中化国际", "open": 10.02, "price": 10.10,
+                       "prev_close": 9.80, "high": 10.15, "low": 9.99,
+                       "float_mv": 120.0, "stamp": time.strftime("%Y%m%d") + "103000"}}
+runner.realtime_quote = _fake_quote
+_scan_cfg = {"broker": "sim",
+             "risk": {"max_positions": 4, "max_trade_amount": 60000,
+                      "min_trade_amount": 1000, "daily_loss_stop_pct": -3.0,
+                      "enabled": True, "grade_pct": {"A": 0.65, "B": 0.55, "T": 0.50, "C": 0.30},
+                      "intraday_cut": 0.7},
+             "notify": {}}
+_mkt = {"mode": "NORMAL", "reason": "测试"}
+_bl, _nb = runner._scan_buys(_bb, _scan_cfg, _sigs, _mkt, data=None)
+ck("_scan_buys 盘中确认买入成交", _nb == 1, "n_buy=%s lines=%s" % (_nb, _bl))
+if _nb == 1:
+    _pos = [p for p in _bb.positions(open_only=True) if p["code"] == "600500"]
+    ck("_scan_buys 持仓入库", len(_pos) == 1, str(len(_pos)))
+    ck("_scan_buys 金额0.7折", 0 < (_pos[0].get("volume") * _pos[0].get("avg_price", 0)) 
+       <= 100000 * 0.65 * 0.7 + 1, str(_pos[0]))
+# 同票二次巡逻：持仓幂等拒绝
+_bl2, _nb2 = runner._scan_buys(_bb, _scan_cfg, _sigs, _mkt, data=None)
+ck("_scan_buys 持仓幂等", _nb2 == 0, "n_buy=%s" % _nb2)
+# 盘中走弱（fade -3%）→ ABORT 不买
+def _fake_quote_weak(codes, **kw):
+    return {"600777": {"name": "弱票", "open": 10.0, "price": 9.65,
+                       "prev_close": 9.9, "float_mv": 100.0,
+                       "stamp": time.strftime("%Y%m%d") + "103000"}}
+runner.realtime_quote = _fake_quote_weak
+_sigs2 = [{"code": "600777", "name": "弱票", "streak": 3, "close": 9.9,
+           "market_type": "limitup", "source": "core", "tag": "core",
+           "auction_rule": ""}]
+_bl3, _nb3 = runner._scan_buys(_bb, _scan_cfg, _sigs2, _mkt, data=None)
+ck("_scan_buys 不接飞刀", _nb3 == 0, "n_buy=%s" % _nb3)
+# FREEZE 环境不开新仓
+_mkt_f = {"mode": "FREEZE", "reason": "弱市"}
+_bl4, _nb4 = runner._scan_buys(_bb, _scan_cfg, _sigs, _mkt_f, data=None)
+ck("_scan_buys FREEZE拦截", _nb4 == 0, "n_buy=%s" % _nb4)
+# 清理
+try:
+    _bb.con.close()
+except Exception:
+    pass
+runner.realtime_quote = exec_core.realtime_quote   # 还原
+_bs.DB_PATH = os.path.join(EXE, "sim.db")
+_rg.STATE_PATH = _scbak
+_il.reload(_rg)
+_il.reload(_bs)
+shutil.rmtree(_tfdir2, ignore_errors=True)
+
+# ---- 8.6 _ledger_missing 补 tail ----
+_lj = os.path.join(EXE, "state", "task_ledger.json")
+_ljbak = None
+if os.path.exists(_lj):
+    _ljbak = open(_lj, encoding="utf-8").read()
+os.makedirs(os.path.dirname(_lj), exist_ok=True)
+with open(_lj, "w", encoding="utf-8") as f:
+    json.dump({time.strftime("%Y-%m-%d"): {"now": 1}}, f)   # 只有 now
+_miss = runner._ledger_missing()
+ck("_ledger_missing 含tail", set(_miss) >= {"scan", "tail"}, str(_miss))
+if _ljbak is not None:
+    open(_lj, "w", encoding="utf-8").write(_ljbak)
+else:
+    try:
+        os.remove(_lj)
+    except Exception:
+        pass
+
+# ---- 8.7 executor.yml cron 映射核对：新增 7 轮巡逻 cron 全部落入 scan 分支 ----
+_yml = open(os.path.join(BASE, ".github", "workflows", "executor.yml"),
+            encoding="utf-8").read()
+import re as _re
+_crons = _re.findall(r'cron:\s*"(\d+)\s+(\d+)\s+\*\s+\*\s+1-5"', _yml)
+_crons = [(int(m), int(h)) for m, h in _crons]
+_scan_crons = [(m, h) for m, h in _crons
+               if (h == 1 and m >= 30) or h in (2, 3, 5) or (h == 6 and m < 40)]
+_exp_scan = {35, 40, 0, 15, 30, 45, 0, 15, 30, 15, 30, 45, 0, 15, 30}
+_got = {m for m, h in _scan_crons}
+ck("巡逻cron数=15", len(_scan_crons) == 15, "n=%d" % len(_scan_crons))
+# 映射规则复现（与 executor.yml 判定步骤一致）
+def _map(m, h):
+    if h == 1:
+        return "now" if m < 30 else "scan"
+    if h in (2, 3, 5):
+        return "scan"
+    if h == 6:
+        return "scan" if m < 40 else "tail"
+    if h == 7:
+        return "review"
+    return "?"
+_all_mapped = all(_map(m, h) == "scan" for m, h in _scan_crons)
+ck("新增巡逻cron全部映射scan", _all_mapped,
+   str([(m, h, _map(m, h)) for m, h in _scan_crons]))
+# 尾盘/复盘 cron 不变
+ck("尾盘cron保留", any(m == 43 and h == 6 for m, h in _crons))
+ck("复盘cron保留", any(m == 32 and h == 7 for m, h in _crons))
+# YAML 结构粗校验（缩进/键值）
+ck("yml schedule行数=19", _yml.count("- cron:") == 19, "n=%d" % _yml.count("- cron:"))
+
 print("\n" + "=" * 50)
 print("PASS=%d FAIL=%d" % (len(PASS), len(FAIL)))
 if FAIL:
