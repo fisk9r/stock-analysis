@@ -1656,7 +1656,7 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
 
     # 板块自选：config/notify.json 加 "sections": {"trend":false,...} 可关闭对应小节；
     # 未配置默认全开。可选键：bullets/rec/trend/bull/strat/yaogu/avoid/money/cold/gaps/
-    # dry/nh/glue/sword/style/tail/wl/recperf/lhb/risk/block/margin/etf/patsim
+    # dry/nh/glue/sword/style/tail/wl/recperf/lhb/risk/block/margin/etf/patsim/band
     _sec_cfg = (load_config() or {}).get("sections") or {}
 
     def _on(k):
@@ -2026,6 +2026,20 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         _wrows.append("> **回踩买点**：趋势结构完好但现价高于短线买点，挂单等回踩到位即买（也是买点，"
                       "只是触发条件是价格回到挂单价，而非当下追高）。本次共剔除 %d 只过热/已临卖点票。" % (_gate.get("skipped") or 0))
         _sec("⏳ 回踩买点（挂单价，回踩到位即买）", _wrows)
+    # ---- 波段/阶段底（2026-09-04 新增：非主升浪、反复形成阶段底、当前回到阶段底刚启动反弹）----
+    _bt = data.get("band_trade") or []
+    if _bt and _on("band"):
+        _btrows = []
+        for b in _bt[:8]:
+            _bz = b.get("buy_zone") or [0, 0]
+            _sz = b.get("sell_zone") or [0, 0]
+            _btrows.append(
+                "🔁 **%s**【%s】现价%.2f ｜ 阶段底%.2f(触底%d次·反弹+%.1f%%) ｜ 买%.2f~%.2f 卖%.2f~%.2f 止损%.2f"
+                % (b.get("name", "?"), b.get("board", "—"), b.get("close", 0),
+                   b.get("bottom", 0), b.get("touches", 0), b.get("bounce", 0),
+                   _bz[0], _bz[1], _sz[0], _sz[1], b.get("stop", 0)))
+        _btrows.append("> 波段纪律：低吸「反复确认的 stage 底」、卖在区间上沿；单笔回撤＞8% 止损，持仓≤20交易日。")
+        _sec("🔁 波段/阶段底（低吸反复底）", _btrows)
     # ---- 自选/持仓操作结论（P1/P4：跟着做）----
     _wr = rec.get("watch_reco")
     if _wr and _wr.get("items") and _on("rec"):

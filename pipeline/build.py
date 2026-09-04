@@ -44,6 +44,7 @@ import chanlun
 import signal_backtest
 import zones
 import recveto
+import bandtrade
 
 ROOT = store.ROOT
 DIST = os.path.join(ROOT, "dist")
@@ -837,6 +838,14 @@ def run(date_override=None, dedup_close=False):
         rec["sector_trend"] = []
         rec["mainline_map"] = {}
 
+    # 2026-09-04 新增：波段/阶段底选股（非主升浪、反复形成阶段底、当前回到阶段底刚启动反弹）
+    try:
+        rec["band_trade"] = bandtrade.detect_stage_bottom(u, date, code2boards, topn=8)
+        log("  波段/阶段底选股 %d 只" % len(rec.get("band_trade") or []))
+    except Exception as e:
+        log("  波段/阶段底选股失败（不影响主流程）：%r" % e)
+        rec["band_trade"] = []
+
     # 阶梯
     ladder = {}
     # 短线情绪微观结构（首板/梯队断层/晋级率分档/炸板率/赚钱效应细分）
@@ -964,6 +973,7 @@ def run(date_override=None, dedup_close=False):
         "money": money,
         "backtest": bt,
         "yaogu": yaogu_data,
+        "band_trade": rec.get("band_trade") or [],
     }
 
     # ---- 牛股雷达：多维度独立抓牛股信号（10 种探测器共振）----
@@ -2181,11 +2191,20 @@ def _anomaly_focused(s, new_codes, url, demon_map=None):
     newset = set(new_codes)
     n_zt = [it for it in (s.get("zt") or []) if str(it.get("c")) in newset]
     n_mv = [m for m in (s.get("movers") or []) if str(m.get("f12")) in newset]
+    _c2b = load_code_boards()
     L = []
     L.append("## 🆕 A股盘中新增异动 · %s（%d 只）" % (now, len(new_codes)))
     L.append("")
     L.append(_anomaly_basis_once())
     L.append("")
+    # 2026-09-04：板块急拉速览（涨停+急拉按板块聚合，一眼分辨热点）
+    _surge = ([(str(it.get("c")), it.get("n", "?")) for it in n_zt]
+              + [(str(m.get("f12")), m.get("f14", "?")) for m in n_mv])
+    _ov = board_surge_overview(_surge, _c2b)
+    if _ov:
+        L.append("### 🔥 板块急拉速览（热点一眼辨）")
+        L.extend(_ov)
+        L.append("")
     if n_zt:
         L.append("### 🔥 新封板（%d）" % len(n_zt))
         for it in n_zt[:15]:
@@ -2198,7 +2217,9 @@ def _anomaly_focused(s, new_codes, url, demon_map=None):
             zbc = it.get("zbc") or 0
             tag = ("%d板" % lbc) if lbc and lbc > 1 else "首板"
             warn = " ⚠炸板%d次" % zbc if zbc else ""
-            L.append("- **%s**(/%s) %s · %s · 封板%s%s" % (name, code, tag, hy, fbt_s, warn))
+            _bd = primary_board(code, _c2b)
+            _bd_s = (" ｜ %s" % _bd) if _bd not in ("—", hy) else ""
+            L.append("- **%s**(/%s) %s · %s%s · 封板%s%s" % (name, code, tag, hy, _bd_s, fbt_s, warn))
         L.append("")
     if n_mv:
         L.append("### ⚡ 新急拉/强势（%d）" % len(n_mv))
@@ -2208,7 +2229,9 @@ def _anomaly_focused(s, new_codes, url, demon_map=None):
             main = m.get("f62") or 0
             hs = m.get("f184") or 0
             main_s = ("主力净流入 %.1f亿" % (main / 1e8)) if abs(main) >= 1e7 else "主力净流出 %.1f亿" % (abs(main) / 1e8)
-            L.append("- **%s**(/%s) +%.2f%% ｜ 换手%.1f%% ｜ %s" % (name, code, pct, hs, main_s))
+            _bd = primary_board(code, _c2b)
+            _bd_s = (" ｜ %s" % _bd) if _bd != "—" else ""
+            L.append("- **%s**(/%s) +%.2f%% ｜ 换手%.1f%% ｜ %s%s" % (name, code, pct, hs, main_s, _bd_s))
         L.append("")
     # 关注股盘中异动（网页自选池：涨停/跌停/急拉急跌）
     n_wl = [w for w in (s.get("watch") or []) if str(w.get("c")) in newset]
@@ -2418,6 +2441,74 @@ def _live_watch_movers(threshold=3.0):
     return out
 
 
+# ── 板块速览辅助（2026-09-04 用户需求：急拉/涨停要标板块，按板块聚合速览，一眼分辨热点）──
+_BOARD_CACHE = {}
+# 泛用/噪声板块：聚合速览时剔除，避免「融资融券板块急拉」这类无意义聚合
+_GENERIC_BOARDS = ("昨日", "连板", "涨停", "融资融券", "深股通", "沪股通", "标准普尔", "富时",
+                   "MSCI", "转融券", "机构重仓", "基金重仓", "预盈预增", "创业板综", "深成500",
+                   "中证", "上证", "破净股", "参股", "股权激励", "高送转", "AB股", "AH股",
+                   "昨曾涨停", "证金持股", "社保重仓", "QFII重仓", "长江三角", "西部大开发",
+                   "央国企改革", "国企改革", "中字头", "转债标的", "MSCI中国", "富时罗素",
+                   "标普道琼斯", "中证500", "沪深300", "上证50", "深证成指", "创业板指",
+                   "科创50", "北证50", "ST股", "深股通标的", "沪股通标的", "创业板综",
+                   "昨日涨停", "星闪概念", "养老金持股", "险资持股", "GDR", "同花顺",
+                   "数据中心", "股权转让", "深股通", "沪股通", "融资融券标的",
+                   "HS300", "上证180", "上证380", "深证100", "央视50", "上证红利", "深证红利",
+                   "标普", "MSCI中国", "中证红利", "深证100R")
+
+
+def load_code_boards():
+    """缓存加载 code -> [(bk,name,kind)] 板块归属（来自本地 market.db）。失败返回 {}。"""
+    global _BOARD_CACHE
+    if _BOARD_CACHE:
+        return _BOARD_CACHE
+    try:
+        import sqlite3, store
+        _con = sqlite3.connect(os.path.join(ROOT, "cache", "market.db"))
+        _BOARD_CACHE = store.code_boards(_con)
+        _con.close()
+    except Exception:
+        _BOARD_CACHE = {}
+    return _BOARD_CACHE
+
+
+def primary_board(code, c2b=None):
+    """返回该票最具代表性的板块短名（优先非泛用概念，回退行业；再回退首个）。无则返回 '—'。"""
+    if c2b is None:
+        c2b = load_code_boards()
+    boards = c2b.get(str(code)) or []
+    if not boards:
+        return "—"
+    for _, name, kind in boards:
+        if kind == "concept" and not any(g in name for g in _GENERIC_BOARDS):
+            return name
+    for _, name, kind in boards:
+        if kind == "industry":
+            return name
+    return boards[0][1]
+
+
+def board_surge_overview(codes_with_names, c2b=None, top=8):
+    """把 [(code,name), ...] 按板块聚合，返回 'X板块急拉 N只：a、b、c' 行列表。
+    用于盘中异动速览——一眼看出哪个板块在拉；单只不构成「板块急拉」故过滤。"""
+    if c2b is None:
+        c2b = load_code_boards()
+    from collections import defaultdict
+    grp = defaultdict(list)
+    for code, name in codes_with_names:
+        b = primary_board(code, c2b)
+        if b == "—":
+            continue
+        grp[b].append(name)
+    items = sorted(grp.items(), key=lambda kv: -len(kv[1]))[:top]
+    lines = []
+    for b, names in items:
+        if len(names) < 2:
+            continue
+        lines.append("- 🔥 **%s板块急拉 %d只**：%s" % (b, len(names), "、".join(names[:8])))
+    return lines
+
+
 def _live_anomaly_summary(url, data=None):
     """实时异动：涨停池 + 涨幅榜急拉，生成 Markdown。
     各数据源独立容错：某一路失败仅跳过该段，其余仍实时呈现；全部失败才上抛。
@@ -2425,6 +2516,7 @@ def _live_anomaly_summary(url, data=None):
     接入 zones（自选/持仓）与连板计划的买区映射；模板结构与其它推送统一。"""
     import em_api
     now = time.strftime("%Y-%m-%d %H:%M")
+    _c2b = load_code_boards()
     # 买区映射：zones（关注/持仓票）+ 连板计划（次日竞价介入口径）
     _zone_bz, _plan_bz = {}, {}
     if data:
@@ -2465,7 +2557,9 @@ def _live_anomaly_summary(url, data=None):
             tag = ("%d板" % lbc) if lbc and lbc > 1 else "首板"
             warn = " ⚠炸板%d次" % zbc if zbc else ""
             _plan = " ｜ 📋连板计划标的（次日竞价达标介入）" if code in _plan_bz else ""
-            L.append("- **%s**(/%s) %s · %s · 封板%s%s%s" % (name, code, tag, hy, fbt_s, warn, _plan))
+            _bd = primary_board(code, _c2b)
+            _bd_s = (" ｜ %s" % _bd) if _bd not in ("—", hy) else ""
+            L.append("- **%s**(/%s) %s · %s%s · 封板%s%s%s" % (name, code, tag, hy, _bd_s, fbt_s, warn, _plan))
     else:
         L.append("（当前无涨停标的）")
     L.append("")
@@ -2478,6 +2572,12 @@ def _live_anomaly_summary(url, data=None):
         L.append("> 涨幅榜实时拉取暂不可用：%s" % str(e)[:40])
     movers = [m for m in (mv or []) if 6 <= (m.get("f3") or 0) < 9.8]
     movers.sort(key=lambda x: -(x.get("f3") or 0))
+    # 2026-09-04：板块急拉速览（涨停+急拉按板块聚合，一眼分辨热点），置于详情列表之前
+    _surge = ([(str(it.get("c")), it.get("n", "?")) for it in zt_sorted]
+              + [(str(m.get("f12")), m.get("f14", "?")) for m in movers])
+    _ov = board_surge_overview(_surge, _c2b)
+    if _ov:
+        L[4:4] = ["", "### 🔥 板块急拉速览（热点一眼辨）"] + _ov + [""]
     L.append("### ⚡ 涨幅异动（急拉 / 强势，前 12）")
     if movers:
         for m in movers[:12]:
@@ -2495,7 +2595,9 @@ def _live_anomaly_summary(url, data=None):
                 _buy = " ｜ 🔴 **现价进买区✅ 可买 %.2f~%.2f**" % (_bz[0], _bz[1])
             elif _ok is False:
                 _buy = " ｜ ⚪ 已过买点·不追"
-            L.append("- **%s**(/%s) %.2f元 +%.2f%% ｜ 换手%.1f%% ｜ %s%s" % (name, code, m.get("f2") or 0, pct, hs, main_s, _buy))
+            _bd = primary_board(code, _c2b)
+            _bd_s = (" ｜ %s" % _bd) if _bd != "—" else ""
+            L.append("- **%s**(/%s) %.2f元 +%.2f%% ｜ 换手%.1f%% ｜ %s%s%s" % (name, code, m.get("f2") or 0, pct, hs, main_s, _buy, _bd_s))
     else:
         L.append("（当前无显著涨幅异动）")
     L.append("")
