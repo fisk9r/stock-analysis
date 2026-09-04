@@ -1,0 +1,6 @@
+{
+  "live_trading": false,
+  "dry_run": true,
+  "broker": "none",
+  "_note": "实盘券商适配器（中期升级4）。live_trading=true 且配置具体 broker（miniqmt/ths）后子类才可下单；dry_run=true 时只留痕不发真实请求。安全红线：默认关闭，下单前强制过风控。"
+}

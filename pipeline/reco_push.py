@@ -121,6 +121,32 @@ def board_bonus(board, smap):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# ④ 个性化策略（2026-09-04 长期升级1：按持仓周期切换权重）
+# ═══════════════════════════════════════════════════════════════════════════
+# holdings.json 每条持仓/关注可标 "period": "short"|"mid"|"long"（缺省 mid）。
+# 权重矩阵（乘在候选综合分 base 上，再叠加板块强度加权）：
+#   short 短线：重连板/题材动量（竞价纪律 67.4% 实证），轻慢趋势与波段
+#   mid   中线：三通道均衡，趋势略优先
+#   long  长线：重波段阶段底与趋势质量（Kronos 结构分），连板题材大幅降权
+PERIOD_PROFILES = {
+    "short": {"ladder": 1.25, "trend": 0.95, "band": 0.70, "label": "短线"},
+    "mid":   {"ladder": 1.00, "trend": 1.10, "band": 1.00, "label": "中线"},
+    "long":  {"ladder": 0.60, "trend": 1.15, "band": 1.30, "label": "长线"},
+}
+
+
+def _period_of(p):
+    """持仓/关注记录 → 周期档位（容错，缺省 mid）。"""
+    pr = (p.get("period") or p.get("horizon") or "mid") if isinstance(p, dict) else "mid"
+    pr = str(pr).strip().lower()
+    if pr in ("short", "短线", "超短"):
+        return "short"
+    if pr in ("long", "长线"):
+        return "long"
+    return "mid"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # ① 持仓今日操作
 # ═══════════════════════════════════════════════════════════════════════════
 def _map_holding_decision(r):
@@ -144,7 +170,10 @@ def compute_holdings_ops(u, date, con, code2boards, replace_pool=None):
     """对 config/holdings.json 的实盘持仓计算今日操作结论。
 
     返回 list[{code,name,decision,emoji,cost,pnl,close,action,rotate,
-                buy_zone,sell_zone,stop,horizon,reasons,replace}]。
+                buy_zone,sell_zone,stop,horizon,reasons,replace,period,t1_locked}]。
+
+    T+1 硬约束（2026-09-04 短期升级2）：持仓带 date(买入日)==分析日 → 当日锁定，
+    任何「卖出」类结论一律压成 🔒T+1锁定（与 executor sell_decision 同一红线）。
     """
     import zones
     try:
@@ -159,6 +188,9 @@ def compute_holdings_ops(u, date, con, code2boards, replace_pool=None):
         cost = p.get("cost")
         if not code:
             continue
+        period = _period_of(p)
+        buy_date = (p.get("date") or "").strip()
+        t1_locked = bool(buy_date and buy_date == date)
         bs = [b for b in (u.bars.get(code) or []) if b["d"] <= date]
         name = p.get("name") or (u.stocks.get(code, {}) or {}).get("name") or code
         if len(bs) < 40:
@@ -166,6 +198,7 @@ def compute_holdings_ops(u, date, con, code2boards, replace_pool=None):
                         "emoji": "❓", "cost": cost, "close": None, "pnl": None,
                         "action": "", "rotate": None, "buy_zone": None,
                         "sell_zone": None, "stop": None, "horizon": None,
+                        "period": period, "t1_locked": t1_locked,
                         "reasons": ["上市/数据不足，无法判定"], "replace": []})
             continue
         try:
@@ -179,20 +212,34 @@ def compute_holdings_ops(u, date, con, code2boards, replace_pool=None):
                         "emoji": "❓", "cost": cost, "close": None, "pnl": None,
                         "action": "", "rotate": None, "buy_zone": None,
                         "sell_zone": None, "stop": None, "horizon": None,
+                        "period": period, "t1_locked": t1_locked,
                         "reasons": ["%r" % e], "replace": []})
             continue
         decision, emoji = _map_holding_decision(r)
+        reasons = list(r.get("reasons") or [])
+        # ---- 个性化：周期口径微调（不推翻 zones 结论，只调提示） ----
+        if period == "short" and r.get("time_alert") and decision not in ("卖出", "卖出换股"):
+            decision, emoji = "周期到期·兑现", "⏰"
+            reasons.append("短线周期到期：超短线持仓到期应兑现，不恋战")
+        # ---- T+1 锁定（红线，压过一切卖出类结论） ----
+        if t1_locked:
+            reasons = ["🔒 今日(%s)买入，T+1 规则今日不可卖出" % buy_date] + reasons
+            if decision in ("卖出", "卖出换股", "周期到期·兑现"):
+                decision, emoji = "T+1锁定·明日执行", "🔒"
         out.append({
             "code": code, "name": name, "decision": decision, "emoji": emoji,
             "cost": cost, "pnl": r.get("pnl_pct"), "close": r.get("close"),
             "action": r.get("action"), "rotate": r.get("rotate"),
             "buy_zone": r.get("buy_zone"), "sell_zone": r.get("sell_zone"),
             "stop": r.get("stop"), "horizon": r.get("horizon"),
-            "reasons": r.get("reasons") or [], "replace": r.get("replace") or [],
+            "period": period, "t1_locked": t1_locked,
+            "time_status": r.get("time_status"),
+            "reasons": reasons, "replace": r.get("replace") or [],
         })
     # 卖出类置顶，确保最该看的先出现
-    _ord = {"卖出": 0, "卖出换股": 1, "加仓低吸": 2, "格局持有·注意止盈": 3,
-            "谨慎持有·观察": 4, "继续持有·格局": 5}
+    _ord = {"卖出": 0, "卖出换股": 1, "周期到期·兑现": 2, "T+1锁定·明日执行": 3,
+            "加仓低吸": 4, "格局持有·注意止盈": 5,
+            "谨慎持有·观察": 6, "继续持有·格局": 7}
     out.sort(key=lambda x: (_ord.get(x["decision"], 9), -(x.get("pnl") or 0)))
     return out
 
@@ -217,14 +264,17 @@ def _mk_cand(code, name, kind, board, bz, sz, sp, base, bonus, entry_state,
     return c
 
 
-def compute_buy_candidates(rec, u, date, code2boards, bmap, ladder_warn=None):
+def compute_buy_candidates(rec, u, date, code2boards, bmap, ladder_warn=None,
+                           period="mid"):
     """收拢三池「当下就是买点」的票，附板块提示 + 综合打分。
 
     连板：ladder_plans（次日竞价可追，买区=[close*0.995,close*1.03]）；
     趋势：rec["trend"]，只留 entry_state ∈ {可买, 微超}；
     波段：rec["band_trade"]，只留回到阶段底附近（close ≤ 买区上沿×1.05）。
-    综合分 = 基础分 + 板块强度加权（board_bonus）。
+    综合分 = (基础分 × 周期权重) + 板块强度加权（board_bonus）。
+    period ∈ short/mid/long：个性化策略权重（PERIOD_PROFILES），影响各通道排序。
     """
+    w = PERIOD_PROFILES.get(period, PERIOD_PROFILES["mid"])
     ladder = []
     trend = []
     band = []
@@ -246,12 +296,13 @@ def compute_buy_candidates(rec, u, date, code2boards, bmap, ladder_warn=None):
             base = 55
         bonus = board_bonus(board, bmap)
         ladder.append(_mk_cand(
-            code, name, "连板", board, bz, sz, sp, base, bonus,
+            code, name, "连板", board, bz, sz, sp, base * w["ladder"], bonus,
             "次日竞价介入(达标买)",
             extra={"streak": p.get("entry_streak"), "expected_top": p.get("expected_top"),
                    "hold_days": p.get("hold_days"), "rr": p.get("rr"),
                    "reach10": p.get("reach10"), "evidence": p.get("evidence"),
-                   "sample_n": p.get("sample_n"), "close": _close}))
+                   "sample_n": p.get("sample_n"), "close": _close,
+                   "period": w["label"]}))
 
     # ---- 趋势票 ----
     import zones as _z
@@ -284,14 +335,14 @@ def compute_buy_candidates(rec, u, date, code2boards, bmap, ladder_warn=None):
         _buy_pull = _ep.get("pull_zone")
         _st = _ep.get("entry_state") or st or "买点"
         trend.append(_mk_cand(
-            code, name, "趋势", board, bz, sz, t.get("stop"), base, bonus,
+            code, name, "趋势", board, bz, sz, t.get("stop"), base * w["trend"], bonus,
             _st, buy_now=_buy_now, buy_pull=_buy_pull,
             extra={"close": t.get("close"), "streak": t.get("streak"),
                    "is_new": t.get("is_new"),
                    "continued": t.get("continued"), "times": t.get("times"),
                    "trend_state": meta.get("trend_state"), "band": meta.get("band"),
                    "avg_daily": meta.get("avg_daily"), "up_days": meta.get("up_days"),
-                   "verdict": t.get("verdict")}))
+                   "verdict": t.get("verdict"), "period": w["label"]}))
 
     # ---- 波段票 ----
     import zones as _z
@@ -339,4 +390,5 @@ def compute_buy_candidates(rec, u, date, code2boards, bmap, ladder_warn=None):
         "trend": trend[:8],
         "band": band[:8],
         "ladder_warn": ladder_warn,
+        "period": w["label"],
     }

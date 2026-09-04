@@ -116,7 +116,12 @@ def data_freshness_guard(u, bj_now, is_trading_day=None):
         缺失时回退到「今日 ∈ u.dates」启发式。
       · 非交易日（含周末/节假日）→ 数据停留在上一交易日属正常，不拦。
       · 数据落后于「不晚于今日的最近交易日」超过 1 日 → 异常，终止。
+    逃生口：环境变量 SKIP_FRESHNESS_GUARD=1 时跳过（仅供本地开发/冒烟构建使用，
+    本地 cache/market.db 落后线上属正常；CI/生产不设此变量，护栏照常生效）。
     返回行情库最新日期（用于上层计算数据年龄）。"""
+    import os as _os
+    if str(_os.environ.get("SKIP_FRESHNESS_GUARD", "")).strip() in ("1", "true", "True"):
+        return u.dates[-1] if u.dates else None
     if not u.dates:
         raise RuntimeError("行情库为空，请先运行 fetch.py")
     today = bj_now.strftime("%Y-%m-%d")
@@ -995,8 +1000,11 @@ def run(date_override=None, dedup_close=False):
                     "p_continue": _x.get("p_continue"),
                 })
         _hpos = _rp.compute_holdings_ops(u, date, con, code2boards, _replace_pool)
+        # 个性化策略：以主持仓的 period（short/mid/long）驱动买点权重矩阵
+        _period = (_hpos[0].get("period") if _hpos and isinstance(_hpos[0], dict) else None) or "mid"
         _bc = _rp.compute_buy_candidates(rec, u, date, code2boards, _bmap,
-                                        ladder_warn=(data.get("ladder_warn") or {}).get("warns"))
+                                        ladder_warn=(data.get("ladder_warn") or {}).get("warns"),
+                                        period=_period)
         data["board_strength"] = _bmap
         data["holdings_ops"] = _hpos
         data["buy_candidates"] = _bc
@@ -1853,6 +1861,90 @@ def run(date_override=None, dedup_close=False):
                len(data["buy_points"]["chanlun"])))
     except Exception as e:
         log("  买点结构化数据生成跳过：%r" % e)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 2026-09-04 升级包（用户确认：短期4+中期4+长期2）
+    #   ① 因子健康度看板  ② 风险预警三级  ③ 个股深度档案  ④ 小时级成本锚
+    # ═══════════════════════════════════════════════════════════════════
+    # ---- ① 因子健康（每日 IC 快照；CPU 约 3-8s，失败不影响主流程）----
+    try:
+        import factor_health as _fh
+        data["factor_health"] = _fh.compute(u, date, lookback=20, horizon=5, sample_n=350)
+        _fv = data["factor_health"]
+        log("  因子健康：样本%s只 %s" % (_fv.get("n_stocks"), _fv.get("verdict") or _fv.get("error")))
+    except Exception as e:
+        log("  因子健康生成失败（不影响主流程）：%r" % e)
+        data["factor_health"] = {"date": date, "factors": [], "error": "%r" % e}
+
+    # ---- ② 风险预警三级（红/黄/蓝；依赖 holdings_ops/board_strength/panic）----
+    try:
+        import risklevel as _rl
+        data["risk_levels"] = _rl.compute(data, date=date)
+        _rc = data["risk_levels"].get("counts") or {}
+        log("  风险分级：红%d 黄%d 蓝%d"
+            % (_rc.get("red", 0), _rc.get("yellow", 0), _rc.get("blue", 0)))
+    except Exception as e:
+        log("  风险分级失败（不影响主流程）：%r" % e)
+        data["risk_levels"] = {"overall": {"level": "blue", "reasons": []},
+                               "holdings": [], "counts": {"red": 0, "yellow": 0, "blue": 0}}
+
+    # ---- ③ 个股深度档案（持仓+关注+买点候选，≤40 只）----
+    try:
+        import stock_profile as _sp
+        _codes, _costs, _zones_r, _boards = [], {}, {}, {}
+        try:
+            import holdings as _H
+            for _p in (_H.load_positions() or []):
+                if _p.get("code"):
+                    _codes.append(_p["code"])
+                    if _p.get("cost"):
+                        _costs[_p["code"]] = _p["cost"]
+        except Exception:
+            pass
+        try:
+            import watchlist as _W
+            for _c in (_W.load_watch_codes() or []):
+                if str(_c) not in _codes:
+                    _codes.append(str(_c))
+        except Exception:
+            pass
+        for _op in (data.get("holdings_ops") or []):
+            _c = _op.get("code")
+            if _c:
+                _zones_r[_c] = {k: _op.get(k) for k in
+                                ("action", "rotate", "buy_zone", "sell_zone", "stop",
+                                 "horizon", "reasons", "time_status") if _op.get(k) is not None}
+        for _k in ("ladder", "trend", "band"):
+            for _cd in ((data.get("buy_candidates") or {}).get(_k) or []):
+                _c = _cd.get("code")
+                if _c and str(_c) not in _codes:
+                    _codes.append(str(_c))
+                if _c and _c not in _boards:
+                    _boards[_c] = _cd.get("board")
+        for _c in _codes:
+            _boards.setdefault(_c, primary_board(_c, code2boards))
+        # ④ 小时级成本锚（持仓+关注，限 8 只防拖慢）
+        _m60 = {}
+        try:
+            import multitime as _mt
+            _pairs = []
+            for _c in _codes[:8]:
+                _px = None
+                _bsc = [b for b in (u.bars.get(_c) or []) if b["d"] <= date]
+                if _bsc:
+                    _px = _bsc[-1]["c"]
+                _pairs.append((_c, _px))
+            _m60 = _mt.batch_anchors(_pairs, max_n=8)
+            log("  小时成本锚：%d 只" % len(_m60))
+        except Exception as e:
+            log("  小时成本锚失败（不影响主流程）：%r" % e)
+        data["stock_profiles"] = _sp.collect(
+            u, date, _codes, costs=_costs, boards=_boards,
+            zone_results=_zones_r, m60_map=_m60, max_n=40)
+        log("  个股档案：%d 只" % len(data["stock_profiles"]))
+    except Exception as e:
+        log("  个股档案生成失败（不影响主流程）：%r" % e)
+        data["stock_profiles"] = {}
 
     # ---- 信息推送（微信/Telegram/邮件），失败不影响主流程 ----
     # 设 SUPPRESS_PUSH=1 可仅重建数据、不重复推送（用于部署前重算）

@@ -3422,6 +3422,52 @@
     };
     canvas.onmouseleave = function () { render(-1); };
   }
+  /* 个股深度档案（2026-09-04 短期升级3）：D.stock_profiles[code] → 弹窗顶部档案卡 */
+  function profileHtml(p) {
+    if (!p) return '';
+    function kv(k, v, cls) {
+      return '<div class="pf-kv"><span>' + E(k) + '</span><b class="' + (cls || '') + '">' + v + '</b></div>';
+    }
+    var h = '<div class="pf-card"><div class="pf-title">📋 个股档案' +
+      (p.board ? ' · ' + E(p.board) : '') + '</div><div class="pf-grid">';
+    h += kv('现价', f(p.close, 2));
+    if (p.cost != null && p.pnl != null)
+      h += kv('成本/浮盈', f(p.cost, 2) + ' <span class="' + (p.pnl >= 0 ? 'up' : 'down') + '">' + (p.pnl >= 0 ? '+' : '') + f(p.pnl) + '%</span>');
+    if (p.ma_shape) h += kv('均线', E(p.ma_shape));
+    h += kv('MA5/10/20', f(p.ma5, 2) + ' / ' + f(p.ma10, 2) + ' / ' + f(p.ma20, 2));
+    if (p.ma60 != null) h += kv('MA60', f(p.ma60, 2));
+    if (p.dd_from_hi60 != null)
+      h += kv('距60日高', '<span class="' + (p.dd_from_hi60 >= 0 ? 'up' : 'down') + '">' + f(p.dd_from_hi60) + '%</span>');
+    if (p.room_to_lo60 != null) h += kv('至60日低空间', f(p.room_to_lo60) + '%');
+    if (p.ret5 != null) h += kv('5日', '<span class="' + (p.ret5 >= 0 ? 'up' : 'down') + '">' + (p.ret5 >= 0 ? '+' : '') + f(p.ret5) + '%</span>');
+    if (p.ret20 != null) h += kv('20日', '<span class="' + (p.ret20 >= 0 ? 'up' : 'down') + '">' + (p.ret20 >= 0 ? '+' : '') + f(p.ret20) + '%</span>');
+    if (p.vol_rank20 != null) h += kv('量能分位', f(p.vol_rank20, 0) + '%');
+    if (p.kronos) {
+      h += kv('Kronos结构分', f(p.kronos.score, 1), 'gold');
+      if (p.kronos.entropy != null) h += kv('形态熵', f(p.kronos.entropy, 2));
+      if (p.kronos.pv != null) h += kv('量价健康', f(p.kronos.pv, 2));
+    }
+    if (p.m60 && p.m60.ma5 != null) {
+      var mpos = p.m60.pos === 'above' ? '<span class="up">上方</span>' : (p.m60.pos === 'below' ? '<span class="down">下方</span>' : '贴线');
+      h += kv('小时MA5锚', f(p.m60.ma5, 2) + '（现价' + mpos + (p.m60.dist_pct != null ? ' ' + (p.m60.dist_pct > 0 ? '+' : '') + f(p.m60.dist_pct) + '%' : '') + '）');
+    }
+    var z = p.zone;
+    if (z) {
+      if (z.action) h += kv('引擎动作', E(z.action));
+      if (z.buy_zone && z.buy_zone[0] != null) h += kv('买区', f(z.buy_zone[0], 2) + '~' + f(z.buy_zone[1], 2), 'up');
+      if (z.sell_zone && z.sell_zone[0] != null) h += kv('卖区', f(z.sell_zone[0], 2) + '~' + f(z.sell_zone[1], 2), 'down');
+      if (z.stop != null) h += kv('止损', f(z.stop, 2));
+      if (z.horizon) h += kv('周期', E(z.horizon));
+      if (z.time_status) h += kv('时间状态', E(z.time_status));
+    }
+    h += '</div>';
+    if (z && z.reasons && z.reasons.length) {
+      h += '<div class="pf-reasons">' + z.reasons.slice(0, 3).map(function (r) { return '· ' + E(r); }).join('<br>') + '</div>';
+    }
+    h += '</div>';
+    return h;
+  }
+
   function openKline(code, name) {
     ensureKlineStyle();
     if (KL.overlay && KL.overlay.parentNode) KL.overlay.parentNode.removeChild(KL.overlay);
@@ -3445,6 +3491,8 @@
       '</div>';
     md.querySelector('.kl-name').textContent = name || code;
     md.querySelector('.kl-code').textContent = code;
+    var _prof = (D.stock_profiles || {})[String(code)];
+    if (_prof) md.querySelector('.kl-b').insertAdjacentHTML('afterbegin', profileHtml(_prof));
     var cv = md.querySelector('.kl-cv');
     fetchKline(code).then(function (d) {
       if (!d.ok || !d.klines || !d.klines.length) {
@@ -4592,6 +4640,48 @@
       var h = '';
       h += '<div class="bp-bar"><span>📲 今日推送 · 持仓操作 → 只推当下买点 → 板块强弱（与每日推送同款三段式）</span></div>';
 
+      /* 风险预警三级横幅（长期升级2）：红/黄才显示，蓝不打扰 */
+      var RL = D.risk_levels || {}, OV = RL.overall || {};
+      if (OV.level === 'red' || OV.level === 'yellow') {
+        var rlCol = OV.level === 'red' ? '#e02020' : '#e6a700';
+        var rlTtl = OV.level === 'red' ? '🔴 红色预警 · 立即行动' : '🟡 黄色预警 · 提高警惕';
+        var rlBody = (OV.reasons || []).map(function (r) { return '· ' + E(r); }).join('<br>');
+        (RL.holdings || []).forEach(function (x) {
+          if (x.level === 'red') rlBody += '<br>· 🔴 <b>' + E(x.name || x.code) + '</b>：' + (x.reasons || []).slice(0, 2).map(E).join('；');
+        });
+        h += '<div style="border:1px solid ' + rlCol + ';border-radius:10px;padding:10px 12px;margin-bottom:12px;background:rgba(224,32,32,.06)">' +
+          '<b style="color:' + rlCol + '">' + rlTtl + '</b><div class="note" style="margin-top:6px">' + rlBody + '</div></div>';
+      }
+
+      /* 个股档案快速搜索（短期升级3）：输 6 位代码或名称片段 → 弹档案+日K */
+      h += '<div class="bp-bar" style="margin-bottom:12px"><span>🔍 个股档案：</span>' +
+        '<input id="pfSearch" placeholder="输代码/名称，回车弹出档案（如 002631 或 德尔）" ' +
+        'style="background:var(--card-2);border:1px solid var(--grid);border-radius:8px;color:var(--text);padding:6px 10px;width:240px">' +
+        '</div>';
+      setTimeout(function () {
+        var inp = document.getElementById('pfSearch');
+        if (!inp || inp.dataset.bound) return;
+        inp.dataset.bound = '1';
+        inp.addEventListener('keydown', function (ev) {
+          if (ev.key !== 'Enter') return;
+          var q = (inp.value || '').trim();
+          if (!q) return;
+          if (/^\d{6}$/.test(q)) { openKline(q, q); return; }
+          var hit = null;
+          Object.keys(D.stock_profiles || {}).some(function (c) {
+            if ((D.stock_profiles[c].name || '').indexOf(q) >= 0) { hit = c; return true; }
+            return false;
+          });
+          if (!hit && window.SN) {
+            Object.keys(window.SN).some(function (c) {
+              if ((window.SN[c] || '').indexOf(q) >= 0) { hit = c; return true; }
+              return false;
+            });
+          }
+          if (hit) { openKline(hit, (D.stock_profiles[hit] || {}).name || hit); inp.value = ''; }
+        });
+      }, 50);
+
       /* ① 持仓今日操作 */
       if (H.length) {
         var hrows = H.map(function (x) {
@@ -4599,12 +4689,14 @@
           var zn = (bz.length === 2 && bz[0] != null) ? (f(bz[0], 2) + '~' + f(bz[1], 2)) : '—';
           var sn = (sz.length === 2 && sz[0] != null) ? (f(sz[0], 2) + '~' + f(sz[1], 2)) : '—';
           var pnl = (x.pnl != null) ? ('<span class="' + (x.pnl >= 0 ? 'up' : 'down') + '">' + (x.pnl >= 0 ? '+' : '') + f(x.pnl) + '%</span>') : '—';
-          var dcls = (x.decision && (x.decision.indexOf('卖出') >= 0 || x.decision.indexOf('割肉') >= 0)) ? 'hot'
+          var dcls = (x.decision && (x.decision.indexOf('卖出') >= 0 || x.decision.indexOf('割肉') >= 0 || x.decision.indexOf('T+1') >= 0)) ? 'hot'
             : ((x.decision && x.decision.indexOf('加仓') >= 0) ? 'ok' : 'hold');
+          var ptag = (x.period && x.period !== '中线') ? ' <span class="bd">' + E(x.period) + '</span>' : '';
+          var t1tag = x.t1_locked ? ' <span class="bd" style="color:var(--gold)">🔒T+1</span>' : '';
           var reasons = (x.reasons || []).slice(0, 2).map(function (r) { return E(r); }).join('；');
           var rot = (x.rotate && x.rotate.length) ? ('<div class="note" style="margin-top:4px">换股：' + x.rotate.map(function (rp) { return stk(rp.code, rp.name); }).join('、') + '</div>') : '';
           return '<tr>' +
-            '<td>' + (x.emoji || '') + ' ' + stk(x.code, x.name) + '</td>' +
+            '<td>' + (x.emoji || '') + ' ' + stk(x.code, x.name) + ptag + t1tag + '</td>' +
             '<td><span class="ent ' + dcls + '">' + E(x.decision || '') + '</span></td>' +
             '<td class="num">' + pnl + '</td>' +
             '<td class="num" style="color:var(--up)">' + zn + '</td>' +
@@ -4675,7 +4767,53 @@
       return h;
     }
 
-    var views = { overview: viewOverview, watch: viewWatch, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings, buypoint: viewBuypoint, sim: viewSim, pushcenter: viewPushCenter, pushmode: viewPushMode };
+    /* ---------------- 因子健康度看板（短期升级1：每日 IC 快照）---------------- */
+    function viewFactorHealth() {
+      var FH = D.factor_health || {};
+      if (!FH.factors || !FH.factors.length) {
+        return '<div class="bp-bar"><span>🧪 因子健康</span></div>' +
+          '<div class="card"><div class="empty">暂无因子健康数据（' + E(FH.error || '今日未生成') + '）</div></div>';
+      }
+      var h = '<div class="bp-bar"><span>🧪 因子健康 · 选股引擎因子每日体检（IC = 因子值与未来 ' + f(FH.horizon, 0) + ' 日收益的截面相关性）</span></div>';
+      var col = FH.verdict && FH.verdict.indexOf('漂移') >= 0 ? 'var(--down)' : 'var(--up)';
+      h += '<div class="card"><div style="font-weight:700;color:' + col + '">' + E(FH.verdict || '') + '</div>' +
+        '<div class="note">样本 ' + f(FH.n_stocks, 0) + ' 只（全市场确定性抽样）· 统计最近 ' + f(FH.lookback, 0) +
+        ' 个交易日 · 结果滞后 ' + f(FH.horizon, 0) + ' 日（前向收益需已实现）· ' + E(FH.note || '') + '</div></div>';
+
+      FH.factors.forEach(function (fa) {
+        var st = fa.status || '—';
+        var stCol = st === '有效' ? 'var(--up)' : (st === '弱有效' ? 'var(--gold)' : 'var(--down)');
+        var rows = fa.series || [];
+        var maxAbs = 0.01;
+        rows.forEach(function (r) { maxAbs = Math.max(maxAbs, Math.abs(r.ic || 0)); });
+        var sparks = rows.map(function (r) {
+          var ic = r.ic || 0;
+          var hgt = Math.round(Math.abs(ic) / maxAbs * 22);
+          var c = ic > 0 ? 'var(--up)' : 'var(--down)';
+          return '<span style="display:inline-block;width:6px;margin-right:2px;vertical-align:bottom">' +
+            '<span style="display:block;width:6px;height:' + hgt + 'px;background:' + c + ';border-radius:2px"></span></span>';
+        }).join('');
+        var body = '<div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end">' +
+          '<div><div class="note">近' + f(fa.lookback || rows.length, 0) + '日 IC 序列</div><div style="height:26px;padding-top:4px">' + sparks + '</div></div>' +
+          '</div>';
+        var t = table([
+          { t: 'IC均值', a: 'num' }, { t: 'IC标准差', a: 'num' }, { t: 'ICIR', a: 'num' },
+          { t: '方向命中率', a: 'num' }, { t: '健康度' }
+        ], '<tr>' +
+          '<td class="num" style="color:' + (fa.ic_mean > 0 ? 'var(--up)' : 'var(--down)') + '">' + (fa.ic_mean > 0 ? '+' : '') + f(fa.ic_mean * 100, 1) + '%</td>' +
+          '<td class="num">' + f(fa.ic_std * 100, 1) + '%</td>' +
+          '<td class="num" style="font-weight:700">' + f(fa.icir, 2) + '</td>' +
+          '<td class="num">' + f(fa.hit_rate * 100, 0) + '%</td>' +
+          '<td><span class="ent" style="color:' + stCol + '">' + E(st) + '</span></td>' +
+          '</tr>');
+        h += card(E(fa.label || fa.name) + ' · 健康度', body + t,
+          fa.name === 'vol5' ? '低波动因子：IC 为负（越低波未来越好）才算有效，方向命中率按负向计。' :
+          'ICIR=IC均值/标准差，|ICIR|≥0.5 有效、0.2~0.5 弱有效、<0.2 失效。失效的因子会在排序权重中自动降权参考。');
+      });
+      return h;
+    }
+
+    var views = { overview: viewOverview, watch: viewWatch, ladder: viewLadder, sectors: viewSectors, risk: viewRisk, demon: viewDemon, yaogu: viewYaogu, overlap: viewOverlap, rec: viewRec, auction: viewAuction, bull: viewBull, strategies: viewStrategies, holdings: viewHoldings, buypoint: viewBuypoint, sim: viewSim, pushcenter: viewPushCenter, pushmode: viewPushMode, factor: viewFactorHealth };
     function viewBuypoint() {
       /* 买点候选为每日构建注入 data["buy_points"] 的结构化数据（趋势加速优先），
          原生 SPA 渲染（替代 iframe），红=买入/优先、绿=卖出/回避，与全站配色一致。

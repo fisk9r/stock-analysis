@@ -589,3 +589,12 @@ html{scroll-behavior:smooth}
 
 /* 需求7：重点速览卡片 chip 微调 */
 .ov-chip .wl-qk{margin-left:2px}
+
+/* ═══ 2026-09-04 升级包：个股档案卡（弹窗内） ═══ */
+.pf-card{margin:0 0 12px;border:1px solid var(--grid);border-radius:10px;padding:10px 12px;background:var(--card-2)}
+.pf-title{font-weight:800;font-size:13px;margin-bottom:8px;color:var(--gold)}
+.pf-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px 14px}
+.pf-kv{display:flex;justify-content:space-between;gap:8px;font-size:12px;border-bottom:1px dashed var(--grid);padding:3px 0}
+.pf-kv span{color:var(--muted)}
+.pf-kv b{font-weight:700;text-align:right}
+.pf-reasons{margin-top:8px;font-size:12px;color:var(--text);line-height:1.7}

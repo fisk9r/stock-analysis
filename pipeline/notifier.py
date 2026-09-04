@@ -1601,6 +1601,32 @@ def _pct(v):
     return ("%.0f%%" % v) if v is not None else "—"
 
 
+def load_push_scope():
+    """推送分层开关（2026-09-04 短期升级4）：config/notify.json push_scope。
+
+    {
+      "push_scope": {
+        "enabled": true,
+        "sections": {"holdings": true, "buy": true, "boards": true, "auction": true},
+        "min_score": 55,
+        "pool_limit": {"ladder": 4, "trend": 6, "band": 6}
+      }
+    }
+    返回 None = 未启用（全部段落照旧推送）；解析失败也返回 None（容错不阻断推送）。
+    """
+    try:
+        with open(os.path.join(ROOT, "config", "notify.json"), encoding="utf-8") as f:
+            ps = (json.load(f).get("push_scope") or {})
+        if not ps.get("enabled"):
+            return None
+        ps.setdefault("sections", {})
+        ps.setdefault("min_score", 0)
+        ps.setdefault("pool_limit", {})
+        return ps
+    except Exception:
+        return None
+
+
 def _junk_free(s, minlen=4):
     """字符串是否有实质内容（去掉标点/空白后仍有 ≥minlen 个中英文字符）。
 
@@ -1758,14 +1784,49 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     cands = data.get("buy_candidates") or {}
     bmap = data.get("board_strength") or {}
 
+    # —— 推送分层开关（短期升级4）：scope 控制段落显隐 + 买点池过滤 ——
+    _scope = load_push_scope()
+    if _scope:
+        _sec = _scope.get("sections") or {}
+        _ms = _scope.get("min_score") or 0
+        _pl = _scope.get("pool_limit") or {}
+
+        # 按 kind 分池限量 + 最低分过滤
+        def _fit(arr, kind):
+            arr = [c for c in (arr or []) if (c.get("score") or 0) >= _ms]
+            lim = _pl.get(kind)
+            return arr[:lim] if isinstance(lim, int) and lim > 0 else arr
+
+        cands = {
+            "ladder": _fit(cands.get("ladder"), "ladder"),
+            "trend": _fit(cands.get("trend"), "trend"),
+            "band": _fit(cands.get("band"), "band"),
+            "ladder_warn": cands.get("ladder_warn"),
+        }
+
+    # —— 风险预警三级横幅（长期升级2）：红/黄置顶，蓝不渲染（不制造噪音）——
+    _rl = data.get("risk_levels") or {}
+    _ov = (_rl.get("overall") or {})
+    if _ov.get("level") in ("red", "yellow"):
+        _lmeta = {"red": "🔴 红·立即行动", "yellow": "🟡 黄·提高警惕"}.get(_ov["level"])
+        L.append("")
+        L.append("## %s（市场风险等级）" % _lmeta)
+        for _rr in (_ov.get("reasons") or [])[:3]:
+            L.append("- %s" % _rr)
+        for _h in (_rl.get("holdings") or []):
+            if _h.get("level") == "red":
+                L.append("- 🔴 **%s**：%s" % (_h.get("name") or _h.get("code"),
+                                             "；".join((_h.get("reasons") or [])[:2])))
+
     # —— 段①：持仓今日操作 ——
-    if hops:
+    if hops and (not _scope or (_scope.get("sections") or {}).get("holdings", True)):
         L.append("")
         L.append("## 💼 持仓今日操作（实盘持仓 · 跟着做）")
         for h in hops:
             _cz = h.get("buy_zone"); _sz = h.get("sell_zone")
-            line = "- %s **%s** 成本%.2f 现%.2f %+.1f%% → **%s**" % (
-                h.get("emoji", ""), h.get("name", "?"), h.get("cost") or 0,
+            _ptag = (" ·%s" % h["period"]) if h.get("period") and h["period"] != "中线" else ""
+            line = "- %s **%s**%s 成本%.2f 现%.2f %+.1f%% → **%s**" % (
+                h.get("emoji", ""), h.get("name", "?"), _ptag, h.get("cost") or 0,
                 h.get("close") or 0, h.get("pnl") or 0, h.get("decision", ""))
             _rs = h.get("reasons") or []
             if _rs:
@@ -1811,7 +1872,8 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     _lad = cands.get("ladder") or []
     _tr = cands.get("trend") or []
     _bd = cands.get("band") or []
-    if _lad or _tr or _bd:
+    _buy_on = (not _scope) or (_scope.get("sections") or {}).get("buy", True)
+    if (_lad or _tr or _bd) and _buy_on:
         L.append("")
         L.append("## 🎯 买点候选（只推当下就是买点的票）")
         if _lad:
@@ -1830,39 +1892,44 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
             for c in _bd:
                 L.append(_cand_line(c, "🔁"))
     else:
-        L.append("")
-        L.append("## 🎯 买点候选")
-        L.append("> 今日三池（连板/趋势/波段）无「当下就在买点」的票，不硬推——等回踩到位或新热点出现再上。")
+        if _buy_on:
+            L.append("")
+            L.append("## 🎯 买点候选")
+            L.append("> 今日三池（连板/趋势/波段）无「当下就在买点」的票，不硬推——等回踩到位或新热点出现再上。")
 
-    # —— 段③（次级）：板块强弱 + 竞价强弱 ——
+    # —— 段③（次级）：板块强弱 + 竞价强弱（scope 可关）——
     _st = rec.get("sector_trend") or []
     _money = data.get("money") or {}
-    L.append("")
-    L.append("## 📊 板块强弱（今日主线 · 综合打分依据）")
-    if _st:
-        for s in _st[:6]:
-            leads = s.get("leads") or []
-            lnames = "、".join((l.get("name") or "") for l in leads[:4] if l.get("name"))
-            L.append("- **%s**【%s】%s" % (s.get("sector", "?"), s.get("tier", ""),
-                                          ("龙头：" + lnames) if lnames else ""))
-    else:
-        L.append("- （今日无显著主线板块）")
-    _bins = _money.get("boards_in") or []
-    if _bins:
-        L.append("主力净流入：%s" % "、".join(
-            "%s %+.1f亿" % (b.get("name", ""), b.get("net") or 0) for b in _bins[:3]))
+    _boards_on = (not _scope) or (_scope.get("sections") or {}).get("boards", True)
+    _auction_on = (not _scope) or (_scope.get("sections") or {}).get("auction", True)
+    if _boards_on:
+        L.append("")
+        L.append("## 📊 板块强弱（今日主线 · 综合打分依据）")
+        if _st:
+            for s in _st[:6]:
+                leads = s.get("leads") or []
+                lnames = "、".join((l.get("name") or "") for l in leads[:4] if l.get("name"))
+                L.append("- **%s**【%s】%s" % (s.get("sector", "?"), s.get("tier", ""),
+                                              ("龙头：" + lnames) if lnames else ""))
+        else:
+            L.append("- （今日无显著主线板块）")
+        _bins = _money.get("boards_in") or []
+        if _bins:
+            L.append("主力净流入：%s" % "、".join(
+                "%s %+.1f亿" % (b.get("name", ""), b.get("net") or 0) for b in _bins[:3]))
     # 竞价强弱
     _sent2 = data.get("market", {}).get("sentiment", {}) or {}
     _mic = data.get("micro") or {}
-    L.append("")
-    L.append("## ⚡ 竞价强弱（开盘定调）")
-    L.append("- 涨停晋级率 %s ｜ 封板率 %s ｜ 炸板率 %s" % (
-        _pct(_sent2.get("promote_rate")), _pct(_sent2.get("seal_rate")),
-        _pct(_mic.get("zhaban_rate"))))
-    _pp = data.get("preopen_plan") or {}
-    _relay = _pp.get("relay_dir")
-    if _relay:
-        L.append("- 接力方向：%s" % _relay)
+    if _auction_on:
+        L.append("")
+        L.append("## ⚡ 竞价强弱（开盘定调）")
+        L.append("- 涨停晋级率 %s ｜ 封板率 %s ｜ 炸板率 %s" % (
+            _pct(_sent2.get("promote_rate")), _pct(_sent2.get("seal_rate")),
+            _pct(_mic.get("zhaban_rate"))))
+        _pp = data.get("preopen_plan") or {}
+        _relay = _pp.get("relay_dir")
+        if _relay:
+            L.append("- 接力方向：%s" % _relay)
     if _legacy:
         L.append("")
         L.append("> （以下为旧版分散推荐段落，可在 config/notify.json 设 sections.legacy_rec=false 关闭）")

@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "device": "cpu",
+  "max_context": 512,
+  "top_k": 0.9,
+  "top_p": 0.95,
+  "sample_count": 1,
+  "_note": "官方 Kronos 适配器（中期升级1）。enabled=true 且本机装了 torch+transformers+kronos 包时启用官方 mini 模型推理；否则全站回落纯 Python 蒸馏版 kronos_lite。CI（零依赖）永远 enabled=false。"
+}
