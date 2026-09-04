@@ -640,32 +640,33 @@ def main():
     _sc2 = _nf.format_sc(_pre2, "", mode="preauction")
     check("盘前SC精简版含板块预判", "关注票·板块当日预判" in _sc2["text"])
 
-    # 收盘推送：趋势三档分组 + 纪律收尾行
+    # 收盘推送（新模式 2026-09-04）：持仓操作 / 买点候选 / 板块强弱 三段式取代旧分散段落
+    import reco_push as _rp
+    _cand = _rp._mk_cand("1", "加速票", "趋势", "半导体", [9.5, 10.2], [11, 12], 8.5,
+                         71, 0, "可买",
+                         extra={"close": 10.0, "streak": 3, "trend_state": "加速上行",
+                                "avg_daily": 3.5, "up_days": 4})
     _close_data = {
         "meta": {"date": "2026-08-28"},
-        "market": {"sentiment": {"score": 55, "label": "温和"}, "cycle": {"phase": "修复"}},
-        "recommend": {"trend": [
-            {"code": "1", "name": "加速票", "industry": "半导体", "close": 10.0,
-             "trend_meta": {"band": "主升强趋势", "avg_daily": 3.5, "up_days": 4,
-                            "trend_state": "加速上行"},
-             "verdict": {"action": "建议买入", "suggested_hold_days": 20, "early": True},
-             "institution": {"level": "强", "tags": ["龙虎榜净买 0.80亿"], "action": "可跟随建仓"}},
-            {"code": "2", "name": "缓坡票", "industry": "化工", "close": 6.0,
-             "trend_meta": {"band": "趋势平缓", "avg_daily": 1.4, "up_days": 3,
-                            "trend_state": "匀速上行", "slow_channel": True},
-             "verdict": {"action": "持有", "days_held": 8, "hold_limit_days": 20}},
-            {"code": "3", "name": "稳健票", "industry": "汽车", "close": 20.0,
-             "trend_meta": {"band": "稳健上行", "avg_daily": 2.4, "up_days": 4,
-                            "trend_state": "匀速上行"}}]},
+        "market": {"sentiment": {"score": 55, "label": "温和", "promote_rate": 0.6,
+                                 "seal_rate": 0.7}, "cycle": {"phase": "修复"}},
+        "limit_ups": [],
+        "recommend": {"trend": [], "watch_reco": {}},
+        "micro": {"zhaban_rate": 0.1},
+        "money": {"boards_in": [{"name": "半导体", "net": 9.0}], "boards_out": []},
+        "preopen_plan": {},
+        "board_strength": {"半导体": 30},
+        "holdings_ops": [],
+        "buy_candidates": {"ladder": [], "trend": [_cand], "band": [], "ladder_warn": None},
     }
     _cl = _nf.format_stock_summary(_close_data, "", mode="close")
-    check("收盘推送·趋势加速档", "趋势 · 加速主升" in _cl["text"])
-    check("收盘推送·趋势缓坡档", "趋势 · 缓坡慢牛" in _cl["text"])
-    check("收盘推送·趋势稳健档", "趋势 · 稳健上行" in _cl["text"])
-    check("收盘推送·机构介入徽标", "🏦强介入" in _cl["text"])
-    check("收盘推送·纪律收尾行", "📌 纪律" in _cl["text"],
-          "-> %s" % [l for l in _cl["text"].splitlines() if "纪律" in l][:1])
-    check("收盘推送·买入持有天数", "建议买入·持有20天" in _cl["text"])
+    check("收盘推送·新模式买点候选段",
+          "买点候选（只推当下就是买点的票）" in _cl["text"])
+    check("收盘推送·新模式板块强弱段",
+          "板块强弱（今日主线" in _cl["text"])
+    check("收盘推送·买点候选含综合分", "综合**71分**" in _cl["text"])
+    check("收盘推送·买点候选含买区", "买9.50~10.20" in _cl["text"])
+    check("收盘推送·板块强弱含主力净流入", "半导体 +9.0亿" in _cl["text"])
 
     # ============ #252 可升级点回归（2026-09-02）============
     # 关注股异动逻辑：自选/持仓排序前置（中化国际 600500 类问题——加进自选却收不到提示被截断）

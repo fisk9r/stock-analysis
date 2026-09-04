@@ -976,6 +976,39 @@ def run(date_override=None, dedup_close=False):
         "band_trade": rec.get("band_trade") or [],
     }
 
+    # ── 推荐推送新模式（2026-09-04）：持仓操作 / 买点候选 / 板块强度打分 ──
+    # 三段式：① 持仓今日操作 ② 买点候选(连板/趋势/波段, 只在买点) ③ 板块强弱+竞价强弱(次级)
+    # 旧分散段落(推荐Top5/连板计划/趋势三档/买点候选/回踩/波段/自选持仓)改由 notify.json
+    # sections.legacy_rec 控制，默认关闭，避免与新模弐重复、推送信息过载。
+    try:
+        import reco_push as _rp
+        _bmap = _rp.board_strength_map(rec, money, code2boards)
+        _replace_pool = []
+        for _x in (list(rec.get("trend") or []) + list(rec.get("ladder_plans") or [])):
+            if _x.get("code"):
+                _replace_pool.append({
+                    "code": _x.get("code"), "name": _x.get("name"),
+                    "worth_score": _x.get("worth_score") or 0,
+                    "industry": (code2boards.get(_x.get("code")) or [("","","")])[0][1]
+                                 if code2boards.get(_x.get("code")) else _x.get("industry"),
+                    "streak": _x.get("streak") or _x.get("entry_streak") or 0,
+                    "p_continue": _x.get("p_continue"),
+                })
+        _hpos = _rp.compute_holdings_ops(u, date, con, code2boards, _replace_pool)
+        _bc = _rp.compute_buy_candidates(rec, u, date, code2boards, _bmap,
+                                        ladder_warn=(data.get("ladder_warn") or {}).get("warns"))
+        data["board_strength"] = _bmap
+        data["holdings_ops"] = _hpos
+        data["buy_candidates"] = _bc
+        log("  推荐新模式：持仓%d 买点[连板%d/趋势%d/波段%d] 板块强度%d"
+            % (len(_hpos), len(_bc.get("ladder") or []), len(_bc.get("trend") or []),
+               len(_bc.get("band") or []), len(_bmap)))
+    except Exception as e:
+        log("  推荐新模式失败（不影响主流程）：%r" % e)
+        data["board_strength"] = {}
+        data["holdings_ops"] = []
+        data["buy_candidates"] = {"ladder": [], "trend": [], "band": [], "ladder_warn": None}
+
     # ---- 牛股雷达：多维度独立抓牛股信号（10 种探测器共振）----
     try:
         data["bull"] = bull.scan(u, date, con, code2boards, topn=12)

@@ -1,0 +1,52 @@
+<!doctype html><html lang=zh><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>推荐推送新模式 · 三段落验证</title>
+<style>
+body{font-family:-apple-system,'PingFang SC',sans-serif;background:#0d1117;color:#e6edf3;margin:0;padding:24px}
+h1{color:#58a6ff;font-size:21px} h2{color:#7ee787;font-size:15px;margin-top:26px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin:12px 0;white-space:pre-wrap;font-size:13px;line-height:1.9}
+.li{padding:2px 0;border-bottom:1px dashed #21262d}
+.p{padding:2px 0}
+.note{color:#8b949e;font-size:12.5px;line-height:1.7}
+.ok{color:#7ee787} .tag{background:#1f6feb22;color:#58a6ff;padding:1px 7px;border-radius:6px}
+</style></head><body>
+<h1>📲 推荐推送新模式（2026-09-04 重构）</h1>
+<div class='note'>分析日 <b>2026-09-02</b> ｜ 真实 market.db 渲染 ｜ 三段落结构：①持仓操作 → ②买点候选 → ③板块/竞价强弱</div>
+
+<h2>① 持仓今日操作（实盘持仓 · 跟着做）</h2>
+<div class='note'>对 config/holdings.json 每只持仓，用 zones 引擎给出明确动作：<span class='tag'>卖出</span><span class='tag'>卖出换股</span><span class='tag'>加仓低吸</span><span class='tag'>格局持有·注意止盈</span><span class='tag'>继续持有·格局</span>；附盈亏、买卖区、止损、换股建议。</div>
+<div class='card'><div class='p'>💼 持仓今日操作（实盘持仓 · 跟着做）</div>
+<div class='li'>📌 <b>德尔未来<b> 成本10.36 现10.13 -2.2% → <b>继续持有·格局<b> ｜ 成本 10.36，浮亏 -2.2%；回踩买区可参考摊低；运行于买区上方、卖区下方 ｜ 买区9.00~9.32 卖区11.85~12.45 止损8.34</div></div>
+
+<h2>② 买点候选（只推当下就是买点的票）</h2>
+<div class='note'>收拢 <b>连板 / 趋势 / 波段</b> 三池，<b>只留 entry_state ∈ 可买/微超</b>（剔除 等回踩/过热/破位）。每只给：
+<b>买区(近端可执行)</b> ｜ <b>卖区(目标)</b> ｜ <b>综合分</b> ｜ <b>板块提示</b>。综合分 = 基础分 + 板块强度加权（今日强势板块的票自动加分）。</div>
+<div class='card'><div class='p'>🎯 买点候选（只推当下就是买点的票）</div>
+<div class='p'>**🚀 趋势票（回踩买点 / 现价可买）**</div>
+<div class='li'>🚀 <b>肯特股份<b>【新材料】现价54.22 ｜ 买52.46~54.49 ｜ 回踩买45.45~54.36 卖59.27~62.29 ｜ 综合<b>71分<b>(基础71) ｜ 可买</div>
+<div class='li'>🚀 <b>英集芯<b>【深圳特区】现价30.06 ｜ 买27.78~30.21 ｜ 回踩买25.28~28.79 卖29.33~30.83 ｜ 综合<b>71分<b>(基础71) ｜ 微超</div>
+<div class='li'>🚀 <b>晶丰明源<b>【LED概念】现价151.99 ｜ 买142.99~152.75 ｜ 回踩买133.70~148.15 卖226.58~238.14 ｜ 综合<b>71分<b>(基础71) ｜ 微超</div>
+<div class='li'>🚀 <b>秋乐种业<b>【农业种植】现价19.36 ｜ 买18.55~19.46 ｜ 回踩买16.40~19.22 卖20.55~21.60 ｜ 综合<b>71分<b>(基础71) ｜ 可买</div>
+<div class='li'>🚀 <b>深中华A<b>【黄金概念】现价11.75 ｜ 买10.97~11.81 ｜ 回踩买9.51~11.37 卖11.60~12.20 ｜ 综合<b>56分<b>(基础56) ｜ 微超</div>
+<div class='li'>🚀 <b>金健米业<b>【电商概念】现价12.40 ｜ 买11.68~12.46 ｜ 回踩买10.32~12.11 卖12.33~12.96 ｜ 综合<b>56分<b>(基础56) ｜ 可买</div>
+<div class='p'>**🔁 波段/阶段底（低吸反复确认的 stage 底）**</div>
+<div class='li'>🔁 <b>祥源文旅<b>【旅游酒店】现价5.71 ｜ 买5.48~5.74 卖6.36~6.63 ｜ 综合<b>64分<b>(基础64) ｜ 阶段底买点</div>
+<div class='li'>🔁 <b>英洛华<b>【新材料】现价8.55 ｜ 买8.45~8.59 ｜ 回踩买8.27~8.75 卖10.39~10.82 ｜ 综合<b>63分<b>(基础63) ｜ 阶段底买点</div>
+<div class='li'>🔁 <b>方大炭素<b>【创投】现价5.22 ｜ 买5.14~5.25 ｜ 回踩买5.07~5.23 卖6.82~7.10 ｜ 综合<b>62分<b>(基础62) ｜ 阶段底买点</div>
+<div class='li'>🔁 <b>龙旗科技<b>【智能穿戴】现价37.15 ｜ 买36.25~37.34 ｜ 回踩买35.32~37.55 卖44.64~46.50 ｜ 综合<b>62分<b>(基础62) ｜ 阶段底买点</div>
+<div class='li'>🔁 <b>晋控煤业<b>【稀缺资源】现价16.36 ｜ 买16.11~16.44 ｜ 回踩买15.52~17.97 卖21.26~22.14 ｜ 综合<b>61分<b>(基础61) ｜ 阶段底买点</div>
+<div class='li'>🔁 <b>中兴通讯<b>【深圳特区】现价33.49 ｜ 买32.99~33.66 ｜ 回踩买32.43~34.08 卖38.52~40.12 ｜ 综合<b>61分<b>(基础61) ｜ 阶段底买点</div>
+<div class='li'>🔁 <b>杰克科技<b>【人工智能】现价38.27 ｜ 买37.47~38.46 ｜ 回踩买36.62~38.39 卖44.46~46.31 ｜ 综合<b>60分<b>(基础60) ｜ 阶段底买点</div></div>
+
+<h2>③ 板块强弱 + 竞价强弱（次级，再后面）</h2>
+<div class='note'>融合 sector_trend(主线/强势) + 主力净流入 + 净流出，作为②综合打分的加权依据；竞价强弱给开盘定调。</div>
+<div class='card'><div class='p'>📊 板块强弱（今日主线 · 综合打分依据）</div>
+<div class='li'><b>白酒<b>【主线】龙头：贵州茅台、五粮液</div>
+<div class='li'><b>农林牧渔<b>【强势】龙头：牧原股份</div>
+<div class='p'>主力净流入：白酒 +15.0亿、农林牧渔 +6.0亿</div></div>
+
+<h2>✅ 旧分散段落</h2>
+<div class='note'>原「推荐Top5/连板计划/趋势三档/买点候选(旧)/回踩/波段(旧)/自选持仓」已统一收进 <span class='tag'>sections.legacy_rec=false</span>（默认关闭），避免信息过载重复。<span class='ok'>若想回看旧版，在 config/notify.json 设 legacy_rec=true 即可。</span></div>
+
+<h2>🧪 测试</h2>
+<div class='note'>tools/test_reco_push.py <b>23 PASS / 0 FAIL</b>；tools/test_new_engines.py <b>173 PASS / 0 FAIL</b>（含新模式段断言）；test_bandtrade 45、test_kronos_factor_v2 34 全 PASS。已随代码推送并 dispatch build。</div>
+</body></html>

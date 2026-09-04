@@ -265,9 +265,9 @@ def lines(wr, n=6, compact=False, rec=None):
                 _merged.append(_rp0)
             for rp in _merged:
                 _rp_close, _rp_bz = rp.get("close"), (rp.get("buy_zone") or [None, None])
-                # 2026-09-03 收紧：渲染层同步只放行「现价 ≤ 买区上沿」的候选
-                #（用户：要能立即切换的票，不要让我等回调）
-                if _rp_close and _rp_bz[1] and _rp_close > float(_rp_bz[1]) * 1.0:
+                # 2026-09-03 收紧：渲染层只放行「现价 ≤ 买区上沿+5%」的候选
+                #（用户：要能立即切换的票，不要让我等回调；与 notifier.zone_buyable 的 5% 容忍一致）
+                if _rp_close and _rp_bz[1] and _rp_close > float(_rp_bz[1]) * 1.05:
                     continue
                 if _n >= 2:
                     break

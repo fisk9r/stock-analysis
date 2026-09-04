@@ -1662,6 +1662,11 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     def _on(k):
         return bool(_sec_cfg.get(k, True))
 
+    # 2026-09-04 推荐推送新模式：买入点候选/持仓操作/板块强弱三段式取代旧分散段落。
+    # 旧段落（推荐Top5/连板计划/趋势三档/买点候选/回踩/波段/自选持仓）默认关闭，
+    # 仅在 notify.json sections.legacy_rec=true 时回退渲染。
+    _legacy = bool(_sec_cfg.get("legacy_rec", False))
+
     # ══════════════════════════════════════════════════════════════════
     # 2026-09-04 用户拍板：推送瘦身 + 彻底消灭「同一只票既说买又说卖」
     #   ① 全局去重 _claim：一只票全篇只出现一次，先到先得。
@@ -1741,6 +1746,127 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         L.append("")
         for b in bl:
             L.append("- ✨ %s" % b)
+    # ════════════════════════════════════════════════════════════════════
+    # 推荐推送新模式（2026-09-04）：三段式
+    #   段① 持仓今日操作（实盘持仓 · 跟着做，最优先）
+    #   段② 买点候选（连板/趋势/波段，只推当下是买点的票，附板块提示+综合打分）
+    #   段③ 板块强弱 + 竞价强弱（次级，再后面推送）
+    # 旧分散段落（推荐Top5/连板计划/趋势三档/买点候选/回踩/波段/自选持仓）由
+    # _legacy 控制，默认关闭，避免重复过载。
+    # ════════════════════════════════════════════════════════════════════
+    hops = data.get("holdings_ops") or []
+    cands = data.get("buy_candidates") or {}
+    bmap = data.get("board_strength") or {}
+
+    # —— 段①：持仓今日操作 ——
+    if hops:
+        L.append("")
+        L.append("## 💼 持仓今日操作（实盘持仓 · 跟着做）")
+        for h in hops:
+            _cz = h.get("buy_zone"); _sz = h.get("sell_zone")
+            line = "- %s **%s** 成本%.2f 现%.2f %+.1f%% → **%s**" % (
+                h.get("emoji", ""), h.get("name", "?"), h.get("cost") or 0,
+                h.get("close") or 0, h.get("pnl") or 0, h.get("decision", ""))
+            _rs = h.get("reasons") or []
+            if _rs:
+                line += " ｜ " + "；".join(_rs[:2])
+            if _cz and _sz and _cz[0]:
+                line += " ｜ 买区%.2f~%.2f 卖区%.2f~%.2f 止损%.2f" % (
+                    _cz[0], _cz[1], _sz[0], _sz[1], h.get("stop") or 0)
+            L.append(line)
+            if h.get("replace") and h["decision"] in ("卖出", "卖出换股"):
+                for rp in h["replace"][:3]:
+                    rbz = rp.get("buy_zone")
+                    rnm = rp.get("name") or rp.get("code") or "?"
+                    rind = rp.get("industry") or "—"
+                    if rbz and rbz[0]:
+                        L.append("    ↳ 换：**%s**【%s】买%.2f~%.2f 卖%.2f~%.2f"
+                                 % (rnm, rind, rbz[0], rbz[1],
+                                    (rp.get("sell_zone") or [0, 0])[0],
+                                    (rp.get("sell_zone") or [0, 0])[1]))
+                    else:
+                        L.append("    ↳ 换：**%s**【%s】" % (rnm, rind))
+
+    # —— 段②：买点候选（连板 / 趋势 / 波段）——
+    def _cand_line(c, kind_emoji):
+        # 优先显示「近端可执行买区」（now_zone，现价附近直接可挂单）；
+        # 结构性 buy_zone 仅在无 now_zone 时兜底。卖区=目标区（有用）。
+        bz = c.get("buy_now") or c.get("buy_zone") or [0, 0]
+        sz = c.get("sell_zone") or [0, 0]
+        pull = c.get("buy_pull")
+        bonus = c.get("board_bonus") or 0
+        btag = (" 板块+%.0f" % bonus) if bonus > 0 else ((" 板块%.0f" % bonus) if bonus < 0 else "")
+        extra = ""
+        if c.get("streak"):
+            extra = " %d板" % c["streak"]
+        if c.get("expected_top"):
+            extra += " 预期%s" % c["expected_top"]
+        pull_s = (" ｜ 回踩买%.2f~%.2f" % (pull[0], pull[1])) if (pull and pull[0] and pull[1] and abs(pull[0] - bz[0]) > 0.02) else ""
+        return ("- %s **%s**【%s】现价%.2f%s ｜ 买%.2f~%.2f%s 卖%.2f~%.2f ｜ "
+                "综合**%.0f分**(基础%.0f%s) ｜ %s"
+                % (kind_emoji, c.get("name", "?"), c.get("board", "—"), c.get("close") or 0,
+                   extra, bz[0], bz[1], pull_s, sz[0], sz[1], c.get("score", 0),
+                   c.get("base_score", 0), btag, c.get("entry_state", "")))
+
+    _lad = cands.get("ladder") or []
+    _tr = cands.get("trend") or []
+    _bd = cands.get("band") or []
+    if _lad or _tr or _bd:
+        L.append("")
+        L.append("## 🎯 买点候选（只推当下就是买点的票）")
+        if _lad:
+            L.append("")
+            L.append("**🔥 连板票（次日竞价达标的才买，不追高）**")
+            for c in _lad:
+                L.append(_cand_line(c, "🔥"))
+        if _tr:
+            L.append("")
+            L.append("**🚀 趋势票（回踩买点 / 现价可买）**")
+            for c in _tr:
+                L.append(_cand_line(c, "🚀"))
+        if _bd:
+            L.append("")
+            L.append("**🔁 波段/阶段底（低吸反复确认的 stage 底）**")
+            for c in _bd:
+                L.append(_cand_line(c, "🔁"))
+    else:
+        L.append("")
+        L.append("## 🎯 买点候选")
+        L.append("> 今日三池（连板/趋势/波段）无「当下就在买点」的票，不硬推——等回踩到位或新热点出现再上。")
+
+    # —— 段③（次级）：板块强弱 + 竞价强弱 ——
+    _st = rec.get("sector_trend") or []
+    _money = data.get("money") or {}
+    L.append("")
+    L.append("## 📊 板块强弱（今日主线 · 综合打分依据）")
+    if _st:
+        for s in _st[:6]:
+            leads = s.get("leads") or []
+            lnames = "、".join((l.get("name") or "") for l in leads[:4] if l.get("name"))
+            L.append("- **%s**【%s】%s" % (s.get("sector", "?"), s.get("tier", ""),
+                                          ("龙头：" + lnames) if lnames else ""))
+    else:
+        L.append("- （今日无显著主线板块）")
+    _bins = _money.get("boards_in") or []
+    if _bins:
+        L.append("主力净流入：%s" % "、".join(
+            "%s %+.1f亿" % (b.get("name", ""), b.get("net") or 0) for b in _bins[:3]))
+    # 竞价强弱
+    _sent2 = data.get("market", {}).get("sentiment", {}) or {}
+    _mic = data.get("micro") or {}
+    L.append("")
+    L.append("## ⚡ 竞价强弱（开盘定调）")
+    L.append("- 涨停晋级率 %s ｜ 封板率 %s ｜ 炸板率 %s" % (
+        _pct(_sent2.get("promote_rate")), _pct(_sent2.get("seal_rate")),
+        _pct(_mic.get("zhaban_rate"))))
+    _pp = data.get("preopen_plan") or {}
+    _relay = _pp.get("relay_dir")
+    if _relay:
+        L.append("- 接力方向：%s" % _relay)
+    if _legacy:
+        L.append("")
+        L.append("> （以下为旧版分散推荐段落，可在 config/notify.json 设 sections.legacy_rec=false 关闭）")
+
     # ---- 推荐 Top5（双重认证前置：评分+晋级率双达标排前并打 ✅，未认证殿后） ----
     L.append("")
     # 2026-09-04：连板推荐同样参与全局去重（持仓票已预先占位，此处自动跳过）
@@ -1769,7 +1895,7 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         recs = [x for x in recs if not _rvt.veto(x)]
     except Exception:
         pass
-    if recs:
+    if _legacy and recs:
         n_gated = sum(1 for x in recs if _dual_ok(x))
         L.append("🔥 **推荐 Top%d**%s"
                  % (len(recs), ("（✅双重认证 %d 只）" % n_gated) if n_gated else "（今日无双重认证标的）"))
@@ -1815,7 +1941,7 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     # 2026-09-04：连板计划同样参与全局去重（持仓票已在别处出现则此处跳过）
     lps = [p for p in (rec.get("ladder_plans") or [])
            if _on("rec") and _claim(p.get("code"))]
-    if lps:
+    if _legacy and lps:
         _sec("🎯 连板机会计划（次日竞价介入口径）", [
             "**%s** %s ｜ 买 %.2f~%.2f · 目标 %s~%.2f · 止损 %.2f · 持有%d日 · R=%.1f · 到10%%率%d%%%s"
             % (p.get("name", "?"), p.get("expected_top", ""),
@@ -1831,6 +1957,7 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     # 并参与全局去重，杜绝同一只票在趋势段说买、在别处说卖。
     trend = [t for t in (rec.get("trend") or [])
              if _on("trend") and _gate_ok(t) and _claim(t.get("code"))]
+    # 旧趋势三档段落由 _legacy 控制（默认关闭，新模式已在段②覆盖）
 
     def _trend_line(t):
         meta = t.get("trend_meta") or {}
@@ -1891,7 +2018,7 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
                 break
         return out
 
-    if trend:
+    if _legacy and trend:
         _acc = _trend_group(
             lambda t: (t.get("trend_meta") or {}).get("trend_state") == "加速上行", 3)
         _used = set(id(x) for x in _acc)
@@ -1972,7 +2099,7 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
                              lambda b: b.get("price"),
                              lambda b: (_zone_bz.get(b.get("code")) or (None, None))[0])
     _acc_bp = _all_acc[:5]
-    if _acc_bp:
+    if _legacy and _acc_bp:
         _acc_rows = []
         for b in _acc_bp:
             _acc_rows.append(
@@ -1997,7 +2124,7 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
                              lambda b: b.get("price"),
                              lambda b: (_zone_bz.get(b.get("code")) or (None, None))[0])
     _oth_bp = _all_oth[:6]
-    if _oth_bp:
+    if _legacy and _oth_bp:
         _oth_rows = []
         for b in _oth_bp:
             _oth_rows.append(
@@ -2012,7 +2139,7 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     # ---- 回踩买点（2026-09-04 用户拍板：回踩股票也是买点，加入推荐）----
     #      趋势结构完好、现价略高，挂单等回踩到位即买；单列一段给明确挂单价。
     _wait_bp = [b for b in (_bp.get("pullback") or []) if _claim(b.get("code"))][:8]
-    if _wait_bp:
+    if _legacy and _wait_bp:
         _wrows = []
         for b in _wait_bp:
             _e = b.get("entry") or {}
@@ -2028,7 +2155,7 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         _sec("⏳ 回踩买点（挂单价，回踩到位即买）", _wrows)
     # ---- 波段/阶段底（2026-09-04 新增：非主升浪、反复形成阶段底、当前回到阶段底刚启动反弹）----
     _bt = data.get("band_trade") or []
-    if _bt and _on("band"):
+    if _legacy and _bt and _on("band"):
         _btrows = []
         for b in _bt[:8]:
             _bz = b.get("buy_zone") or [0, 0]
@@ -2042,7 +2169,7 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         _sec("🔁 波段/阶段底（低吸反复底）", _btrows)
     # ---- 自选/持仓操作结论（P1/P4：跟着做）----
     _wr = rec.get("watch_reco")
-    if _wr and _wr.get("items") and _on("rec"):
+    if _legacy and _wr and _wr.get("items") and _on("rec"):
         # 2026-09-01：自选/持仓票已排序前置（watchreco.distill），条数 6→10
         # 保证用户加入自选的票（如中化国际 600500）每天都能收到操作说明。
         _sec("⭐ 自选/持仓操作", watchreco_lines({"recommend": rec}, n=10))
@@ -2051,7 +2178,7 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     # 已在趋势/买点段出现过的票再推一遍，造成「同一只票出现两次、结论还可能打架」）
     fused = [f for f in (rec.get("fused") or [])
              if _on("fused") and _claim(f.get("code"))]
-    if fused:
+    if _legacy and fused:
         _sec("🏆 综合最优解", [
             "**%s**(%s) 综合%.0f分·%d引擎共振%s ｜ %s"
             % (f.get("name", "?"), f.get("industry", "—") or "—",
