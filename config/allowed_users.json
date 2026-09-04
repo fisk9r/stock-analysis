@@ -1,0 +1,21 @@
+{
+  "users": [
+    {
+      "id": "owner",
+      "name": "我（管理员）",
+      "pass": "I8Tc9nTyooBxwcmA",
+      "holdings": [
+        {
+          "code": "002631",
+          "name": "德尔未来",
+          "cost": 10.36
+        }
+      ]
+    },
+    {
+      "id": "mmmmmm",
+      "name": "mmmmmm",
+      "pass": "msx4211851"
+    }
+  ]
+}
