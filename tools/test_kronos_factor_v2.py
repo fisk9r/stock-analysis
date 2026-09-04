@@ -85,5 +85,33 @@ check("thin", turnover_flag(2.0, 4)["flag"] == "thin")
 check("divergent", turnover_flag(30.0, 3)["flag"] == "divergent")
 check("healthy", turnover_flag(8.0, 2)["flag"] == "healthy")
 
+print("== kronos_lite 二轮增强（2026-09-04 分层量化 token / 形态熵 / 局部模式胜率）==")
+from kronos_lite import _ret_bucket, _tokenize_bar, _entropy_of_seq, _micro_edge, kronos_features
+check("_ret_bucket 中位=平(4)", _ret_bucket(0.0) == 4)
+check("_ret_bucket 单调(大涨档>小涨档)", _ret_bucket(0.05) > _ret_bucket(0.01))
+check("_ret_bucket 限幅(0.1 封顶)", _ret_bucket(0.5) == _ret_bucket(0.1))
+check("_tokenize_bar 返回(s1,s2)二元组", isinstance(_tokenize_bar(10,10.2,9.8,10.1,10.0), tuple))
+# 单调上涨序列 → 低熵（结构化、可预测）
+up_feats = kronos_features(_mk_bars(30))
+check("新特征 pattern_entropy 存在", "pattern_entropy" in up_feats)
+check("新特征 micro_edge 存在", "micro_edge" in up_feats)
+check("单调上涨序列低熵(<0.5)", up_feats.get("pattern_entropy", 1) < 0.5)
+# 震荡序列 → 高熵（随机、不可预测）
+osc = _mk_bars(30, step_pct=0)
+for i, b in enumerate(osc):
+    b["c"] = round(b["o"] * (1 + (1 if i % 2 == 0 else -1) * 0.015), 2)
+osc_feats = kronos_features(osc)
+check("震荡序列高熵(>0.7)", osc_feats.get("pattern_entropy", 0) > 0.7)
+# 局部模式方向胜率：重复 [1,2,3,4] 窗口后均上涨 → edge>0
+seq = [1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4]
+cl = [10, 11, 12, 13, 14, 11, 12, 13, 14, 11, 12, 13, 14, 11, 12, 14]
+e, n = _micro_edge(seq, cl, L=4, min_support=2)
+check("_micro_edge 找到重复窗口且判涨(edge>0,n>=2)", e is not None and e > 0 and n >= 2)
+# bars<30 返回空（二轮增强需要足够历史做形态熵与模式匹配）
+check("bars<30 返回空 dict", kronos_features(_mk_bars(20)) == {})
+# 单调序列得分应高于震荡序列（结构化走势更被青睐）
+check("annotate 单调序列得分>震荡序列",
+      annotate_bars(_mk_bars(30)) > annotate_bars(osc))
+
 print("\nPASS=%d FAIL=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)
