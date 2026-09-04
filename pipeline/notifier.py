@@ -1753,7 +1753,7 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         L.append("")
         L.append("📊 **信号实测（近90日 · 次日收红率）**：%s"
                  % " ｜ ".join("%s %.0f%%(n=%d) 均值%+.2f%%"
-                               % (k, v["win_rate"], v["n"], v["avg_pct"]) for k, v in _tw))
+                               % (k, v["win_rate"], v["n"], v["avg_pct"]) for k, v in _tw.items()))
         _worst = min(_tw.items(), key=lambda kv: kv[1]["win_rate"])
         if _worst[1]["win_rate"] < 45:
             L.append("> ⚠ 最差标签 **%s**（胜率 %.0f%%）：仅在其出现强确认时才考虑。"
