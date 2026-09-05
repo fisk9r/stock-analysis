@@ -4703,7 +4703,7 @@
           var zn = (bz.length === 2 && bz[0] != null) ? (f(bz[0], 2) + '~' + f(bz[1], 2)) : '—';
           var sn = (sz.length === 2 && sz[0] != null) ? (f(sz[0], 2) + '~' + f(sz[1], 2)) : '—';
           var pnl = (x.pnl != null) ? ('<span class="' + (x.pnl >= 0 ? 'up' : 'down') + '">' + (x.pnl >= 0 ? '+' : '') + f(x.pnl) + '%</span>') : '—';
-          var dcls = (x.decision && (x.decision.indexOf('卖出') >= 0 || x.decision.indexOf('割肉') >= 0 || x.decision.indexOf('T+1') >= 0)) ? 'hot'
+          var dcls = (x.decision && (x.decision.indexOf('卖出') >= 0 || x.decision.indexOf('割肉') >= 0 || x.decision.indexOf('T+1') >= 0 || x.decision.indexOf('止损') >= 0 || x.decision.indexOf('止盈') >= 0 || x.decision.indexOf('减仓') >= 0)) ? 'hot'
             : ((x.decision && x.decision.indexOf('加仓') >= 0) ? 'ok' : 'hold');
           var ptag = (x.period && x.period !== '中线') ? ' <span class="bd">' + E(x.period) + '</span>' : '';
           var t1tag = x.t1_locked ? ' <span class="bd" style="color:var(--gold)">🔒T+1</span>' : '';

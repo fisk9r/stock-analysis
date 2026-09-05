@@ -221,6 +221,46 @@ def compute_holdings_ops(u, date, con, code2boards, replace_pool=None):
         if period == "short" and r.get("time_alert") and decision not in ("卖出", "卖出换股"):
             decision, emoji = "周期到期·兑现", "⏰"
             reasons.append("短线周期到期：超短线持仓到期应兑现，不恋战")
+        # ---- 最优动作层（2026-09-05 #500 用户：「只要最优结果，不拿我当试验品」）----
+        # 在 zones 技术结论之上叠加**盈亏分档 + 回测实证依据**：模糊的
+        # 「继续持有/谨慎持有」升级为带条件价位的明确动作；巨亏票明确
+        # 割肉/减仓而非含糊，且**不建议盲目加仓摊薄**（实证：亏损票加仓
+        # 是散户最大亏损放大器；统一止损可挽回 5.16%/笔，rec_attr 460+ 样本）。
+        # zones 已给「卖出/破位」的保留不动（技术破位优先于分档）。
+        _pnl = r.get("pnl_pct")
+        _close = r.get("close")
+        _sz = r.get("sell_zone") or [None, None]
+        _stop = r.get("stop")
+        if _pnl is not None and decision not in ("卖出", "卖出换股"):
+            if _pnl >= 0:
+                if _pnl >= 15 or (_sz[0] and _close and _close >= _sz[0]):
+                    decision, emoji = "分批止盈·先减一半", "💰"
+                    reasons.insert(0, "实证依据：亏损票 51.2% 曾冲高≥2% 后回落——浮盈进卖区，先落袋一半")
+                elif _pnl >= 5:
+                    decision, emoji = "格局持有·移动止盈", "🎯"
+                    if _stop:
+                        reasons.insert(0, "条件：守住止损 %.2f 继续持有（止损已上移则跟移）；跌破无条件兑现" % _stop)
+                elif _pnl >= 2:
+                    decision, emoji = "持有·浮盈≥2%可先减半", "🔒"
+                    reasons.insert(0, "回测纪律：浮盈≥2% 先减半仓锁定（同一条落袋实证），剩余移动止盈")
+                else:
+                    decision, emoji = "继续持有·破MA20减仓", "📌"
+                    reasons.insert(0, "微利状态：守住 MA20 持有，跌破减仓不幻想")
+            else:
+                if _pnl <= -10:
+                    decision, emoji = "纪律割肉·换强势票", "🛑"
+                    reasons.insert(0, "实证依据：统一止损可挽回 5.16%/笔（460+ 样本）；"
+                                      "巨亏票加仓摊薄=放大错误，❌不建议加仓——换强势板块票胜率更高")
+                elif _pnl <= -5:
+                    decision, emoji = "反弹减仓·控制风险", "⚠️"
+                    _rz = _sz[0] or ((_close * 1.06) if _close else None)
+                    if _rz:
+                        reasons.insert(0, "条件：反弹至 %.2f 附近先出一半；直接破 %.2f 无条件清仓"
+                                      % (_rz, _stop or (_close * 0.92 if _close else 0)))
+                else:
+                    decision, emoji = "止损观察·破位即走", "🛡"
+                    if _stop:
+                        reasons.insert(0, "条件：跌破止损 %.2f 无条件执行，不抗单、不摊薄" % _stop)
         # ---- T+1 锁定（红线，压过一切卖出类结论） ----
         if t1_locked:
             reasons = ["🔒 今日(%s)买入，T+1 规则今日不可卖出" % buy_date] + reasons
@@ -236,10 +276,12 @@ def compute_holdings_ops(u, date, con, code2boards, replace_pool=None):
             "time_status": r.get("time_status"),
             "reasons": reasons, "replace": r.get("replace") or [],
         })
-    # 卖出类置顶，确保最该看的先出现
-    _ord = {"卖出": 0, "卖出换股": 1, "周期到期·兑现": 2, "T+1锁定·明日执行": 3,
-            "加仓低吸": 4, "格局持有·注意止盈": 5,
-            "谨慎持有·观察": 6, "继续持有·格局": 7}
+    # 卖出类置顶，确保最该看的先出现（#500 最优动作层的新决策名并入）
+    _ord = {"卖出": 0, "卖出换股": 1, "纪律割肉·换强势票": 1, "周期到期·兑现": 2,
+            "分批止盈·先减一半": 2, "反弹减仓·控制风险": 2, "止损观察·破位即走": 3,
+            "T+1锁定·明日执行": 4, "加仓低吸": 5,
+            "持有·浮盈≥2%可先减半": 6, "格局持有·移动止盈": 6, "格局持有·注意止盈": 6,
+            "谨慎持有·观察": 7, "继续持有·破MA20减仓": 8, "继续持有·格局": 8}
     out.sort(key=lambda x: (_ord.get(x["decision"], 9), -(x.get("pnl") or 0)))
     return out
 
