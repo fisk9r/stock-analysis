@@ -27,7 +27,8 @@ URGENT = ("涨停", "跌停", "炸板", "趋势破位")
 
 
 def load_watch_codes():
-    """合并 notify.json watch + holdings.json watch==true + config/watch.json（网页管理写回）。
+    """合并 notify.json watch + holdings.json watch==true + config/watch.json（网页管理写回）
+    + config/watch_user.json（网页自选池自动回传，2026-09-05 #489）。
     返回 (codes, names, added) —— added: {code: "2026-08-01"} 用户显式标注的关注锚点日（可选）。"""
     codes, names, added = [], {}, {}
     root = store.ROOT
@@ -46,6 +47,22 @@ def load_watch_codes():
                     codes.append(c); names[c] = x.get("name") or ""
                 if x.get("added"):
                     added[c] = str(x["added"]).strip()
+    except Exception:
+        pass
+    # 1.5) 网页自选池自动回传（#489：watchx.js save() 后 PUT 到仓库的文件）。
+    # 断点史：自选池曾纯存浏览器 localStorage，云端构建永远读不到 → 用户
+    # 「加了自选但推送永远不出现」。此文件即网页端与 CI 之间的桥。
+    wup = os.path.join(root, "config", "watch_user.json")
+    try:
+        wu = json.load(open(wup, encoding="utf-8")) or {}
+        for x in (wu.get("items") or []):
+            if isinstance(x, dict) and x.get("code"):
+                c = str(x["code"]).zfill(6)
+                if c not in names:
+                    codes.append(c)
+                    names[c] = x.get("name") or ""
+                if x.get("at"):
+                    added.setdefault(c, str(x["at"]).strip()[:10])
     except Exception:
         pass
     np = os.path.join(root, "config", "notify.json")

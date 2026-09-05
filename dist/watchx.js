@@ -46,7 +46,71 @@
     } catch (e) {}
     return [];
   }
-  function save(arr) { try { localStorage.setItem(LS_KEY, JSON.stringify(arr)); } catch (e) {} }
+  function save(arr) {
+    try { localStorage.setItem(LS_KEY, JSON.stringify(arr)); } catch (e) {}
+    scheduleSync(arr);
+  }
+
+  /* ---------------- 云端回传（2026-09-05 #489 修复「无法添加自选」）----------------
+   * 断点史：自选池此前纯存 localStorage——网页上加自选只有本机可见，云端 CI
+   * 构建的推送/关注股雷达永远读不到 → 用户体感「无法添加自选」。
+   * 现在 save() 后 3 秒防抖，自动把整个池 PUT 到仓库 config/watch_user.json
+   * （私有仓库）。CI 的 watchlist.load_watch_codes() 会读它合并进关注池。
+   * token 复用「推送中心」记住的 GitHub PAT（localStorage key sa_gh_token）；
+   * 无 token 时静默跳过——本机功能（操作台/告警）不受任何影响。 */
+  var _syncTimer = null, _lastSyncJs = '', _syncFailNoted = false;
+  function scheduleSync(arr) {
+    var js = '';
+    try { js = JSON.stringify(arr || []); } catch (e) { return; }
+    if (js === _lastSyncJs) return;                       // 无变化不回传
+    clearTimeout(_syncTimer);
+    _syncTimer = setTimeout(function () { syncToGithub(arr); }, 3000);
+  }
+  function _syncToken() {
+    try {
+      return window.SA_GH_TOKEN ||
+             sessionStorage.getItem('sa_gh_token') ||
+             localStorage.getItem('sa_gh_token') || '';
+    } catch (e) { return ''; }
+  }
+  function syncToGithub(arr) {
+    var tok = _syncToken();
+    if (!tok || !window.fetch) return Promise.resolve({ ok: false, msg: '无token，仅本机保存' });
+    var items = arr || load();
+    var body = JSON.stringify({
+      updated: new Date().toISOString(),
+      source: 'web',
+      items: items
+    });
+    var headers = {
+      'Authorization': 'Bearer ' + tok,
+      'Accept': 'application/vnd.github+json',
+      'Content-Type': 'application/json'
+    };
+    var api = 'https://api.github.com/repos/fisk9r/stock-analysis/contents/config/watch_user.json';
+    return fetch(api, { headers: headers }).then(function (r) {
+      return r.ok ? r.json() : null;                      // 404=新建，无需 sha
+    }).then(function (meta) {
+      var payload = {
+        message: 'watchx: 自选池同步（网页端自动回传）',
+        content: btoa(unescape(encodeURIComponent(body)))
+      };
+      if (meta && meta.sha) payload.sha = meta.sha;
+      return fetch(api, { method: 'PUT', headers: headers, body: JSON.stringify(payload) });
+    }).then(function (r) {
+      if (r.status === 200 || r.status === 201) {
+        _lastSyncJs = JSON.stringify(items);
+        return { ok: true, msg: '已同步到云端（下次构建生效）' };
+      }
+      throw new Error('HTTP ' + r.status);
+    }).catch(function (e) {
+      if (!_syncFailNoted) {
+        _syncFailNoted = true;
+        toast('自选已存本机，但云同步失败：' + (e && e.message || e), 'err');
+      }
+      return { ok: false, msg: String(e) };
+    });
+  }
   function nowStr() {
     var d = new Date();
     return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
@@ -618,6 +682,7 @@
     realtime: realtime, thresholdsFor: thresholdsFor,
     tradingNow: tradingNow, phase: phase,
     toast: toast, quickBtnHtml: quickBtnHtml,
-    renderPanel: renderPanel, _MON: MON
+    renderPanel: renderPanel, _MON: MON,
+    syncToGithub: syncToGithub                      // #489 手动触发云端回传
   };
 })();

@@ -1029,6 +1029,15 @@ def run(date_override=None, dedup_close=False):
         data["board_strength"] = _bmap
         data["holdings_ops"] = _hpos
         data["buy_candidates"] = _bc
+        # 今日该买什么（2026-09-05 #490 用户：「不知道该买连板还是区间」）：
+        # 三池合并 + 环境自适应统一评分 → 直接给优先级 Top5，不给三堆让人挑。
+        try:
+            data["top_picks"] = _rp.compute_top_picks(_bc, data, topn=5)
+            _tp = data["top_picks"]
+            log("  今日该买什么：环境[%s] Top%d" % (_tp.get("env_note", "")[:40],
+                                                 len(_tp.get("items") or [])))
+        except Exception as _tp_e:
+            log("  top_picks 失败（不影响主流程）：%r" % _tp_e)
         log("  推荐新模式：持仓%d 买点[连板%d/趋势%d/波段%d] 板块强度%d"
             % (len(_hpos), len(_bc.get("ladder") or []), len(_bc.get("trend") or []),
                len(_bc.get("band") or []), len(_bmap)))

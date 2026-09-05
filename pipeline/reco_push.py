@@ -471,3 +471,66 @@ def compute_buy_candidates(rec, u, date, code2boards, bmap, ladder_warn=None,
         "ladder_warn": ladder_warn,
         "period": w["label"],
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ④ 今日该买什么（2026-09-05 #490）
+# ═══════════════════════════════════════════════════════════════════════════
+def env_bias(data):
+    """按市场环境给三类池加权系数 + 一句话环境结论。
+
+    用户的问题：「到底买连板还是区间？」——答案随环境变：
+      接力好（晋级率高、炸板少）→ 连板加分；
+      炸板多/退潮 → 连板降权，波段（低吸）加分；
+      情绪暖 → 趋势延续加分。
+    口径来源：sentiment.promote_rate（晋级率）/ micro.zhaban_rate（炸板率）/
+    sentiment.score（情绪分），均为 data 既有字段。
+    """
+    sent = ((data.get("market") or {}).get("sentiment") or {})
+    micro = data.get("micro") or {}
+    promote = float(sent.get("promote_rate") or 0)
+    zhaban = float(micro.get("zhaban_rate") or 0)
+    score = float(sent.get("score") or 50)
+    w = {"连板": 1.0, "趋势": 1.0, "波段": 1.0}
+    notes = []
+    if promote >= 0.55 and zhaban <= 0.30:
+        w["连板"] *= 1.25
+        notes.append("涨停晋级率%.0f%%且炸板仅%.0f%%，接力环境好，连板优先"
+                     % (promote * 100, zhaban * 100))
+    elif zhaban >= 0.40:
+        w["连板"] *= 0.70
+        notes.append("炸板率%.0f%%偏高（封板不稳），降连板权重" % (zhaban * 100))
+    elif promote < 0.40:
+        w["连板"] *= 0.85
+        notes.append("晋级率仅%.0f%%，接力偏弱" % (promote * 100))
+    if score >= 60:
+        w["趋势"] *= 1.15
+        notes.append("情绪分%.0f偏暖，趋势延续概率高" % score)
+    if score <= 40 or (promote < 0.40 and zhaban >= 0.35):
+        w["波段"] *= 1.20
+        notes.append("情绪偏弱/退潮，低吸波段优于追高")
+    return w, "；".join(notes) or "环境中性，三类平权"
+
+
+def compute_top_picks(cands, data, topn=5):
+    """三池合并 → 环境加权统一评分 → 「今日该买什么」优先级 TopN。
+
+    与 buy_candidates 的分工：buy_candidates 按池分类展示（谁都能看懂类型），
+    top_picks 直接回答「现在最该买哪只、为什么是它」。决策优先排序：
+    ✅现在买 永远排在 ⏳等回踩 / 👀观望 之前。
+    """
+    w, note = env_bias(data)
+    all_ = []
+    for kind, key in (("连板", "ladder"), ("趋势", "trend"), ("波段", "band")):
+        for c in (cands.get(key) or []):
+            x = dict(c)
+            x["score"] = round(min(100, (c.get("score") or 0) * w.get(kind, 1.0)), 1)
+            x["env_weight"] = round(w.get(kind, 1.0), 2)
+            all_.append(x)
+    ordm = {"现在买": 0, "等回踩": 1, "观望": 2}
+    all_.sort(key=lambda x: (ordm.get(x.get("action"), 3), -(x.get("score") or 0)))
+    return {
+        "items": all_[:topn],
+        "env_note": note,
+        "weights": {k: round(v, 2) for k, v in w.items()},
+    }

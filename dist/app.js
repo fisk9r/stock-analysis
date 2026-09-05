@@ -4712,6 +4712,35 @@
         h += card('💼 持仓今日操作', '<div class="empty">未配置持仓（在「持股监测」页添加）</div>', '');
       }
 
+      /* ①.5 今日该买什么（2026-09-05 #490）：三池合并环境加权 Top5，
+         直接回答「买连板还是区间」——排名 + 环境一句话 + 决策。 */
+      var TP = D.top_picks || {};
+      var TPI = TP.items || [];
+      if (TPI.length) {
+        var tpRows = TPI.map(function (c, i) {
+          var kcol = c.kind === '连板' ? C.gold : C.up;
+          var acl = c.action === '现在买' ? 'ok' : 'hold';
+          var up = c.upside;
+          var upS = (up != null) ? ' <span class="' + (up >= 0 ? 'up' : 'down') + '">' + (up >= 0 ? '+' : '') + f(up, 1) + '%</span>' : '';
+          var px = (c.buy_price != null) ? f(c.buy_price, 2) : '—';
+          var tgt = (c.target != null) ? (f(c.target, 2) + upS) : '—';
+          var stp = (c.stop != null) ? f(c.stop, 2) : '—';
+          return '<tr>' +
+            '<td style="font-weight:700;color:var(--gold)">' + (i + 1) + '</td>' +
+            '<td><span class="ent ' + acl + '">' + (c.act_emoji || '👀') + ' ' + E(c.action || '观望') + '</span></td>' +
+            '<td><span class="bd" style="border-color:' + kcol + ';color:' + kcol + '">' + E(c.kind) + '</span> ' + stk(c.code, c.name) + '</td>' +
+            '<td class="num" style="color:var(--up)">' + px + '</td>' +
+            '<td class="num">' + tgt + '</td>' +
+            '<td class="num" style="color:var(--down)">' + stp + '</td>' +
+            '<td class="num" style="font-weight:700">' + f(c.score || 0, 0) + '</td>' +
+            '<td class="note">' + E(c.reason || '') + '</td>' +
+            '</tr>';
+        }).join('');
+        h += card('🥇 今日该买什么（按环境统一排序）', table([
+          { t: '#' }, { t: '决策' }, { t: '类型/个股' }, { t: '买价', a: 'num' }, { t: '目标(空间)', a: 'num' }, { t: '止损', a: 'num' }, { t: '分', a: 'num' }, { t: '一句话理由' }
+        ], tpRows), '环境判断：' + E(TP.env_note || '环境中性，三类平权') + '。三类池（连板/趋势/波段）合并后按当前市场环境加权统一排序——接力好推连板、退潮推波段低吸、情绪暖推趋势。');
+      }
+
       /* ② 买点候选：合并连板/趋势/波段。
          2026-09-05 #487：决策优先——第一列就是答案（✅现在买/⏳等回踩/👀观望），
          不再让用户从 8 列数字里自己猜结论。 */

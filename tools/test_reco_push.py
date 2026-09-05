@@ -128,6 +128,48 @@ c2 = rp._mk_cand("x", "t", "趋势", "光伏", [1, 2], [3, 4], 0.9, -5, -30, "�
 check("_mk_cand: 综合分裁剪>=0", c2["score"] == 0, c2["score"])
 check("_mk_cand: buy_now/buy_pull 透传", c1.get("buy_now") is None and c1.get("buy_pull") is None)
 
+# ---- 2026-09-05 #490 今日该买什么：环境加权 + 统一排序 ----
+print("\n[#490 今日该买什么]")
+_w_strong, _n_strong = rp.env_bias({"market": {"sentiment": {"promote_rate": 0.67, "score": 65}},
+                                     "micro": {"zhaban_rate": 0.2}})
+check("env_bias 强市连板加权1.25", _w_strong["连板"] > 1.2, str(_w_strong))
+check("env_bias 强市环境注含接力", "接力" in _n_strong, _n_strong)
+_w_cold, _n_cold = rp.env_bias({"market": {"sentiment": {"promote_rate": 0.35, "score": 38}},
+                                 "micro": {"zhaban_rate": 0.45}})
+check("env_bias 退潮连板降权", _w_cold["连板"] < 0.8 and _w_cold["波段"] > 1.1, str(_w_cold))
+_tp_cands = {
+    "ladder": [{"code": "1", "name": "连板票", "kind": "连板", "score": 80, "action": "等回踩",
+                "buy_price": 10, "target": 11, "upside": 10, "stop": 9.5, "reason": "x"}],
+    "trend": [{"code": "2", "name": "趋势票", "kind": "趋势", "score": 70, "action": "现在买",
+               "buy_price": 20, "target": 23, "upside": 15, "stop": 19, "reason": "y"}],
+    "band": [{"code": "3", "name": "波段票", "kind": "波段", "score": 60, "action": "现在买",
+              "buy_price": 5, "target": 6, "upside": 20, "stop": 4.7, "reason": "z"}],
+}
+_tp = rp.compute_top_picks(_tp_cands, {"market": {"sentiment": {"promote_rate": 0.35, "score": 38}},
+                                        "micro": {"zhaban_rate": 0.45}}, topn=3)
+check("top_picks 现在买优先于等回踩", _tp["items"][0]["action"] == "现在买", str(_tp["items"][0]))
+check("top_picks 退潮环境波段升第一", _tp["items"][0]["kind"] == "波段", _tp["items"][0]["kind"])
+check("top_picks 连板退潮降分", _tp["items"][2]["score"] < 60, str(_tp["items"][2]["score"]))
+check("top_picks 含环境注", "炸板" in _tp["env_note"], _tp["env_note"])
+
+# ---- #489 自选池云端回传链路（云端侧）----
+print("\n[#489 watch_user.json 云端合并]")
+import json as _json, tempfile, os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "..", "pipeline"))
+try:
+    import watchlist as _wl
+    _td = tempfile.mkdtemp(prefix="wluser_")
+    _cfg = _os.path.join(_td, "config")
+    _os.makedirs(_cfg, exist_ok=True)
+    _wl.store.ROOT = _td
+    _json.dump({"items": [{"code": "600500", "name": "中化国际", "at": "2026-09-05"}]},
+               open(_os.path.join(_cfg, "watch_user.json"), "w", encoding="utf-8"))
+    _cs, _ns, _as = _wl.load_watch_codes()
+    check("watch_user.json 并入关注池", "600500" in _cs, str(_cs))
+    check("watch_user.json 锚点日生效", _as.get("600500") == "2026-09-05", str(_as))
+except Exception as _e:
+    check("watch_user.json 合并", False, repr(_e))
+
 
 print("\nPASS=%d FAIL=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

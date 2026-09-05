@@ -1886,6 +1886,37 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
     _tr = cands.get("trend") or []
     _bd = cands.get("band") or []
     _buy_on = (not _scope) or (_scope.get("sections") or {}).get("buy", True)
+
+    # —— 段②前哨（2026-09-05 #490）：今日该买什么（三池合并环境加权 Top5）——
+    # 直接回答用户「到底买连板还是区间」：不给三堆让人挑，给优先级清单。
+    _tp = data.get("top_picks") or {}
+    _tp_items = _tp.get("items") or []
+    if _tp_items and _buy_on:
+        L.append("")
+        L.append("## 🥇 今日该买什么（三池合并 · 按环境统一排序）")
+        _env = _tp.get("env_note") or ""
+        if _env:
+            L.append("> 环境判断：%s" % _env)
+        for _i, c in enumerate(_tp_items):
+            _act = c.get("act_emoji") or "👀"
+            _px, _tgt, _up, _sp = c.get("buy_price"), c.get("target"), c.get("upside"), c.get("stop")
+            _p = []
+            if _px:
+                _p.append("买%.2f" % _px)
+            if _tgt:
+                _p.append("→%.2f" % _tgt)
+            if _up is not None:
+                _p.append("**%+.1f%%**" % _up)
+            if _sp:
+                _p.append("止损%.2f" % _sp)
+            L.append("%d. %s **%s** %s(%s)【%s】%s ｜ %.0f分"
+                     % (_i + 1, _act, c.get("action") or "观望", c.get("name", "?"),
+                        c.get("code") or "", c.get("kind", "?"), " ".join(_p),
+                        c.get("score", 0)))
+            if c.get("reason"):
+                L.append("    └ " + c["reason"])
+        L.append("> （分类明细见下方「买点候选」）")
+
     if (_lad or _tr or _bd) and _buy_on:
         L.append("")
         L.append("## 🎯 买点候选（只推当下就是买点的票）")
