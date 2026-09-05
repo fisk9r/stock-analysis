@@ -4722,8 +4722,10 @@
           var acl = c.action === '现在买' ? 'ok' : 'hold';
           var up = c.upside;
           var upS = (up != null) ? ' <span class="' + (up >= 0 ? 'up' : 'down') + '">' + (up >= 0 ? '+' : '') + f(up, 1) + '%</span>' : '';
-          var px = (c.buy_price != null) ? f(c.buy_price, 2) : '—';
-          var tgt = (c.target != null) ? (f(c.target, 2) + upS) : '—';
+          var bz = c.buy_now || c.buy_zone || [];
+          var sz = c.sell_zone || [];
+          var px = (bz.length === 2 && bz[0] != null) ? (f(bz[0], 2) + '~' + f(bz[1], 2)) : ((c.buy_price != null) ? f(c.buy_price, 2) : '—');
+          var tgt = (sz.length === 2 && sz[0] != null) ? (f(sz[0], 2) + '~' + f(sz[1], 2) + upS) : '—';
           var stp = (c.stop != null) ? f(c.stop, 2) : '—';
           return '<tr>' +
             '<td style="font-weight:700;color:var(--gold)">' + (i + 1) + '</td>' +
@@ -4737,8 +4739,8 @@
             '</tr>';
         }).join('');
         h += card('🥇 今日该买什么（按环境统一排序）', table([
-          { t: '#' }, { t: '决策' }, { t: '类型/个股' }, { t: '买价', a: 'num' }, { t: '目标(空间)', a: 'num' }, { t: '止损', a: 'num' }, { t: '分', a: 'num' }, { t: '一句话理由' }
-        ], tpRows), '环境判断：' + E(TP.env_note || '环境中性，三类平权') + '。三类池（连板/趋势/波段）合并后按当前市场环境加权统一排序——接力好推连板、退潮推波段低吸、情绪暖推趋势。');
+          { t: '#' }, { t: '决策' }, { t: '类型/个股' }, { t: '买入区间', a: 'num' }, { t: '卖出区间(空间)', a: 'num' }, { t: '止损', a: 'num' }, { t: '分', a: 'num' }, { t: '一句话理由' }
+        ], tpRows), '环境判断：' + E(TP.env_note || '环境中性，三类平权') + '。三类池（连板/趋势/波段）合并后按当前市场环境加权统一排序——接力好推连板、退潮推波段低吸、情绪暖推趋势。只列能买的票（现在买/等回踩挂单价），天上票不进榜。');
       }
 
       /* ② 买点候选：合并连板/趋势/波段。
@@ -4761,8 +4763,10 @@
           var aemoji = c.act_emoji || '👀';
           var up = c.upside;
           var upS = (up != null) ? ' <span class="' + (up >= 0 ? 'up' : 'down') + '">' + (up >= 0 ? '+' : '') + f(up, 1) + '%</span>' : '';
-          var tgt = (c.target != null) ? (f(c.target, 2) + upS) : '—';
-          var bp = (c.buy_price != null) ? f(c.buy_price, 2) : '—';
+          var _bz2 = c.buy_now || c.buy_zone || [];
+          var _sz2 = c.sell_zone || [];
+          var bp = (_bz2.length === 2 && _bz2[0] != null) ? (f(_bz2[0], 2) + '~' + f(_bz2[1], 2)) : ((c.buy_price != null) ? f(c.buy_price, 2) : '—');
+          var tgt = (_sz2.length === 2 && _sz2[0] != null) ? (f(_sz2[0], 2) + '~' + f(_sz2[1], 2) + upS) : '—';
           var stp = (c.stop != null) ? f(c.stop, 2) : '—';
           return '<tr>' +
             '<td><span class="ent ' + acl + '">' + aemoji + ' ' + E(c.action || '观望') + '</span></td>' +
@@ -4776,7 +4780,7 @@
             '</tr>';
         }).join('');
         h += card('🎯 买点候选（✅=现在买 ⏳=等回踩价 👀=观望）', table([
-          { t: '决策' }, { t: '类型/个股' }, { t: '板块' }, { t: '买价', a: 'num' }, { t: '目标(空间)', a: 'num' }, { t: '止损', a: 'num' }, { t: '分', a: 'num' }, { t: '一句话理由' }
+          { t: '决策' }, { t: '类型/个股' }, { t: '板块' }, { t: '买入区间', a: 'num' }, { t: '卖出区间(空间)', a: 'num' }, { t: '止损', a: 'num' }, { t: '分', a: 'num' }, { t: '一句话理由' }
         ], crows), '第一列就是答案：✅ 现在买（现价已在买区内）/ ⏳ 等回踩到给定价位再买 / 👀 观望。已按市场准入过滤——仅沪深主板+创业板（科创板/北交所未开通不推）。');
       } else {
         h += card('🎯 买点候选', '<div class="empty">今日无明确买点候选</div>', '');

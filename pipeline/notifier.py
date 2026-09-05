@@ -1850,11 +1850,10 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
 
     # —— 段②：买点候选（连板 / 趋势 / 波段）——
     def _cand_line(c, kind_emoji):
-        """2026-09-05 #487 重写（用户：「每个都要看半天，到底买还是不买也不清楚」）。
+        """2026-09-05 #487 重写 + #492 区间明确化（用户：「买入区间、卖出区间要明确」）。
 
-        旧格式一行塞 8 个字段（现价/买区/回踩区/卖区/综合分/基础分/板块分/形态），
-        信息量够但没有结论。新格式两行，第一行就是答案：
-            行1  ✅ 现在买 立新能源(001258) 买12.35→13.80 **+11.7%** 止损11.90 ｜72分
+        两行式，第一行就是答案，且**买区/卖区区间明确**：
+            行1  ✅ 现在买 立新能源(001258) 买区12.10~12.72(挂单12.35) → 卖区13.30~13.80 **+11.7%** 止损11.40 ｜72分
             行2     └ 阶段底12.22反复7次 · 电力
         决策符号：✅ 现在买（现价已在买区内）⏳ 等回踩X元（给挂单价）👀 观望
         """
@@ -1864,10 +1863,20 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         tgt = c.get("target")
         up = c.get("upside")
         sp = c.get("stop")
+        # 买区/卖区区间（#492）：优先近端可执行买区 buy_now，回退结构性 buy_zone
+        _bz = c.get("buy_now") or c.get("buy_zone") or None
+        _sz = c.get("sell_zone") or None
         _p = []
-        if px:
+        if _bz and len(_bz) >= 2 and _bz[0]:
+            _p.append("买区%.2f~%.2f" % (_bz[0], _bz[1]))
+            # 挂单价与区间上沿不同才标注（等回踩时挂单价=区间上沿会重复）
+            if px and abs(px - _bz[1]) > 0.02:
+                _p.append("挂单%.2f" % px)
+        elif px:
             _p.append("买%.2f" % px)
-        if tgt:
+        if _sz and len(_sz) >= 2 and _sz[1]:
+            _p.append("→卖区%.2f~%.2f" % (_sz[0], _sz[1]))
+        elif tgt:
             _p.append("→%.2f" % tgt)
         if up is not None:
             _p.append("**%+.1f%%**" % up)
@@ -1899,12 +1908,18 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
             L.append("> 环境判断：%s" % _env)
         for _i, c in enumerate(_tp_items):
             _act = c.get("act_emoji") or "👀"
-            _px, _tgt, _up, _sp = c.get("buy_price"), c.get("target"), c.get("upside"), c.get("stop")
+            _px, _up, _sp = c.get("buy_price"), c.get("upside"), c.get("stop")
+            _bz = c.get("buy_now") or c.get("buy_zone") or None
+            _sz = c.get("sell_zone") or None
             _p = []
-            if _px:
+            if _bz and len(_bz) >= 2 and _bz[0]:
+                _p.append("买区%.2f~%.2f" % (_bz[0], _bz[1]))
+                if _px and abs(_px - _bz[1]) > 0.02:
+                    _p.append("挂单%.2f" % _px)
+            elif _px:
                 _p.append("买%.2f" % _px)
-            if _tgt:
-                _p.append("→%.2f" % _tgt)
+            if _sz and len(_sz) >= 2 and _sz[1]:
+                _p.append("→卖区%.2f~%.2f" % (_sz[0], _sz[1]))
             if _up is not None:
                 _p.append("**%+.1f%%**" % _up)
             if _sp:

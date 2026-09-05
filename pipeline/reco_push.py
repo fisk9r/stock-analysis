@@ -529,6 +529,10 @@ def compute_top_picks(cands, data, topn=5):
     all_ = []
     for kind, key in (("连板", "ladder"), ("趋势", "trend"), ("波段", "band")):
         for c in (cands.get(key) or []):
+            # 2026-09-05 用户口径：top_picks 只收**能买的票**——✅现在买/⏳等回踩
+            # （有明确挂单价），👀观望（无买点）与天上票不进这个清单。
+            if (c.get("action") not in ("现在买", "等回踩")):
+                continue
             x = dict(c)
             x["score"] = round(min(100, (c.get("score") or 0) * w.get(kind, 1.0)), 1)
             x["env_weight"] = round(w.get(kind, 1.0), 2)
