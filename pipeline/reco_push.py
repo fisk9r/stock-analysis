@@ -247,10 +247,67 @@ def compute_holdings_ops(u, date, con, code2boards, replace_pool=None):
 # ═══════════════════════════════════════════════════════════════════════════
 # ② 买点候选（连板 / 趋势 / 波段）
 # ═══════════════════════════════════════════════════════════════════════════
+def _one_line_reason(c):
+    """一句话理由（#487）：说清「为什么是它」，与决策行配合看秒懂。"""
+    kind = c.get("kind")
+    board = c.get("board") or "—"
+    if kind == "连板":
+        return "%s板 · 预期%s · %s" % (c.get("streak") or "?",
+                                       c.get("expected_top") or "—", board)
+    if kind == "波段":
+        # #488：按用户口径展示「底 X → 高 Y（空间%）」，可直接照着做
+        lo = c.get("range_low") or c.get("bottom") or "?"
+        hi = c.get("range_high")
+        up = c.get("upside")
+        seg = "底%s" % lo
+        if hi:
+            seg += "→高%s" % hi
+        if up:
+            seg += "(%+.0f%%)" % up
+        return "区间%s 反复%s次 · %s" % (seg, c.get("touches") or 0, board)
+    ts = c.get("trend_state") or c.get("band") or ""
+    return "%s · %s" % ((ts + "趋势") if ts else "趋势向上", board)
+
+
+def _decide(c, buy_now, bz, sz):
+    """把一只候选压缩成**一句话可执行的决策**（2026-09-05 #487）。
+
+    用户反馈：「每个都要看半天，到底买还是不买我也不清楚」——旧格式一行塞
+    现价/买区/回踩区/卖区/综合分/基础分/板块分/形态状态共 8 个字段，却没有
+    结论。这里直接算出三件事：
+      action  ✅ 现在买 / ⏳ 等回踩X元 / 👀 观望
+      buy_price  具体挂单价（不是区间）
+      target/upside  目标价与空间%（值不值得买的核心判据）
+    """
+    close = c.get("close")
+    buy_ref = buy_now or bz or None
+    buy_px = None
+    if buy_ref and len(buy_ref) >= 2 and buy_ref[1]:
+        buy_px = round(float(buy_ref[1]), 2)
+    tgt = None
+    if sz and len(sz) >= 2 and sz[1]:
+        tgt = round(float(sz[1]), 2)
+    # 现价已在买区内（含 0.5% 容差）→ 现在就能买；否则给回踩挂单价
+    if buy_px and close and float(close) <= buy_px * 1.005:
+        action, emoji = "现在买", "✅"
+        px = round(float(close), 2)
+    elif buy_px:
+        action, emoji = "等回踩%.2f" % buy_px, "⏳"
+        px = buy_px
+    else:
+        action, emoji = "观望", "👀"
+        px = round(float(close), 2) if close else None
+    upside = round((tgt / px - 1) * 100, 1) if (px and tgt and px > 0) else None
+    return action, emoji, px, tgt, upside, _one_line_reason(c)
+
+
 def _mk_cand(code, name, kind, board, bz, sz, sp, base, bonus, entry_state,
              extra=None, buy_now=None, buy_pull=None):
     """buy_now = 近端可执行买区(now_zone, 现价附近, 直接可挂单)；buy_pull = 回踩买区(pull_zone)。
-    buy_zone/sell_zone 保留为结构性参考区（band_levels）。推送主显示用 buy_now。"""
+    buy_zone/sell_zone 保留为结构性参考区（band_levels）。推送主显示用 buy_now。
+
+    2026-09-05 #487：额外算出 action/act_emoji/buy_price/target/upside/reason，
+    让推送与网页都能「一眼看到买不买」。"""
     score = _clip(base + bonus, 0, 100)
     c = {
         "code": code, "name": name, "kind": kind, "board": board or "—",
@@ -261,6 +318,17 @@ def _mk_cand(code, name, kind, board, bz, sz, sp, base, bonus, entry_state,
     }
     if extra:
         c.update(extra)
+    # 决策字段依赖 extra（close/bottom/streak 等），须在 update 之后计算
+    try:
+        (c["action"], c["act_emoji"], c["buy_price"],
+         c["target"], c["upside"], c["reason"]) = _decide(c, buy_now, bz, sz)
+    except Exception:
+        c.setdefault("action", "观望")
+        c.setdefault("act_emoji", "👀")
+        c.setdefault("buy_price", None)
+        c.setdefault("target", None)
+        c.setdefault("upside", None)
+        c.setdefault("reason", "")
     return c
 
 
@@ -275,6 +343,9 @@ def compute_buy_candidates(rec, u, date, code2boards, bmap, ladder_warn=None,
     period ∈ short/mid/long：个性化策略权重（PERIOD_PROFILES），影响各通道排序。
     """
     w = PERIOD_PROFILES.get(period, PERIOD_PROFILES["mid"])
+    # 市场准入（2026-09-05 #486）：科创板(688/689)、北交所(43/83/87/88/920)
+    # 用户未开通，推了也买不了 → 三池统一先过滤。
+    import mktfilter as _mkt
     ladder = []
     trend = []
     band = []
@@ -282,7 +353,7 @@ def compute_buy_candidates(rec, u, date, code2boards, bmap, ladder_warn=None,
     # ---- 连板票 ----
     for p in (rec.get("ladder_plans") or []):
         code = p.get("code")
-        if not code:
+        if not code or not _mkt.tradable(code):
             continue
         name = p.get("name") or ""
         board = primary_board(code, code2boards)
@@ -308,7 +379,7 @@ def compute_buy_candidates(rec, u, date, code2boards, bmap, ladder_warn=None,
     import zones as _z
     for t in (rec.get("trend") or []):
         code = t.get("code")
-        if not code:
+        if not code or not _mkt.tradable(code):
             continue
         st = t.get("entry_state") or (t.get("entry") or {}).get("entry_state")
         # 只推「当下就是买点」的票：过热勿追/已破位/等回踩 一律不进买点候选
@@ -348,23 +419,24 @@ def compute_buy_candidates(rec, u, date, code2boards, bmap, ladder_warn=None,
     import zones as _z
     for b in (rec.get("band_trade") or []):
         code = b.get("code")
-        if not code:
+        if not code or not _mkt.tradable(code):
             continue
         bz = b.get("buy_zone")
         sz = b.get("sell_zone")
         close = b.get("close")
         if not bz:
             continue
-        # 只留「回到阶段底附近」的票，远离买区的跳过
-        if close and bz[1] and close > float(bz[1]) * 1.05:
+        # 只留「回到阶段底附近」的票，远离买区的跳过（bandtrade 已限 ≤箱底×1.12；
+        # bz[1]=箱底×1.05，×1.07 ≈ 箱底×1.12，与引擎口径对齐）
+        if close and bz[1] and close > float(bz[1]) * 1.07:
             continue
         name = b.get("name") or ""
         board = b.get("board") or "—"
         touches = b.get("touches") or 0
-        bounce = b.get("bounce") or 0
-        # 综合分拉开差距：阶段底触底次数(反复确认) + 刚启动反弹幅度；封顶 85，
+        tops = b.get("tops") or 0
+        # 综合分拉开差距：箱底回踩次数(支撑可靠) + 箱顶触及次数(上沿有效)；封顶 85，
         # 余量留给板块强度加权（board_bonus ±25），避免全 100 失去区分度。
-        base = min(85, 40 + min(touches, 10) * 2.0 + min(max(bounce, 0), 18) * 0.6)
+        base = min(85, 40 + min(touches, 10) * 2.0 + min(tops, 10) * 1.5)
         bonus = board_bonus(board, bmap)
         # 近端可执行买区
         _bs = [x for x in (u.bars.get(code) or []) if x["d"] <= date]
@@ -380,15 +452,22 @@ def compute_buy_candidates(rec, u, date, code2boards, bmap, ladder_warn=None,
             code, name, "波段", board, bz, sz, b.get("stop"), base, bonus,
             "阶段底买点", buy_now=_buy_now, buy_pull=_buy_pull,
             extra={"close": b.get("close"), "bottom": b.get("bottom"),
-                   "touches": touches, "bounce": bounce}))
+                   "touches": touches, "tops": tops,
+                   "pos_in_box": b.get("pos_in_box"),
+                   # #488：阶段底→区间高点与空间，供决策行与理由展示
+                   "range_low": b.get("range_low") or b.get("bottom"),
+                   "range_high": b.get("range_high"),
+                   "upside": b.get("upside")}))
 
     ladder.sort(key=lambda x: -x["score"])
     trend.sort(key=lambda x: -x["score"])
     band.sort(key=lambda x: -x["score"])
+    # #487：每池收紧（6/8/8 → 5/6/6）——决策卡改成两行后单条更长，
+    # 保持推送总量不膨胀，宁可少推几只也要每只看得清。
     return {
-        "ladder": ladder[:6],
-        "trend": trend[:8],
-        "band": band[:8],
+        "ladder": ladder[:5],
+        "trend": trend[:6],
+        "band": band[:6],
         "ladder_warn": ladder_warn,
         "period": w["label"],
     }

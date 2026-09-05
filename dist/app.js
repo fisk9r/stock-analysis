@@ -4712,35 +4712,43 @@
         h += card('💼 持仓今日操作', '<div class="empty">未配置持仓（在「持股监测」页添加）</div>', '');
       }
 
-      /* ② 买点候选：合并连板/趋势/波段，按综合分排序，只列可买/微超 */
+      /* ② 买点候选：合并连板/趋势/波段。
+         2026-09-05 #487：决策优先——第一列就是答案（✅现在买/⏳等回踩/👀观望），
+         不再让用户从 8 列数字里自己猜结论。 */
       var all = [];
       (BC.ladder || []).forEach(function (c) { all.push(c); });
       (BC.trend || []).forEach(function (c) { all.push(c); });
       (BC.band || []).forEach(function (c) { all.push(c); });
-      all.sort(function (a, b) { return (b.score || 0) - (a.score || 0); });
+      var _ord = { '现在买': 0, '等回踩': 1, '观望': 2 };
+      all.sort(function (a, b) {
+        var oa = _ord[a.action] != null ? _ord[a.action] : 3;
+        var ob = _ord[b.action] != null ? _ord[b.action] : 3;
+        return oa !== ob ? oa - ob : (b.score || 0) - (a.score || 0);
+      });
       if (all.length) {
         var crows = all.map(function (c) {
-          var bz = c.buy_zone || [], sz = c.sell_zone || [];
-          var zn = (bz.length === 2 && bz[0] != null) ? (f(bz[0], 2) + '~' + f(bz[1], 2)) : '—';
-          var sn = (sz.length === 2 && sz[0] != null) ? (f(sz[0], 2) + '~' + f(sz[1], 2)) : '—';
           var kcol = c.kind === '连板' ? C.gold : C.up;
-          var score = c.score || 0;
-          var scol = score >= 70 ? 'var(--up)' : (score >= 55 ? 'var(--gold)' : 'var(--muted)');
-          var bb = (c.board_bonus != null && c.board_bonus !== 0) ? ('<span class="' + (c.board_bonus > 0 ? 'up' : 'down') + '">' + (c.board_bonus > 0 ? '+' : '') + f(c.board_bonus, 0) + '</span>') : '<span class="muted">—</span>';
+          var acl = c.action === '现在买' ? 'ok' : (c.action === '观望' ? 'hold' : 'hold');
+          var aemoji = c.act_emoji || '👀';
+          var up = c.upside;
+          var upS = (up != null) ? ' <span class="' + (up >= 0 ? 'up' : 'down') + '">' + (up >= 0 ? '+' : '') + f(up, 1) + '%</span>' : '';
+          var tgt = (c.target != null) ? (f(c.target, 2) + upS) : '—';
+          var bp = (c.buy_price != null) ? f(c.buy_price, 2) : '—';
+          var stp = (c.stop != null) ? f(c.stop, 2) : '—';
           return '<tr>' +
+            '<td><span class="ent ' + acl + '">' + aemoji + ' ' + E(c.action || '观望') + '</span></td>' +
             '<td><span class="bd" style="border-color:' + kcol + ';color:' + kcol + '">' + E(c.kind) + '</span> ' + stk(c.code, c.name) + '</td>' +
             '<td>' + E(c.board || '—') + '</td>' +
-            '<td class="num">' + f(c.close != null ? c.close : 0, 2) + '</td>' +
-            '<td class="num" style="color:var(--up)">' + zn + '</td>' +
-            '<td class="num" style="color:var(--down)">' + sn + '</td>' +
-            '<td class="num" style="color:' + scol + ';font-weight:700">' + f(score, 0) + '</td>' +
-            '<td class="num">' + bb + '</td>' +
-            '<td>' + E(c.entry_state || '') + '</td>' +
+            '<td class="num" style="color:var(--up)">' + bp + '</td>' +
+            '<td class="num">' + tgt + '</td>' +
+            '<td class="num" style="color:var(--down)">' + stp + '</td>' +
+            '<td class="num" style="font-weight:700">' + f(c.score || 0, 0) + '</td>' +
+            '<td class="note">' + E(c.reason || '') + '</td>' +
             '</tr>';
         }).join('');
-        h += card('🎯 买点候选（只推当下是买点的票）', table([
-          { t: '类型/个股' }, { t: '板块' }, { t: '现价', a: 'num' }, { t: '买区(近端)', a: 'num' }, { t: '卖区', a: 'num' }, { t: '综合分', a: 'num' }, { t: '板块加成', a: 'num' }, { t: '买点状态' }
-        ], crows), '收拢连板/趋势/波段三池，只留「可买/微超」；综合分=基础分+板块强度加权（今日强势板块自动加分）。给卖点无意义，故只列当下可介入区间。');
+        h += card('🎯 买点候选（✅=现在买 ⏳=等回踩价 👀=观望）', table([
+          { t: '决策' }, { t: '类型/个股' }, { t: '板块' }, { t: '买价', a: 'num' }, { t: '目标(空间)', a: 'num' }, { t: '止损', a: 'num' }, { t: '分', a: 'num' }, { t: '一句话理由' }
+        ], crows), '第一列就是答案：✅ 现在买（现价已在买区内）/ ⏳ 等回踩到给定价位再买 / 👀 观望。已按市场准入过滤——仅沪深主板+创业板（科创板/北交所未开通不推）。');
       } else {
         h += card('🎯 买点候选', '<div class="empty">今日无明确买点候选</div>', '');
       }

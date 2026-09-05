@@ -7,6 +7,11 @@ import shutil
 import time
 import tempfile as _tf
 
+# 测试隔离红线（2026-09-05 #485 事故加固）：本 suite 曾因测试用真实股票代码
+# （600500 中化国际）且推送未被隔离，在非交易时段向用户真实外发了一条「买入」
+# 推送。这里在 import runner 之前就强制关闭一切真实外发，双保险。
+os.environ["EXE_NO_PUSH"] = "1"
+
 BASE = r"C:\Users\Basshunter-j\WorkBuddy\2026-08-04-11-06-17\stock-analysis"
 EXE = os.path.join(BASE, "tools", "executor")
 sys.path.insert(0, EXE)
@@ -450,11 +455,14 @@ _tmpdb2 = os.path.join(_tfdir2, "sim.db")
 _bs.DB_PATH = _tmpdb2
 _bb = _bs.SimBroker()
 # 构造候选：st=3 高开 2.2%（竞价 BUY 线）+ 盘中微红 +0.8%（chase BUY）
-_sigs = [{"code": "600500", "name": "中化国际", "streak": 3, "close": 9.80,
+# 2026-09-05 #485：测试一律用 999998/999999 这类**不存在的代码 + 明显的测试名**，
+# 绝不再用真实股票（曾用 600500 中化国际，泄漏成真实「买入」推送，用户已割肉
+# 却在非交易时段收到该票买入提示）。即便推送隔离失效也一眼可辨是测试数据。
+_sigs = [{"code": "999998", "name": "测试票甲", "streak": 3, "close": 9.80,
           "market_type": "limitup", "source": "core", "tag": "core",
           "auction_rule": ""}]
 def _fake_quote(codes, **kw):
-    return {"600500": {"name": "中化国际", "open": 10.02, "price": 10.10,
+    return {"999998": {"name": "测试票甲", "open": 10.02, "price": 10.10,
                        "prev_close": 9.80, "high": 10.15, "low": 9.99,
                        "float_mv": 120.0, "stamp": time.strftime("%Y%m%d") + "103000"}}
 runner.realtime_quote = _fake_quote
@@ -465,31 +473,47 @@ _scan_cfg = {"broker": "sim",
                       "intraday_cut": 0.7},
              "notify": {}}
 _mkt = {"mode": "NORMAL", "reason": "测试"}
-_bl, _nb = runner._scan_buys(_bb, _scan_cfg, _sigs, _mkt, data=None)
+# force=True：单测可能在非交易时段（夜间/周末）运行，
+# 绕过 _scan_buys 内部新增的交易时段硬闸（#485 加固）。
+_bl, _nb = runner._scan_buys(_bb, _scan_cfg, _sigs, _mkt, data=None, force=True)
 ck("_scan_buys 盘中确认买入成交", _nb == 1, "n_buy=%s lines=%s" % (_nb, _bl))
 if _nb == 1:
-    _pos = [p for p in _bb.positions(open_only=True) if p["code"] == "600500"]
+    _pos = [p for p in _bb.positions(open_only=True) if p["code"] == "999998"]
     ck("_scan_buys 持仓入库", len(_pos) == 1, str(len(_pos)))
-    ck("_scan_buys 金额0.7折", 0 < (_pos[0].get("volume") * _pos[0].get("avg_price", 0)) 
+    ck("_scan_buys 金额0.7折", 0 < (_pos[0].get("volume") * _pos[0].get("avg_price", 0))
        <= 100000 * 0.65 * 0.7 + 1, str(_pos[0]))
 # 同票二次巡逻：持仓幂等拒绝
-_bl2, _nb2 = runner._scan_buys(_bb, _scan_cfg, _sigs, _mkt, data=None)
+_bl2, _nb2 = runner._scan_buys(_bb, _scan_cfg, _sigs, _mkt, data=None, force=True)
 ck("_scan_buys 持仓幂等", _nb2 == 0, "n_buy=%s" % _nb2)
 # 盘中走弱（fade -3%）→ ABORT 不买
 def _fake_quote_weak(codes, **kw):
-    return {"600777": {"name": "弱票", "open": 10.0, "price": 9.65,
+    return {"999999": {"name": "测试票乙", "open": 10.0, "price": 9.65,
                        "prev_close": 9.9, "float_mv": 100.0,
                        "stamp": time.strftime("%Y%m%d") + "103000"}}
 runner.realtime_quote = _fake_quote_weak
-_sigs2 = [{"code": "600777", "name": "弱票", "streak": 3, "close": 9.9,
+_sigs2 = [{"code": "999999", "name": "测试票乙", "streak": 3, "close": 9.9,
            "market_type": "limitup", "source": "core", "tag": "core",
            "auction_rule": ""}]
-_bl3, _nb3 = runner._scan_buys(_bb, _scan_cfg, _sigs2, _mkt, data=None)
+_bl3, _nb3 = runner._scan_buys(_bb, _scan_cfg, _sigs2, _mkt, data=None, force=True)
 ck("_scan_buys 不接飞刀", _nb3 == 0, "n_buy=%s" % _nb3)
 # FREEZE 环境不开新仓
 _mkt_f = {"mode": "FREEZE", "reason": "弱市"}
-_bl4, _nb4 = runner._scan_buys(_bb, _scan_cfg, _sigs, _mkt_f, data=None)
+_bl4, _nb4 = runner._scan_buys(_bb, _scan_cfg, _sigs, _mkt_f, data=None, force=True)
 ck("_scan_buys FREEZE拦截", _nb4 == 0, "n_buy=%s" % _nb4)
+# 非交易时段硬闸（#485 事故加固）：force=False 且当前不在交易时段时一律拒买
+# 与 runner 内实现同口径：周末(weekday>=5) 同样拒买
+import datetime as _dtm
+_h, _m = runner._sh_now()
+_wd = (_dtm.datetime.utcnow() + _dtm.timedelta(hours=8)).weekday()
+_in_win = (_wd < 5) and (((9 * 60 + 15) <= (_h * 60 + _m) <= (11 * 60 + 35)) or
+                         ((13 * 60) <= (_h * 60 + _m) <= (15 * 60 + 5)))
+runner.realtime_quote = _fake_quote
+_bl5, _nb5 = runner._scan_buys(_bb, _scan_cfg, _sigs2, _mkt, data=None, force=False)
+if _in_win:
+    ck("_scan_buys 交易时段内放行", _nb5 >= 0, "n_buy=%s" % _nb5)
+else:
+    ck("_scan_buys 非交易时段拒买", _nb5 == 0 and any("⛔" in x for x in _bl5),
+       "n_buy=%s lines=%s" % (_nb5, _bl5))
 # 清理
 try:
     _bb.con.close()

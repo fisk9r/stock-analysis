@@ -1739,9 +1739,14 @@ def _scan_data_load(cfg, force=False):
         return None, [], {"mode": "NORMAL", "reason": ""}, False
 
 
-def _scan_buys(broker, cfg, sigs, mkt, data=None):
+def _scan_buys(broker, cfg, sigs, mkt, data=None, force=False):
     """盘中机动买入（2026-09-05 #481：用户需求「交易日交易时段全时段都可根据
     判断买入」）。
+
+    2026-09-05 事故加固（#485）：本函数被直接调用过（离线测试），绕过
+    _run_scan_inner 的时段闸，在周五深夜非交易时段发出「买入中化国际」的真实
+    推送。故在此入口**再卡一道交易时段硬闸**——任何调用路径（含测试直调）
+    在非交易时段一律拒买，force=True（仅单元测试/EXE_FORCE_TRADE 用）才放行。
 
     决策链与 09:25 开仓通道同构，但形态门换用 chase_gate（盘中微红横盘确认，
     与尾盘 late_gate 同口径回测）：
@@ -1759,6 +1764,21 @@ def _scan_buys(broker, cfg, sigs, mkt, data=None):
     降噪：无成交轮次只留痕不推送；每笔成交前 _act_notify 先推后买（用户纪律）。
     """
     lines, n_buy = [], 0
+    # 交易时段硬闸（纯本地判定，不依赖网络/调用方）：任何路径在非交易时段拒买。
+    # 含**周末排除**——只判时分会让周六 10:40 落进 09:15-11:35 窗口被误放行
+    # （2026-09-05 实测发现；CI cron 虽已写 1-5，本地 --loop/手动直调无此保护）。
+    if not force:
+        _h, _m = _sh_now()
+        _now_min = _h * 60 + _m
+        import datetime as _dt
+        _wd = (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).weekday()
+        _in_win = (_wd < 5) and (
+            ((9 * 60 + 15) <= _now_min <= (11 * 60 + 35)) or
+            ((13 * 60) <= _now_min <= (15 * 60 + 5)))
+        if not _in_win:
+            _why = "周末" if _wd >= 5 else "非交易时段 %02d:%02d" % (_h, _m)
+            _log("巡逻买入拒绝：%s" % _why)
+            return ["- ⛔ 拒买（%s）" % _why], 0
     if mkt.get("mode") == "FREEZE":
         _log("巡逻买入：大盘环境 FREEZE，本轮不开新仓")
         return ["- 🧊 巡逻 FREEZE：%s" % mkt.get("reason", "")], 0

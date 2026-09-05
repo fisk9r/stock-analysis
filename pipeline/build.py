@@ -585,6 +585,17 @@ def run(date_override=None, dedup_close=False):
     except Exception as _e:
         log("  实测胜率降权跳过：%r" % _e)
 
+    # 市场准入（2026-09-05 #486 用户拍板）：科创板(688/689)、北交所
+    # (43/83/87/88/920) 未达开通门槛，推了也买不了 → 全推荐桶统一剔除，
+    # 从源头保证「推送出去的票 = 用户能买的票」。
+    try:
+        import mktfilter as _mktf
+        _cut = _mktf.filter_rec(rec)
+        if _cut:
+            log("  市场准入过滤（仅沪深主板+创业板）：剔除 %d 条" % _cut)
+    except Exception as _e:
+        log("  市场准入过滤跳过：%r" % _e)
+
     # 连板预期空间引擎（用户需求 2026-08-27）：挖掘「明天有机会买的连板票」，
     # 给买入/卖出区间、止损与预期高度（如 3板→预期5板）；高位票只标注不拦。
     # 2026-08-27 升级：环境动态修正（情绪/接力regime/梯队健康度三元组）。
@@ -806,7 +817,9 @@ def run(date_override=None, dedup_close=False):
                 continue
             _seen_codes.add(_x["code"])
             _trend_final.append(_x)
-        rec["trend"] = _trend_final[:20]
+        # 市场准入（#486）：趋势池同样剔除科创板/北交所
+        import mktfilter as _mktf2
+        rec["trend"] = [x for x in _trend_final[:20] if _mktf2.tradable(x.get("code"))]
         log("  趋势持久化：展示 %d 只（新 %d / 历史延续 %d）" % (
             len(rec["trend"]),
             sum(1 for x in rec["trend"] if x.get("is_new")),

@@ -1850,24 +1850,37 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
 
     # —— 段②：买点候选（连板 / 趋势 / 波段）——
     def _cand_line(c, kind_emoji):
-        # 优先显示「近端可执行买区」（now_zone，现价附近直接可挂单）；
-        # 结构性 buy_zone 仅在无 now_zone 时兜底。卖区=目标区（有用）。
-        bz = c.get("buy_now") or c.get("buy_zone") or [0, 0]
-        sz = c.get("sell_zone") or [0, 0]
-        pull = c.get("buy_pull")
-        bonus = c.get("board_bonus") or 0
-        btag = (" 板块+%.0f" % bonus) if bonus > 0 else ((" 板块%.0f" % bonus) if bonus < 0 else "")
-        extra = ""
-        if c.get("streak"):
-            extra = " %d板" % c["streak"]
-        if c.get("expected_top"):
-            extra += " 预期%s" % c["expected_top"]
-        pull_s = (" ｜ 回踩买%.2f~%.2f" % (pull[0], pull[1])) if (pull and pull[0] and pull[1] and abs(pull[0] - bz[0]) > 0.02) else ""
-        return ("- %s **%s**【%s】现价%.2f%s ｜ 买%.2f~%.2f%s 卖%.2f~%.2f ｜ "
-                "综合**%.0f分**(基础%.0f%s) ｜ %s"
-                % (kind_emoji, c.get("name", "?"), c.get("board", "—"), c.get("close") or 0,
-                   extra, bz[0], bz[1], pull_s, sz[0], sz[1], c.get("score", 0),
-                   c.get("base_score", 0), btag, c.get("entry_state", "")))
+        """2026-09-05 #487 重写（用户：「每个都要看半天，到底买还是不买也不清楚」）。
+
+        旧格式一行塞 8 个字段（现价/买区/回踩区/卖区/综合分/基础分/板块分/形态），
+        信息量够但没有结论。新格式两行，第一行就是答案：
+            行1  ✅ 现在买 立新能源(001258) 买12.35→13.80 **+11.7%** 止损11.90 ｜72分
+            行2     └ 阶段底12.22反复7次 · 电力
+        决策符号：✅ 现在买（现价已在买区内）⏳ 等回踩X元（给挂单价）👀 观望
+        """
+        act = c.get("act_emoji") or "👀"
+        action = c.get("action") or "观望"
+        px = c.get("buy_price")
+        tgt = c.get("target")
+        up = c.get("upside")
+        sp = c.get("stop")
+        _p = []
+        if px:
+            _p.append("买%.2f" % px)
+        if tgt:
+            _p.append("→%.2f" % tgt)
+        if up is not None:
+            _p.append("**%+.1f%%**" % up)
+        if sp:
+            _p.append("止损%.2f" % sp)
+        L1 = "- %s **%s** %s(%s) %s ｜ %.0f分" % (
+            act, action, c.get("name", "?"), c.get("code") or "",
+            " ".join(_p), c.get("score", 0))
+        rsn = c.get("reason") or ""
+        out = [L1]
+        if rsn:
+            out.append("    └ " + rsn)
+        return out
 
     _lad = cands.get("ladder") or []
     _tr = cands.get("trend") or []
@@ -1880,17 +1893,17 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
             L.append("")
             L.append("**🔥 连板票（次日竞价达标的才买，不追高）**")
             for c in _lad:
-                L.append(_cand_line(c, "🔥"))
+                L.extend(_cand_line(c, "🔥"))
         if _tr:
             L.append("")
-            L.append("**🚀 趋势票（回踩买点 / 现价可买）**")
+            L.append("**🚀 趋势票（✅=现价可买 ⏳=等回踩价）**")
             for c in _tr:
-                L.append(_cand_line(c, "🚀"))
+                L.extend(_cand_line(c, "🚀"))
         if _bd:
             L.append("")
-            L.append("**🔁 波段/阶段底（低吸反复确认的 stage 底）**")
+            L.append("**🔁 波段/阶段底（底部买→区间高点卖）**")
             for c in _bd:
-                L.append(_cand_line(c, "🔁"))
+                L.extend(_cand_line(c, "🔁"))
     else:
         if _buy_on:
             L.append("")

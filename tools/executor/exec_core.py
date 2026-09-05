@@ -165,6 +165,28 @@ def fetch_json(path: str, timeout: int = 30):
     return json.loads(body.decode("utf-8"))
 
 
+# ---- 市场准入（2026-09-05 #486 用户拍板）----
+# 用户实盘资金只能交易 沪深主板 + 创业板；科创板(688/689) 与 北交所
+# (43/83/87/88/920) 未达开通门槛（50 万 + 2 年）→ 模拟盘同样不买。
+# 理由：模拟盘买的票实盘买不了，模拟结果就失去参考价值。
+# 与 pipeline/mktfilter.py 同口径（执行器为独立零依赖目录，故内置一份）。
+_OK_PREFIX = ("600", "601", "603", "605",      # 沪市主板
+              "000", "001", "002", "003",      # 深市主板
+              "300", "301")                    # 创业板
+_KC_PREFIX = ("688", "689")                    # 科创板
+_BJ_PREFIX = ("43", "83", "87", "88", "920")   # 北交所
+
+
+def tradable_market(code):
+    """模拟盘/实盘可交易市场：沪深主板 + 创业板。"""
+    c = str(code or "").strip().zfill(6)
+    if len(c) != 6 or not c.isdigit():
+        return False
+    if c.startswith(_KC_PREFIX) or c.startswith(_BJ_PREFIX):
+        return False
+    return c.startswith(_OK_PREFIX)
+
+
 def extract_signals(data: dict) -> list:
     """从 data dict 提取带竞价决策线的可执行信号。
 
@@ -180,6 +202,9 @@ def extract_signals(data: dict) -> list:
     def _add(it, src):
         code = it.get("code")
         if not code or code in seen:
+            return
+        # 市场准入（#486）：科创板/北交所不买（用户未开通）
+        if not tradable_market(code):
             return
         ar = it.get("auction_rule") or {}
         # 2026-09-01 用户拍板：模拟盘什么票都能买，不只连板票。
