@@ -105,6 +105,9 @@ def detect_stage_bottom(u, date, code2boards=None, topn=8, window=60):
     # 25 日实测校准：立新能源 P15=12.10/P85=13.72（用户口径 12.22→13.8 ✓）、
     # 利通电子 P15≈114/P85≈125（用户口径 94→120，短窗更贴近当前箱体 ✓）。
     BOX_WIN = 25
+    # 日均波动下限（%，#488 用户口径「低位一直没动静的直接去除」）：
+    # 近 25 日平均单日涨跌幅绝对值 < 1% = 死水，箱体再标准也不做。
+    MIN_MOVE = 1.0
 
     # 市场准入（2026-09-05 #486）：科创板 / 北交所 用户未开通，源头即剔除
     import mktfilter as _mkt
@@ -146,6 +149,12 @@ def detect_stage_bottom(u, date, code2boards=None, topn=8, window=60):
         # 换手过滤（取近 20 日平均；bars 含 turn/换手字段）
         turns = [((b.get("turn") or b.get("换手")) or 0) for b in bars[-20:]]
         if _mean(turns) < MIN_TURN:
+            continue
+        # 低位死水剔除（2026-09-05 用户口径「在低位一直没动静的也直接去除」）：
+        # 近 25 日平均单日涨跌幅绝对值 < 1% = 箱体在但没波动，做了没肉也不动
+        _rets = [abs(closes[i] / closes[i - 1] - 1) * 100
+                 for i in range(len(closes) - BOX_WIN + 1, len(closes))]
+        if _mean(_rets) < MIN_MOVE:
             continue
 
         c_win = closes[-BOX_WIN:]
