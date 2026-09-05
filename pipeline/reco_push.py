@@ -491,6 +491,12 @@ def env_bias(data):
     promote = float(sent.get("promote_rate") or 0)
     zhaban = float(micro.get("zhaban_rate") or 0)
     score = float(sent.get("score") or 50)
+    # 单位归一（2026-09-05 线上核验发现：线上 zhaban_rate=63.2 是百分数，
+    # 按小数解释会显示"炸板率6320%"且阈值判断漂移）。>1 即百分数口径。
+    if promote > 1:
+        promote /= 100
+    if zhaban > 1:
+        zhaban /= 100
     w = {"连板": 1.0, "趋势": 1.0, "波段": 1.0}
     notes = []
     if promote >= 0.55 and zhaban <= 0.30:
