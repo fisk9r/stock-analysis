@@ -482,6 +482,15 @@ def md2html(title, text):
 
     def _color(line):
         out = line
+        # #493：买卖区间的价格区间整体上色（先于关键词替换，避免 span 打断正则）。
+        # A 股习惯：买入参考=红、卖出参考=绿——用户要求「买区卖区用不同颜色提示」。
+        import re as _re2
+        out = _re2.sub(r"买区([0-9.]+~[0-9.]+)",
+                       r'<span style="color:var(--buy);font-weight:700">买区\1</span>', out)
+        out = _re2.sub(r"挂单([0-9.]+)",
+                       r'<span style="color:var(--buy);font-weight:700">挂单\1</span>', out)
+        out = _re2.sub(r"卖区([0-9.]+~[0-9.]+)",
+                       r'<span style="color:var(--sell);font-weight:700">卖区\1</span>', out)
         for kw, css in (("买入", "var(--buy)"), ("加仓", "var(--buy)"), ("建仓", "var(--buy)"),
                         ("买点", "var(--buy)"), ("BUY", "var(--buy)"),
                         ("卖出", "var(--sell)"), ("止损", "var(--sell)"), ("清仓", "var(--sell)"),
@@ -1898,11 +1907,13 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
 
     # —— 段②前哨（2026-09-05 #490）：今日该买什么（三池合并环境加权 Top5）——
     # 直接回答用户「到底买连板还是区间」：不给三堆让人挑，给优先级清单。
+    # #493：条目间加空行（markdown 挤行）+ 段尾各池最高分透明说明（回答
+    # 「为什么只看到波段」——是环境加权后评分不达标，不是漏推/bug）。
     _tp = data.get("top_picks") or {}
     _tp_items = _tp.get("items") or []
     if _tp_items and _buy_on:
         L.append("")
-        L.append("## 🥇 今日该买什么（三池合并 · 按环境统一排序）")
+        L.append("## 🥇 今日该买什么（三池合并 · 按环境统一评分）")
         _env = _tp.get("env_note") or ""
         if _env:
             L.append("> 环境判断：%s" % _env)
@@ -1924,13 +1935,25 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
                 _p.append("**%+.1f%%**" % _up)
             if _sp:
                 _p.append("止损%.2f" % _sp)
-            L.append("%d. %s **%s** %s(%s)【%s】%s ｜ %.0f分"
+            L.append("")
+            L.append("%d. %s **%s** %s(%s)【%s%s】%s ｜ %.0f分"
                      % (_i + 1, _act, c.get("action") or "观望", c.get("name", "?"),
-                        c.get("code") or "", c.get("kind", "?"), " ".join(_p),
+                        c.get("code") or "", c.get("kind", "?"),
+                        c.get("board_tag") or "", " ".join(_p),
                         c.get("score", 0)))
             if c.get("reason"):
-                L.append("    └ " + c["reason"])
-        L.append("> （分类明细见下方「买点候选」）")
+                L.append("　　└ " + c["reason"])
+        # 落选透明化（#493 用户问「其他都不推荐是评分低还是 bug」）
+        _kmax = max([c.get("score") or 0 for c in (_lad or [])] or [0])
+        _tmax = max([c.get("score") or 0 for c in (_tr or [])] or [0])
+        _bmax = max([c.get("score") or 0 for c in (_bd or [])] or [0])
+        _gate = _tp_items[-1].get("score") or 0
+        L.append("")
+        L.append("> 📌 入榜依据：三池各自按环境加权后统一排序取前5。本次各池最高分："
+                 "波段%.0f / 趋势%.0f / 连板%.0f（门槛=第5名%.0f分）——低于门槛的类型"
+                 "当天没有能买的票，属评分如实反映，非漏推；全部明细见下方分类。"
+                 % (_bmax, _tmax, _kmax, _gate))
+        L.append("> （买卖区间红色=买入参考、绿色=卖出参考；分类明细见下）")
 
     if (_lad or _tr or _bd) and _buy_on:
         L.append("")

@@ -4732,7 +4732,7 @@
             '<td><span class="ent ' + acl + '">' + (c.act_emoji || '👀') + ' ' + E(c.action || '观望') + '</span></td>' +
             '<td><span class="bd" style="border-color:' + kcol + ';color:' + kcol + '">' + E(c.kind) + '</span> ' + stk(c.code, c.name) + '</td>' +
             '<td class="num" style="color:var(--up)">' + px + '</td>' +
-            '<td class="num">' + tgt + '</td>' +
+            '<td class="num" style="color:var(--down)">' + tgt + '</td>' +
             '<td class="num" style="color:var(--down)">' + stp + '</td>' +
             '<td class="num" style="font-weight:700">' + f(c.score || 0, 0) + '</td>' +
             '<td class="note">' + E(c.reason || '') + '</td>' +
@@ -4773,7 +4773,7 @@
             '<td><span class="bd" style="border-color:' + kcol + ';color:' + kcol + '">' + E(c.kind) + '</span> ' + stk(c.code, c.name) + '</td>' +
             '<td>' + E(c.board || '—') + '</td>' +
             '<td class="num" style="color:var(--up)">' + bp + '</td>' +
-            '<td class="num">' + tgt + '</td>' +
+            '<td class="num" style="color:var(--down)">' + tgt + '</td>' +
             '<td class="num" style="color:var(--down)">' + stp + '</td>' +
             '<td class="num" style="font-weight:700">' + f(c.score || 0, 0) + '</td>' +
             '<td class="note">' + E(c.reason || '') + '</td>' +

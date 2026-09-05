@@ -248,9 +248,10 @@ def compute_holdings_ops(u, date, con, code2boards, replace_pool=None):
 # ② 买点候选（连板 / 趋势 / 波段）
 # ═══════════════════════════════════════════════════════════════════════════
 def _one_line_reason(c):
-    """一句话理由（#487）：说清「为什么是它」，与决策行配合看秒懂。"""
+    """一句话理由（#487）：说清「为什么是它」，与决策行配合看秒懂。
+    #493：板块名后带今日强/弱标签（board_tag，由板块强度加权正负决定）。"""
     kind = c.get("kind")
-    board = c.get("board") or "—"
+    board = (c.get("board") or "—") + (c.get("board_tag") or "")
     if kind == "连板":
         return "%s板 · 预期%s · %s" % (c.get("streak") or "?",
                                        c.get("expected_top") or "—", board)
@@ -318,6 +319,9 @@ def _mk_cand(code, name, kind, board, bz, sz, sp, base, bonus, entry_state,
     }
     if extra:
         c.update(extra)
+    # 板块今日强/弱标签（#493 用户要求「板块后面加今日强弱」）：
+    # board_bonus 即板块强度加权（正=今日强势板块加分，负=走弱减分）。
+    c["board_tag"] = "🔥强" if bonus > 0 else ("❄弱" if bonus < 0 else "")
     # 决策字段依赖 extra（close/bottom/streak 等），须在 update 之后计算
     try:
         (c["action"], c["act_emoji"], c["buy_price"],
@@ -362,9 +366,14 @@ def compute_buy_candidates(rec, u, date, code2boards, bmap, ladder_warn=None,
         sp = p.get("stop")
         # 连板计划不直接带 close，但 buy_zone=[close*0.995, close*1.03] → close≈bz[0]/0.995
         _close = round(float(bz[0]) / 0.995, 2) if (bz and bz[0]) else None
-        base = (p.get("worth_score") or 0) or ((p.get("rr") or 0) * 10) or 55
-        if not base or base <= 0:
-            base = 55
+        # 2026-09-05 #493 评分 bug 修复：旧公式 base = rr*10（rr≈0.1 → 1 分），
+        # 量纲完全错误——连板票在 0-100 分制里全线趴底，环境加权后永远进不了
+        # Top5（线上实测连板最高 1 分 vs 波段 90 分）。改为有意义组合：
+        # 55 基础 + rr 贡献(≤25) + 10板到达率贡献(≤15)，ladder_plans 无
+        # worth_score 字段（grep 证实），此函数即连板池唯一定分处。
+        _rr = float(p.get("rr") or 0)
+        _r10 = float(p.get("reach10") or 0)
+        base = 55 + min(25, max(0, _rr) * 12) + min(15, max(0, _r10) * 15)
         bonus = board_bonus(board, bmap)
         ladder.append(_mk_cand(
             code, name, "连板", board, bz, sz, sp, base * w["ladder"], bonus,
