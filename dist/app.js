@@ -4750,7 +4750,7 @@
       (BC.ladder || []).forEach(function (c) { all.push(c); });
       (BC.trend || []).forEach(function (c) { all.push(c); });
       (BC.band || []).forEach(function (c) { all.push(c); });
-      var _ord = { '现在买': 0, '等回踩': 1, '观望': 2 };
+      var _ord = { '现在买': 0, '等回踩': 1, '次日竞价达标买': 1, '观望': 2 };
       all.sort(function (a, b) {
         var oa = _ord[a.action] != null ? _ord[a.action] : 3;
         var ob = _ord[b.action] != null ? _ord[b.action] : 3;

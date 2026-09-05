@@ -2600,6 +2600,97 @@ def _live_watch_movers(threshold=3.0):
     return out
 
 
+def _live_quote_simple(code):
+    """单票实时现价/涨跌幅（东财 push2 stock/get，fltt=2，#494 挂单监护用）。"""
+    import em_api
+    c = str(code).zfill(6)
+    m = 1 if c[0] in "69" else (0 if c[0] in "023" else None)
+    if m is None:
+        return None
+    try:
+        j = em_api.push2_json(
+            "/api/qt/stock/get?secid=%d.%s&fields=f43,f57,f58,f170&fltt=2&invt=2&_=%d"
+            % (m, c, int(time.time() * 1000)))
+        d = (j or {}).get("data") or {}
+        pct, price = _norm_em_quote(d.get("f170"), d.get("f43"))
+        if price:
+            return {"code": c, "name": d.get("f58") or "", "price": price, "pct": pct}
+    except Exception:
+        return None
+    return None
+
+
+def _order_monitor_lines(data):
+    """🎯 挂单监护（2026-09-05 #494，用户核心痛点「要一直盯盘」）：
+    盘中检查两类票并生成到价提醒——
+      ① 买点候选里的 ⏳等回踩票：现价 ≤ 挂单价×1.005 → 「回踩到位，可按计划买」
+      ② 持仓票：现价 ≥ 卖区下沿 → 「进入卖区，可分批止盈」；现价 ≤ 止损 → 「纪律离场」
+    独立于涨跌异动——没有急拉/涨停也要推（到价才是用户要等的信号）。
+    当日每票每类型只提醒一次（state/monitor_dedup.json），防止 30 分钟 cron 反复轰炸。
+    非交易时段由 push() 的 anomaly 时段闸兜底，本函数不判时间。"""
+    mon = []
+    targets = {}
+    bc = data.get("buy_candidates") or {}
+    for c in (bc.get("trend") or []) + (bc.get("band") or []):
+        if c.get("action") == "等回踩" and c.get("buy_price"):
+            targets[str(c.get("code"))] = {
+                "name": c.get("name") or c.get("code"), "kind": c.get("kind") or "",
+                "buy_price": c.get("buy_price"),
+                "sell0": ((c.get("sell_zone") or [None])[0]),
+                "stop": c.get("stop")}
+    for h in (data.get("holdings_ops") or []):
+        sz = h.get("sell_zone") or [None, None]
+        c = str(h.get("code") or "")
+        if not c:
+            continue
+        targets.setdefault(c, {"name": h.get("name") or c, "kind": "持仓",
+                               "buy_price": None, "sell0": sz[0], "stop": h.get("stop")})
+    if not targets:
+        return mon
+
+    # 当日去重账本（每票每类型一次）
+    _dd_path = os.path.join(ROOT, "state", "monitor_dedup.json")
+    try:
+        dd = json.load(open(_dd_path, encoding="utf-8")) if os.path.exists(_dd_path) else {}
+    except Exception:
+        dd = {}
+    today = time.strftime("%Y-%m-%d")
+    day_keys = set(dd.get(today) or [])
+
+    dirty = False
+    for c, t in targets.items():
+        q = _live_quote_simple(c)
+        px = (q or {}).get("price")
+        if not px:
+            continue
+        for typ, hit, fmt in (
+            ("buy", t.get("buy_price") and px <= t["buy_price"] * 1.005,
+             "- 🎯 **回踩到位** %s(%s)【%s】现价%.2f ≤ 挂单%.2f → 可按计划买入（止损%.2f）"
+             % (t["name"], c, t["kind"], px, t.get("buy_price") or 0, t.get("stop") or 0)),
+            ("sell", t.get("sell0") and px >= t["sell0"],
+             "- 🟢 **进入卖区** %s(%s) 现价%.2f ≥ 卖区下沿%.2f → 可分批止盈"
+             % (t["name"], c, px, t.get("sell0") or 0)),
+            ("stop", t.get("stop") and px <= t["stop"],
+             "- 🚨 **破止损** %s(%s) 现价%.2f ≤ 止损%.2f → 纪律执行，不抗单"
+             % (t["name"], c, px, t.get("stop") or 0)),
+        ):
+            if hit and (c + ":" + typ) not in day_keys:
+                mon.append(fmt)
+                day_keys.add(c + ":" + typ)
+                dirty = True
+    if dirty:
+        try:
+            os.makedirs(os.path.dirname(_dd_path), exist_ok=True)
+            # 只保留当日与昨日，防账本膨胀
+            keep = {k: v for k, v in dd.items() if k >= time.strftime("%Y-%m-%d",
+                                                                     time.localtime(time.time() - 86400))}
+            keep[today] = sorted(day_keys)
+            json.dump(keep, open(_dd_path, "w", encoding="utf-8"), ensure_ascii=False)
+        except Exception:
+            pass
+    return mon
+
+
 # ── 板块速览辅助（2026-09-04 用户需求：急拉/涨停要标板块，按板块聚合速览，一眼分辨热点）──
 _BOARD_CACHE = {}
 # 泛用/噪声板块：聚合速览时剔除，避免「融资融券板块急拉」这类无意义聚合
@@ -2785,6 +2876,17 @@ def _live_anomaly_summary(url, data=None):
             L.append("- **%s**(/%s) %s%% ｜ 现价 %s%s" % (w.get("n"), w.get("c"),
                       ("+" if w.get("pct", 0) >= 0 else "") + str(w.get("pct")),
                       w.get("price"), _buy))
+    # 🎯 挂单监护（2026-09-05 #494）：等回踩挂单价到位 / 持仓进卖区 / 破止损。
+    # 独立于涨跌异动——没有急拉也推（到价才是用户等的信号）；当日每票每类只提醒一次。
+    mon = []
+    try:
+        mon = _order_monitor_lines(data)
+    except Exception:
+        mon = []
+    if mon:
+        L.append("")
+        L.append("### 🎯 挂单监护（到价提醒 · 不用一直盯盘）")
+        L.extend(mon)
     if url:
         L.append("---")
         L.append("完整数据看板：%s" % url)
@@ -2793,7 +2895,7 @@ def _live_anomaly_summary(url, data=None):
             "codes": [str(it.get("c")) for it in zt_sorted]
                       + [str(m.get("f12")) for m in movers]
                       + [str(w.get("c")) for w in wm],
-            "has_signal": bool(zt_sorted) or bool(movers) or bool(wm)}
+            "has_signal": bool(zt_sorted) or bool(movers) or bool(wm) or bool(mon)}
 
 
 def _deploy_url():

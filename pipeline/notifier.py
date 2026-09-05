@@ -1876,6 +1876,13 @@ def _fmt_close_compact(data, url="", mode="close", con=None):
         _bz = c.get("buy_now") or c.get("buy_zone") or None
         _sz = c.get("sell_zone") or None
         _p = []
+        # 现价与买区位置提示（#494 用户要现价参照）：一眼看出离买点还有多远
+        if c.get("close") and _bz and len(_bz) >= 2 and _bz[1]:
+            _dist = (float(c["close"]) / float(_bz[1]) - 1) * 100
+            _p.append("现价%.2f(%s%.1f%%)"
+                      % (float(c["close"]), "+" if _dist >= 0 else "", _dist))
+        elif c.get("close"):
+            _p.append("现价%.2f" % float(c["close"]))
         if _bz and len(_bz) >= 2 and _bz[0]:
             _p.append("买区%.2f~%.2f" % (_bz[0], _bz[1]))
             # 挂单价与区间上沿不同才标注（等回踩时挂单价=区间上沿会重复）

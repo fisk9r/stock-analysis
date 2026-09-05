@@ -333,6 +333,12 @@ def _mk_cand(code, name, kind, board, bz, sz, sp, base, bonus, entry_state,
         c.setdefault("target", None)
         c.setdefault("upside", None)
         c.setdefault("reason", "")
+    # 连板池 action 语义修正（#494，用户验收发现误导）：连板票的操作是
+    # 「次日竞价达标介入」（gap≥2% 才追），不是当天现价买。旧逻辑 close 落在
+    # 买区内就给 ✅现在买，会让用户以为当天可以直接买——故在 _decide 之后覆盖。
+    if kind == "连板":
+        c["action"] = "次日竞价达标买"
+        c["act_emoji"] = "⏳"
     return c
 
 
@@ -538,15 +544,16 @@ def compute_top_picks(cands, data, topn=5):
     all_ = []
     for kind, key in (("连板", "ladder"), ("趋势", "trend"), ("波段", "band")):
         for c in (cands.get(key) or []):
-            # 2026-09-05 用户口径：top_picks 只收**能买的票**——✅现在买/⏳等回踩
-            # （有明确挂单价），👀观望（无买点）与天上票不进这个清单。
-            if (c.get("action") not in ("现在买", "等回踩")):
+            # 2026-09-05 用户口径：top_picks 只收**能买的票**——✅现在买 /
+            # ⏳等回踩（有明确挂单价）/ ⏳次日竞价达标买（连板的明确执行口径），
+            # 👀观望（无买点）与天上票不进这个清单。
+            if (c.get("action") not in ("现在买", "等回踩", "次日竞价达标买")):
                 continue
             x = dict(c)
             x["score"] = round(min(100, (c.get("score") or 0) * w.get(kind, 1.0)), 1)
             x["env_weight"] = round(w.get(kind, 1.0), 2)
             all_.append(x)
-    ordm = {"现在买": 0, "等回踩": 1, "观望": 2}
+    ordm = {"现在买": 0, "等回踩": 1, "次日竞价达标买": 1, "观望": 2}
     all_.sort(key=lambda x: (ordm.get(x.get("action"), 3), -(x.get("score") or 0)))
     return {
         "items": all_[:topn],
