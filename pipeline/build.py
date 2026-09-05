@@ -609,6 +609,10 @@ def run(date_override=None, dedup_close=False):
         rec["ladder_plans"] = ladderplan.scan(
             u, date, lus, lp_stats, topn=12,
             sent=sent, regime=regime, ladder_warn=_lw)
+        # 市场准入（#486）：ladder_plans 为后赋值桶，须单独过滤科创板/北交所
+        import mktfilter as _mktf3
+        rec["ladder_plans"] = [x for x in (rec["ladder_plans"] or [])
+                               if _mktf3.tradable(x.get("code"))]
         _lp_coef, _lp_note = ladderplan.env_mod(
             sent=sent, regime=regime, ladder_warn=_lw)
         log("  连板计划 %d 只（3板桶 n=%d，环境系数 %.2f %s）" % (
@@ -833,6 +837,10 @@ def run(date_override=None, dedup_close=False):
         # #4 (2026-09-02)：弱市（标杆热度=冷）将动量候选池由 12 缩至 6
         _mom_topn = 6 if bench_heat.get("level") == "冷" else 12
         rec["momentum"] = engine.screen_momentum(u, date, code2boards, topn=_mom_topn)
+        # 市场准入（#486）：momentum 为后赋值桶，单独过滤科创板/北交所
+        import mktfilter as _mktf4
+        rec["momentum"] = [x for x in (rec["momentum"] or [])
+                           if _mktf4.tradable(x.get("code"))]
         log("  强动量/连板余波筛选 %d 只" % len(rec.get("momentum") or []))
     except Exception as e:
         log("  强动量筛选失败（不影响主流程）：%r" % e)
@@ -1420,6 +1428,10 @@ def run(date_override=None, dedup_close=False):
     # ---- 综合最优解：融合连板/趋势/席位/题材/连续信号/区间，输出统一排序 Top20 ----
     try:
         rec["fused"] = engine.fuse_recommend(data)
+        # 市场准入（#486）：fused 为后赋值桶（线上核验发现 688170 残留于此），单独过滤
+        import mktfilter as _mktf5
+        rec["fused"] = [x for x in (rec["fused"] or [])
+                        if _mktf5.tradable(x.get("code"))]
         log("  综合最优解：融合 %d 只标的" % len(rec.get("fused") or []))
     except Exception as e:
         log("  综合最优解失败（不影响主流程）：%r" % e)
