@@ -87,8 +87,12 @@ def _attr_label(buy_gap, verdict_reason, sell_reason, pnl_pct):
     return "、".join(tags)
 
 
-def generate(db_path, period="weekly", today=None, min_fm_missing_ok=True):
-    """生成周期大总结。返回 {"title", "text", "stats"}；无数据时 text 说明。"""
+def generate(db_path, period="weekly", today=None, holdings=None):
+    """生成周期大总结。返回 {"title", "text", "stats"}；无数据时 text 说明。
+
+    holdings（#499 联动复盘，可选）：实盘持仓 ops 列表（compute_holdings_ops
+    输出：code/name/pnl/sell_zone/stop）——输出「实盘持仓纪律检查」段，
+    让大总结同时复盘实盘纪律，不只是模拟盘。"""
     d1, d2, label = _period_range(period, today)
     if not os.path.exists(db_path):
         return {"title": "%s（无数据）" % label,
@@ -210,6 +214,26 @@ def generate(db_path, period="weekly", today=None, min_fm_missing_ok=True):
         lessons.append("本周期无明显模式性错误 —— 保持现有决策线与仓位纪律，不因盈利加码")
     for x in lessons:
         L.append("- %s" % x)
+
+    # ---- 实盘持仓纪律检查（#499 联动复盘：大总结不只看模拟盘，也盯实盘纪律）----
+    if holdings:
+        L.append("")
+        L.append("### 💼 实盘持仓纪律检查（%d 只）" % len(holdings))
+        for h in holdings:
+            if not isinstance(h, dict) or not h.get("code"):
+                continue
+            pnl = h.get("pnl")
+            nm = "%s(%s)" % (h.get("name") or h.get("code"), h.get("code"))
+            if pnl is None:
+                L.append("- %s —— 浮盈数据缺失，补录成本后可纳入纪律检查" % nm)
+            elif pnl <= -5:
+                L.append("- %s 浮盈 **%+.1f%%** —— ⚠️ 实盘纪律：浮亏超 5%% 无条件减仓/清仓，别让小亏变大亏" % (nm, pnl))
+            elif pnl >= 10:
+                L.append("- %s 浮盈 **%+.1f%%** —— 落袋纪律：浮盈≥10%% 先减半仓锁定，剩余设移动止盈" % (nm, pnl))
+            elif pnl >= 2:
+                L.append("- %s 浮盈 %+.1f%% —— 状态良好：浮盈≥2%% 先减半仓的回测纪律可参考" % (nm, pnl))
+            else:
+                L.append("- %s 浮盈 %+.1f%% —— 状态正常，按计划持有" % (nm, pnl))
 
     text = "\n".join(L)
     stats = {"period": period, "d1": d1, "d2": d2, "closed": len(pnls),

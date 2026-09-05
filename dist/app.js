@@ -4456,6 +4456,20 @@
         '<div class="muted" style="font-size:12px;margin-top:6px">竞价纪律：高开≥2% 跟进 / st=2 需≥5% / 低开≤-2% 放弃 / 平开观望</div>';
         h += card('🔭 明日竞价关注（' + aw.length + ' 只）', awHtml, '今日未上车的高连板票（st≥3 高度溢价单调），次日竞价给好开价即二次入场机会');
       }
+      /* 周期大总结档案（2026-09-05 #499）：周/半月/月失败经验复盘，网站可回看 */
+      var RT = S.retro || {};
+      var rk = Object.keys(RT).sort(function (a, b) {
+        return ((RT[b] || {}).date || '').localeCompare((RT[a] || {}).date || '');
+      });
+      rk.forEach(function (k) {
+        var r = RT[k] || {};
+        var st = r.stats || {};
+        var lbl = k === 'weekly' ? '周总结' : (k === 'biweekly' ? '半月总结' : '月总结');
+        h += card('🗂 ' + lbl + '（' + E((r.date || '').slice(0, 10)) + ' · 胜率' + E(st.win_rate != null ? st.win_rate + '%' : '—') +
+          ' · 亏损' + E(st.losses != null ? st.losses : '—') + '笔）',
+          '<pre style="white-space:pre-wrap;font-size:12.5px;line-height:1.7;margin:0">' + E(r.text || '（空）') + '</pre>',
+          '失败单全列表+归因标签+选股调整建议；由执行器在周五盘后/每月1·15日自动生成并推送');
+      });
       return h;
     }
     /* 📡 推送中心（owner 专属）：解密 data/push_center.bin，渲染推送历史 + 按接收人自定义推送范围。

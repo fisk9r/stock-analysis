@@ -2119,6 +2119,31 @@ def apply_winrate_penalty(rec, wr_map, floor=0.6):
     return rec
 
 
+def cull_low_winrate_tags(rec, wr_map, threshold=45.0, min_n=8):
+    """胜率熔断（2026-09-05 #499 用户拍板「增加准确率」）：某 tag 近 90 日实测
+    胜率 < threshold(百分数) 且样本 ≥ min_n → 该 tag 的票**从买入桶直接剔除**
+    （降权对 32% 胜率的信号不够，熔断砍生成层）。返回剔除条数。"""
+    if not isinstance(rec, dict) or not wr_map:
+        return 0
+    bad = set()
+    for t, v in wr_map.items():
+        if isinstance(v, dict) and (v.get("n") or 0) >= min_n \
+                and (v.get("win_rate") or 0) < threshold:
+            bad.add(str(t))
+    if not bad:
+        return 0
+    cut = 0
+    for key in ("core", "relay", "ambush", "all", "trend", "momentum"):
+        arr = rec.get(key)
+        if not isinstance(arr, list):
+            continue
+        before = len(arr)
+        rec[key] = [it for it in arr
+                    if not (isinstance(it, dict) and str(it.get("tag")) in bad)]
+        cut += before - len(rec[key])
+    return cut
+
+
 def market_density_filter(items, level, min_worth=45):
     """#4 (2026-09-02)：弱市主动压低推荐密度。
 

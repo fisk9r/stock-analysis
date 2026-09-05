@@ -580,6 +580,14 @@ def run(date_override=None, dedup_close=False):
     try:
         _wr = notifier.tag_winrate(con, days=90)
         rec = engine.apply_winrate_penalty(rec, _wr)
+        # 胜率熔断（2026-09-05 #499 用户拍板）：胜率<45% 且样本≥8 的 tag
+        # 直接从买入桶剔除（砍生成层，不只降权），提高整体准确率。
+        try:
+            _culled = engine.cull_low_winrate_tags(rec, _wr, threshold=45.0, min_n=8)
+            if _culled:
+                log("  胜率熔断：剔除低胜率 tag 票 %d 条（<45%% 且 n≥8）" % _culled)
+        except Exception as _ce:
+            log("  胜率熔断跳过：%r" % _ce)
         log("  实测胜率降权：%s" % ("、".join("%s %.0f%%(n=%d)" % (k, v["win_rate"], v["n"])
                                              for k, v in list(_wr.items())[:4]) or "样本不足"))
     except Exception as _e:
@@ -1009,6 +1017,17 @@ def run(date_override=None, dedup_close=False):
     try:
         import reco_push as _rp
         _bmap = _rp.board_strength_map(rec, money, code2boards)
+        # 板块动量前瞻（2026-09-05 #499 用户拍板）：近 5 日板块成分平均涨幅
+        # → 「哪些板块在走强」提前一天加权买点候选（叠加到板块强度表）。
+        try:
+            _mom = _sector_momentum_map(u, code2boards, date)
+            for _n, _v in _mom.items():
+                _bmap[_n] = _bmap.get(_n, 0) + _v
+            for _n in list(_bmap.keys()):
+                _bmap[_n] = max(-40.0, min(40.0, _bmap[_n]))
+            log("  板块动量前瞻：%d 个板块融入强度表（近5日涨幅维度）" % len(_mom))
+        except Exception as _me:
+            log("  板块动量前瞻跳过：%r" % _me)
         _replace_pool = []
         for _x in (list(rec.get("trend") or []) + list(rec.get("ladder_plans") or [])):
             if _x.get("code"):
@@ -2102,6 +2121,9 @@ def run(date_override=None, dedup_close=False):
                              "holding_plans": dlast.get("holding_plans") or [],
                              "auction_watch": dlast.get("auction_watch") or [],
                              "summary_line": dlast.get("summary_line") or ""},
+                    # 周期大总结档案（2026-09-05 #499）：weekly/biweekly/monthly
+                    # 各存最近一份 {date, text, stats}，网站「模拟盘」页可回看
+                    "retro": simrev.get("retro") or {},
                     "curve": curve,
                     "months": [months[k] for k in sorted(months.keys())],
                 }
@@ -2705,6 +2727,43 @@ _GENERIC_BOARDS = ("昨日", "连板", "涨停", "融资融券", "深股通", "�
                    "数据中心", "股权转让", "深股通", "沪股通", "融资融券标的",
                    "HS300", "上证180", "上证380", "深证100", "央视50", "上证红利", "深证红利",
                    "标普", "MSCI中国", "中证红利", "深证100R")
+
+
+def _sector_momentum_map(u, code2boards, date):
+    """板块动量前瞻（2026-09-05 #499 用户拍板）：近 5 日板块成分股平均涨幅
+    → 「哪些板块正在走强」，提前一天给买点候选加权（叠加到板块强度表）。
+    纯本地 u.bars 计算，无外部依赖；5 日均涨 1% ≈ +8 分（封顶 ±25）。
+    剔除泛用概念噪声与成分<3 的板块。返回 {板块名: 动量分}。"""
+    import mktfilter as _mf
+    acc = {}
+    codes = list(u.stocks.keys()) if hasattr(u, "stocks") else []
+    for code in codes:
+        if not _mf.tradable(code):
+            continue
+        bars = u.bars_upto(code, date, 8)
+        if not bars or len(bars) < 6:
+            continue
+        c0 = bars[-6]["c"]
+        if not c0:
+            continue
+        c5 = bars[-1]["c"] / c0 - 1
+        if abs(c5) > 0.35:      # 停牌复牌/新股巨幅波动剔除
+            continue
+        for _, name, kind in (code2boards.get(code) or []):
+            if not name or str(name).endswith("_"):
+                continue
+            if kind == "concept" and any(g in name for g in _GENERIC_BOARDS):
+                continue
+            a = acc.setdefault(name, [0.0, 0])
+            a[0] += c5
+            a[1] += 1
+    out = {}
+    for name, (s, n) in acc.items():
+        if n < 3:
+            continue
+        avg5 = s / n * 100
+        out[name] = max(-25.0, min(25.0, avg5 * 8))
+    return out
 
 
 def load_code_boards():

@@ -1739,6 +1739,82 @@ def _scan_data_load(cfg, force=False):
         return None, [], {"mode": "NORMAL", "reason": ""}, False
 
 
+_MON_STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "state", "monitor_seen.json")
+
+
+def _exec_order_monitor(broker, data, cfg):
+    """挂单监护（2026-09-05 #499 用户拍板「到买点随时提醒」）：
+    每轮巡逻（15~30 分钟）顺带检查并推送：
+      ① 线上买点候选的 ⏳等回踩票：现价 ≤ 挂单价×1.005 → 「回踩到位」
+      ② 实盘持仓（holdings_ops）：现价 ≥ 卖区下沿 → 「进卖区可止盈」；
+         现价 ≤ 止损 → 「破止损纪律执行」
+    当日每票每类型只推一次（state/monitor_seen.json），防巡逻轮重复轰炸。
+    非交易时段由巡逻入口的时段闸兜底（巡逻本身只在盘中跑）。
+    模拟盘持仓的卖出由 Phase A 卖出裁决引擎负责，此处不重复。"""
+    targets = {}
+    bc = (data or {}).get("buy_candidates") or {}
+    for c in (bc.get("trend") or []) + (bc.get("band") or []):
+        if c.get("action") == "等回踩" and c.get("buy_price"):
+            targets[str(c.get("code"))] = {"name": c.get("name") or c.get("code"),
+                                           "buy_price": c.get("buy_price"),
+                                           "sell0": ((c.get("sell_zone") or [None])[0]),
+                                           "stop": c.get("stop")}
+    for h in (data or {}).get("holdings_ops") or []:
+        sz = h.get("sell_zone") or [None, None]
+        hc = str(h.get("code") or "")
+        if hc and (sz[0] or h.get("stop")):
+            targets.setdefault(hc, {"name": h.get("name") or hc, "buy_price": None,
+                                    "sell0": sz[0], "stop": h.get("stop")})
+    if not targets:
+        return
+    try:
+        quote = realtime_quote(list(targets.keys()))
+    except Exception as e:
+        _log("监护行情失败：%r" % e)
+        return
+    if not quote:
+        return
+    try:
+        seen = json.load(open(_MON_STATE, encoding="utf-8")) if os.path.exists(_MON_STATE) else {}
+    except Exception:
+        seen = {}
+    today = time.strftime("%Y-%m-%d")
+    keys = set(seen.get(today) or [])
+    dirty, hits = False, []
+    for c, t in targets.items():
+        px = (quote.get(c) or {}).get("price")
+        if not px:
+            continue
+        for typ, hit, fmt in (
+            ("buy", t.get("buy_price") and px <= t["buy_price"] * 1.005,
+             "🎯 **回踩到位** %s(%s) 现价%.2f ≤ 挂单%.2f → 可按计划买入（止损%.2f）"
+             % (t["name"], c, px, t.get("buy_price") or 0, t.get("stop") or 0)),
+            ("sell", t.get("sell0") and px >= t["sell0"],
+             "🟢 **进入卖区** %s(%s) 现价%.2f ≥ 卖区下沿%.2f → 可分批止盈"
+             % (t["name"], c, px, t.get("sell0") or 0)),
+            ("stop", t.get("stop") and px <= t["stop"],
+             "🚨 **破止损** %s(%s) 现价%.2f ≤ 止损%.2f → 纪律执行，不抗单"
+             % (t["name"], c, px, t.get("stop") or 0)),
+        ):
+            if hit and (c + ":" + typ) not in keys:
+                hits.append(fmt)
+                keys.add(c + ":" + typ)
+                dirty = True
+    if hits:
+        _notify_now(cfg, "🎯 挂单监护 · %d 条到价提醒" % len(hits), "\n".join(hits))
+        _log("挂单监护命中 %d 条，已推送" % len(hits))
+    if dirty:
+        try:
+            os.makedirs(os.path.dirname(_MON_STATE), exist_ok=True)
+            keep = {k: v for k, v in seen.items()
+                    if k >= time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))}
+            keep[today] = sorted(keys)
+            json.dump(keep, open(_MON_STATE, "w", encoding="utf-8"), ensure_ascii=False)
+        except Exception:
+            pass
+
+
 def _scan_buys(broker, cfg, sigs, mkt, data=None, force=False):
     """盘中机动买入（2026-09-05 #481：用户需求「交易日交易时段全时段都可根据
     判断买入」）。
@@ -1930,6 +2006,16 @@ def _run_scan_inner(cfg):
         _log("巡逻买入：无信号")
     else:
         _log("巡逻买入：数据未就绪，本轮顺延")
+
+    # ---- B2. 挂单监护（2026-09-05 #499 用户拍板「到买点随时提醒」）：----
+    # 每轮巡逻（15~30 分钟）顺带检查：①等回踩票挂单价到位 ②实盘持仓进卖区/破止损。
+    # 命中即推（先推后做纪律）；当日每票每类型只推一次。模拟盘持仓的卖出由
+    # Phase A 卖出裁决引擎负责，此处不重复。
+    if data_ok:
+        try:
+            _exec_order_monitor(broker, data, cfg)
+        except Exception as _e:
+            _log("挂单监护异常（不阻断巡逻）：%r" % _e)
 
     # ---- A. 持仓卖出裁决 ----
     try:
@@ -2559,6 +2645,9 @@ def run_review(cfg=None, push=True, force=False):
     # ---- 周期大总结（2026-09-05 #497 用户需求：周/半月/月，失败经验全展示）----
     # 周报：周五复盘后；半月报：每月 1/15 日；月报：每月 1 日（上一自然月）。
     # 独立于当日复盘推送（大总结信息量大，混在一起会淹没当日重点）。
+    # #499 联动复盘：同时拉线上实盘持仓，大总结附带「实盘持仓纪律检查」；
+    # 结果写入 sim_review.json 的 retro 字段 → 网站模拟盘页可回看。
+    _REVIEW_RETRO = {}
     try:
         import retrospect
         _sh_now_d = time.strftime("%Y-%m-%d", time.localtime())
@@ -2571,17 +2660,28 @@ def run_review(cfg=None, push=True, force=False):
             _plans.append("biweekly")
         if _d_part == "01":                  # 每月 1 日 → 上月总结
             _plans.append("monthly")
-        for _p in _plans:
-            _rep = retrospect.generate(os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "sim.db"),
-                _p, today=_sh_now_d)
-            if _rep and _rep.get("text"):
-                _notify(cfg, "🗂 模拟盘%s · 胜率%s%% 亏损%d笔"
-                        % (_rep["title"].split("（")[0].replace("模拟盘", ""),
-                           _rep.get("stats", {}).get("win_rate", "?"),
-                           _rep.get("stats", {}).get("losses", 0)),
-                        _rep["text"])
-                _log("周期大总结已推送：%s" % _p)
+        if _plans:
+            _hl = None
+            try:
+                _acc = cfg.get("account") or {}
+                if _acc.get("user_id") and _acc.get("passwd"):
+                    _data_r = fetch_user_data(_acc["user_id"], _acc["passwd"])
+                    _hl = (_data_r or {}).get("holdings_ops") or None
+            except Exception as _he:
+                _log("大总结实盘持仓拉取失败（跳过实盘纪律段）：%r" % _he)
+            for _p in _plans:
+                _rep = retrospect.generate(os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "sim.db"),
+                    _p, today=_sh_now_d, holdings=_hl)
+                if _rep and _rep.get("text"):
+                    _REVIEW_RETRO[_p] = {"date": _sh_now_d, "text": _rep["text"],
+                                         "stats": _rep.get("stats", {})}
+                    _notify(cfg, "🗂 模拟盘%s · 胜率%s%% 亏损%d笔"
+                            % (_rep["title"].split("（")[0].replace("模拟盘", ""),
+                               _rep.get("stats", {}).get("win_rate", "?"),
+                               _rep.get("stats", {}).get("losses", 0)),
+                            _rep["text"])
+                    _log("周期大总结已推送：%s" % _p)
     except Exception as _re:
         _log("周期大总结失败（不影响当日复盘）：%r" % _re)
 
@@ -2594,6 +2694,9 @@ def run_review(cfg=None, push=True, force=False):
             except Exception:
                 hist = {}
         hist["days"] = hist.get("days") or {}
+        # 周期大总结档案（#499）：weekly/biweekly/monthly 各留最近一份，网站回看
+        if _REVIEW_RETRO:
+            hist["retro"] = {**(hist.get("retro") or {}), **_REVIEW_RETRO}
         hist["days"][ds["date"]] = {
             "date": ds["date"],
             "total": bal["total"], "cash": bal["cash"], "market_value": bal["market_value"],
