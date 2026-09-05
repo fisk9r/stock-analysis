@@ -2794,7 +2794,7 @@ def _live_anomaly_summary(url, data=None):
     zt_sorted = sorted(zt, key=lambda x: -(x.get("lbc") or 0)) if zt else []
     L.append("### 🔥 实时涨停池（%d 只）" % len(zt))
     if zt_sorted:
-        for it in zt_sorted[:15]:
+        for it in zt_sorted[:10]:
             name = it.get("n", "?")
             code = it.get("c", "")
             lbc = it.get("lbc") or 1
@@ -2820,7 +2820,7 @@ def _live_anomaly_summary(url, data=None):
                                    "f12,f14,f2,f3,f62,f184", max_pages=3)
     except Exception as e:
         L.append("> 涨幅榜实时拉取暂不可用：%s" % str(e)[:40])
-    movers = [m for m in (mv or []) if 6 <= (m.get("f3") or 0) < 9.8]
+    movers = [m for m in (mv or []) if 7 <= (m.get("f3") or 0) < 9.8]  # #495 降噪：6→7%
     movers.sort(key=lambda x: -(x.get("f3") or 0))
     # 2026-09-04：板块急拉速览（涨停+急拉按板块聚合，一眼分辨热点），置于详情列表之前
     _surge = ([(str(it.get("c")), it.get("n", "?")) for it in zt_sorted]
@@ -2830,7 +2830,7 @@ def _live_anomaly_summary(url, data=None):
         L[4:4] = ["", "### 🔥 板块急拉速览（热点一眼辨）"] + _ov + [""]
     L.append("### ⚡ 涨幅异动（急拉 / 强势，前 12）")
     if movers:
-        for m in movers[:12]:
+        for m in movers[:8]:
             name = m.get("f14", "?")
             code = m.get("f12", "")
             pct = m.get("f3") or 0
@@ -2859,7 +2859,7 @@ def _live_anomaly_summary(url, data=None):
     # 关注股盘中实时异动（独立于涨停池/涨幅榜，单独成段）
     wm = []
     try:
-        wm = _live_watch_movers()
+        wm = _live_watch_movers(threshold=4.0)  # #495 降噪：3→4%
     except Exception:
         wm = []
     if wm:

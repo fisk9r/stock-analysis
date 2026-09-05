@@ -2480,6 +2480,41 @@ def run_review(cfg=None, push=True, force=False):
     # 网站模拟盘页拿不到 → 补上「明日竞价关注」卡片的数据源）
     ds["auction_watch"] = uniq if watch_items else []
 
+    # 区块3.8：逐笔复盘（2026-09-05 #496 用户要求复盘到位：为什么买这只、
+    # 判断依据是什么、盈了/亏了之后怎么总结）——依据与结果全部来自当日留痕。
+    _buys = [dc for dc in (ds.get("decisions") or []) if dc.get("action") == "BUY"]
+    _sells = [dc for dc in (ds.get("decisions") or [])
+              if dc.get("action") == "SELL" and dc.get("pnl_pct") is not None]
+    if _buys or _sells:
+        def _outcome(code):
+            for c in (ds.get("closed") or []):
+                if c.get("code") == code:
+                    return "当日平仓 %+.2f%%" % (c.get("pnl_pct") or 0)
+            for hp in (holding_plans or []):
+                if hp.get("code") == code and hp.get("pnl_pct") is not None:
+                    return "在持浮盈 %+.2f%%" % hp["pnl_pct"]
+            return "持仓中（明日计划见上）"
+
+        lines.append("")
+        lines.append("**🔍 逐笔复盘（依据 → 结果 → 教训）**")
+        for dc in _buys:
+            lines.append("- 🟢 买 %s(%s) @%.2f ｜ 依据：%s ｜ 结果：%s"
+                         % (dc.get("name"), dc["code"], dc.get("price") or 0,
+                            (dc.get("reason") or "")[:64], _outcome(dc["code"])))
+        for dc in _sells:
+            _pnl = dc.get("pnl_pct") or 0
+            _rs = dc.get("reason") or ""
+            if _pnl > 0:
+                _lesson = "利润兑现正确，同型信号可复制"
+            elif "断板" in _rs:
+                _lesson = "断板卖正确——错在买入端，同类高位票次日回避"
+            elif "止损" in _rs:
+                _lesson = "止损执行正确——回看买点是否追高/仓位是否过重"
+            else:
+                _lesson = "按规则离场；记录该票特征，避免同型重复买入"
+            lines.append("- 🔴 卖 %s(%s) %+.2f%% ｜ 原因：%s ｜ 教训：%s"
+                         % (dc.get("name"), dc["code"], _pnl, _rs[:40], _lesson))
+
     # 区块4：被拒/放弃留痕（压缩为一行汇总 + 最多 3 条明细）
     n_skip = sum(1 for dc in (ds.get("decisions") or [])
                  if dc.get("action") in ("WATCH", "SKIP", "FREEZE"))
@@ -2520,6 +2555,35 @@ def run_review(cfg=None, push=True, force=False):
         _notify(cfg, "📊 模拟盘复盘 %s（%+.2f%%）%s" % (ds["date"], ds["day_realized_pct"], verdict),
                 text)
         _ledger_mark("review")     # 推送成功才记账，失败允许下轮重推
+
+    # ---- 周期大总结（2026-09-05 #497 用户需求：周/半月/月，失败经验全展示）----
+    # 周报：周五复盘后；半月报：每月 1/15 日；月报：每月 1 日（上一自然月）。
+    # 独立于当日复盘推送（大总结信息量大，混在一起会淹没当日重点）。
+    try:
+        import retrospect
+        _sh_now_d = time.strftime("%Y-%m-%d", time.localtime())
+        _d_part = _sh_now_d[-2:]
+        _wday = time.strptime(_sh_now_d, "%Y-%m-%d").tm_wday
+        _plans = []
+        if _wday == 4:                       # 周五 → 周总结
+            _plans.append("weekly")
+        if _d_part in ("01", "15"):          # 每月 1/15 → 半月总结
+            _plans.append("biweekly")
+        if _d_part == "01":                  # 每月 1 日 → 上月总结
+            _plans.append("monthly")
+        for _p in _plans:
+            _rep = retrospect.generate(os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "sim.db"),
+                _p, today=_sh_now_d)
+            if _rep and _rep.get("text"):
+                _notify(cfg, "🗂 模拟盘%s · 胜率%s%% 亏损%d笔"
+                        % (_rep["title"].split("（")[0].replace("模拟盘", ""),
+                           _rep.get("stats", {}).get("win_rate", "?"),
+                           _rep.get("stats", {}).get("losses", 0)),
+                        _rep["text"])
+                _log("周期大总结已推送：%s" % _p)
+    except Exception as _re:
+        _log("周期大总结失败（不影响当日复盘）：%r" % _re)
 
     # ---- 写 sim_review.json（网站模块数据源；历史按日累积）----
     try:
